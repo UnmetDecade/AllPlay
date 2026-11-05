@@ -7,6 +7,40 @@
 
 ---
 
+## [v0.7] — HarmonyOS 无线真机端到端 · 2026-11-05
+
+鸿蒙（**Mate 60**）上也走通了：蓝牙 iAP2 把 iPhone 叫醒 → 同网 Wi-Fi → RTSP 协商 →
+**硬解上屏、横屏铺满、触摸可点**。协议核心一行没分叉，`core/airplay` 原样经 NAPI 编进 HAP。
+
+### 新增
+
+- **鸿蒙平台**：ArkTS + hvigor 工程（`harmony/`）。蓝牙 SPP（`socket.sppConnect`）、mDNS 广播、
+  屏幕尺寸走系统 API；协议全部在 `core/`，由 `liballplay_core.so` 经 NAPI 桥接。
+- **AVCodec 硬解上屏**（`harmony_decoder.cpp`）：`OH_VideoDecoder_CreateByMime` + 回调式输入输出，
+  `RenderOutputBuffer` 直接画到 `XComponent` 的 surface（surface id → `OHNativeWindow`）。
+- **全屏**：`/info` 里协商的显示分辨率改成**按屏幕长宽比**（1080p 档、宽封 1920，实测 1920×868），
+  iPhone 会按这个尺寸重排 CarPlay 界面；会话进来转横屏，断开转回竖屏。
+- **触摸回传**：`XComponent.onTouch` → 归一化坐标 → 事件通道 HID `touchReport`（双触点）。
+- **构建脚本**：`scripts/build-ohos-openssl.sh`（交叉编译 OHOS OpenSSL）、
+  `scripts/sync-harmony-identity.sh`（把 `identity/` 临时拷进 HAP rawfile，仍在 `.gitignore`）。
+
+### 修复
+
+- **avcC 的 SPS/PPS 必须 in-band**：`OH_MD_KEY_CODEC_CONFIG` 在这台机的解码器上被忽略
+  （系统日志 `pps is null` / `EVNT_PARAMETER_SETS_LOST`），改成每个 IDR 前补一份 AnnexB。
+- **手机每 ~5 秒重发同一份 avcC**：原先每次重建解码器，参考链清空、画面周期性卡住；
+  改成按 `csd + 尺寸 + 编码类型` 比对，相同就跳过重建。
+- **横竖屏切换后画面停住**：转屏会重建 `XComponent`，旧的 `OHNativeWindow` 指向已回收的 surface。
+  surface id 变化时拆掉重建，并用上次的 csd 立刻恢复，不等手机重发配置。
+
+### 已知限制
+
+- **音频只接住不播**：`IAudioOutput` 收下数据后丢弃，鸿蒙侧还没接 AudioRenderer。
+- **流式播放时没有退出入口**：画面铺满整块屏，启动页上的"取消"被盖住，只能从手机或系统侧退出。
+- 设备选择与热点 SSID/密码未持久化，应用重启后要重新选一次。
+
+---
+
 ## [v0.6] — macOS 无线真机端到端 · 2026-11-05
 
 真 iPhone 在 Mac 上走**蓝牙 iAP2 → 同网 Wi-Fi 投屏**跑通，并把"车机该有的常驻行为"补齐：
