@@ -21,7 +21,14 @@
 //   输出 **64 字节 raw r‖s**（不是 DER）。
 #pragma once
 
+// ALLPLAY_MFI_STUB：没有 OpenSSL 的构建（HarmonyOS 第一阶段只验链路层/识别，
+// 还没交叉编译 OpenSSL）。此时这个类只保留接口形状，load() 恒失败，
+// 无线触发在 mfiDir 为空时不加载身份、发空证书 —— 够验证到 0x1D02。
+#ifdef ALLPLAY_MFI_STUB
+using EVP_PKEY = void;
+#else
 #include <openssl/evp.h>
+#endif
 
 #include <cstdint>
 #include <memory>
@@ -55,6 +62,11 @@ public:
 
     /// 从目录加载（identity.pk8 / certificate.p7b）；失败写 err 并返回 nullptr
     static std::unique_ptr<CertificateMfiIdentity> load(const std::string& dir, std::string* err);
+
+    /// 从内存加载（字节来自 HAP rawfile 之类读不到路径的地方）；失败写 err 并返回 nullptr
+    static std::unique_ptr<CertificateMfiIdentity> loadFromMemory(const uint8_t* keyDer, size_t keyLen,
+                                                                  const uint8_t* certDer, size_t certLen,
+                                                                  std::string* err);
 
     const std::vector<uint8_t>& certificate() const override { return cert_; }
     std::vector<uint8_t> signDigest(const uint8_t* digest, size_t len,

@@ -6,7 +6,7 @@
 **协议核心只写一遍。** 每个平台只实现自己的"屏幕 / 喇叭 / 蓝牙 / 网络"，彼此平级 ——
 没有主次平台，也不共享平台代码。
 
-`GPL-3.0` · `Android ✅` · `Linux ✅` · `macOS ✅` · `Windows ⏳`
+`GPL-3.0` · `Android ✅` · `HarmonyOS ✅` · `Linux ✅` · `macOS ✅` · `Windows ⏳`
 
 ![AllPlay 在 macOS 上的启动页：等 iPhone 连接](docs/images/allplay-launcher-mac.png)
 
@@ -43,6 +43,7 @@ CarPlay 本该是 iPhone 和车机之间的私有链路。AllPlay 实现的是**
 | 平台 | 视频上屏 | 音频 | 无线触发 | 有线（USB） | 状态 |
 |---|---|---|---|---|---|
 | **Android** | MediaCodec 硬解 → Surface | AudioTrack | `BluetoothSocket`（JNI） | — | ✅ 端到端跑通 |
+| **HarmonyOS** | AVCodec NDK 硬解 → XComponent surface | ⏳（先接住不播） | ArkTS `socket.sppConnect` | — | ✅ **真机端到端**（蓝牙触发 → 投屏全屏 → 触摸，Mate 60） |
 | **Linux / Ubuntu** | ffmpeg 软解 → SDL2 纹理 | SDL2（AAC-LC / Opus / LPCM） | BlueZ：SDP + 裸 RFCOMM（客户端模式） | libusb + 内核 `cdc_ncm` | ✅ **真假两路都端到端跑通** |
 | **macOS** | 同 Linux（**共用同一份宿主代码**） | 同 Linux | IOBluetooth | —（macOS 无 `cdc_ncm`，未做） | ✅ **无线真机端到端**（蓝牙触发 → 投屏 → 触摸，掉线自动重连） |
 | **Windows** | ffmpeg（待接） | — | `AF_BTH`（待接入） | — | ⏳ 骨架 |
@@ -251,6 +252,26 @@ cd android && ./gradlew :app:assembleDebug      # 需要 Android SDK + NDK + 为
 NDK 需用 **r25c**（r26 起不支持 API 19）；OpenSSL 按 ABI 分目录（`openssl-arm64` / `openssl-arm`）。
 交叉编译说明见 `android/app/src/main/cpp/CMakeLists.txt` 顶部。
 
+### HarmonyOS（鸿蒙）
+
+```bash
+scripts/build-ohos-openssl.sh                   # ① 交叉编译 OpenSSL（产物在 tmp/ohos-ssl/，不入库）
+scripts/sync-harmony-identity.sh                # ② 把 identity/ 拷进 HAP 的 rawfile（已在 .gitignore）
+cd harmony && hvigorw assembleHap --mode module -p product=default
+hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
+```
+
+- 需要 **DevEco Studio**（HarmonyOS SDK + NDK），`harmony/build-profile.example.json5` 是签名配置的模板
+  —— 复制成 `harmony/build-profile.json5` 填自己的证书，真实配置不入库。
+- 协议全在 `core/`，经 NAPI 编进 `liballplay_core.so`；蓝牙 SPP、mDNS 广播、屏幕尺寸走 ArkTS 系统 API。
+- **视频**：`OH_VideoDecoder_CreateByMime` 硬解（NDK AVCodec），直接 `RenderOutputBuffer` 到
+  `XComponent` 的 surface。avcC 会转成 AnnexB 的 SPS/PPS 在每个 IDR 前 in-band 补一份
+  （`OH_MD_KEY_CODEC_CONFIG` 这条路在真机上没进解码器）。
+- **全屏**：按屏幕长宽比协商显示分辨率（如 1920×868），iPhone 会按这个尺寸重排 CarPlay 界面，
+  横屏后 1:1 铺满；启动页仍是竖屏。
+- **触摸**：XComponent `onTouch` → 归一化坐标 → `core` 的事件通道 → HID `touchReport`（双触点）。
+- 音频流已接住但暂不播放；流式播放时界面上的"取消"会被画面盖住。
+
 ## 当前状态
 
 | 里程碑 | 内容 | 状态 |
@@ -297,6 +318,7 @@ platform/
   posix/         Linux + macOS 适配（socket / avahi·dns_sd / bluez·IOBluetooth / libusb）
   windows/       Winsock2 / AF_BTH
 android/         Android 工程（Gradle：Kotlin + NDK C++ core + JNI → 系统 API）
+harmony/         HarmonyOS 工程（ArkTS + hvigor：core 经 NAPI 进 HAP，AVCodec 硬解 → XComponent）
 host/            桌面宿主（SDL2 / ffmpeg）
   bt_task          无线触发任务（--bt：主动把手机叫起来）
   wired_task       有线接入任务（--wired：USB 控制面两段式，见该文件顶部）

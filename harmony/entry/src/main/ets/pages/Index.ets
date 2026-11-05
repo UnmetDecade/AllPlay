@@ -1,87 +1,450 @@
-// ============================================================================
-// 鸿蒙 SPP 探针 —— 只为回答一个问题：
-//   这台鸿蒙设备能不能连上 iPhone 的 iAP2 服务，并收到它发回来的字节？
-// ============================================================================
-// 为什么先做这一步：AllPlay 的其它平台（Linux/macOS/Android）都是"连上蓝牙 → 跑 iAP2 →
-// 拿 Wi-Fi 配置 → 投屏"。鸿蒙这边链路能不能成立，取决于两件文档保证不了的事：
-//   1. sppConnect 能否连到 iPhone 那个自定义 UUID 的 SPP 服务；
-//   2. iPhone 认不认这个已经配对的鸿蒙设备，愿不愿意在上面开口说话。
-// 这两条只要有一条不成立，后面移植 core/ 的所有工作都是白做。所以先写这二十行。
-//
-// 判据（看日志）：
-//   · 出现 "sppConnect 成功"                     → 第 1 条成立
-//   · 收到 FF 5A 开头的数据帧 / 手机自己的 marker → 第 2 条也成立，可以往下做
-//   · 一直是 "已发 marker，等回应"               → 服务在，但手机不认（多半是 MFi/配对问题）
-// ============================================================================
+/**
+ * AllPlay · 鸿蒙启动页（连接引导）
+ *
+ * 版式照搬桌面 host/launcher.cpp（1540×850 设计稿）：
+ *   顶栏：品牌标 + AllPlay + 右上角胶囊（桌面是语言开关，这里换成「设置」）
+ *   居中：大标题 + 副标题
+ *   两栏：左 = 设备蓝牙名称卡片 + 配对提示；右 = 手机→蓝牙→中控屏 示意图
+ *          （宽屏并排，手机竖屏改上下排）
+ *   底部：取消按钮
+ *   页脚：状态点 + 状态文字（左）· AllPlay · CarPlay（右）
+ *
+ * 功能仍是"把 iPhone 连成 CarPlay 车机"：
+ *   ArkTS 管蓝牙（sppConnect/sppRead/sppWrite），core/iap2 在原生线程跑协议
+ *   （marker→SYN→ACK、MFi、识别、订阅、0x5703、0x4301）。
+ *   SSID / 密码在设置页填（右上角），存本地，不进仓库。
+ *
+ * 诊断：状态栏文字点一下展开/收起日志 —— 版面上看不出来，调试时有用。
+ */
 
 import { socket, connection } from '@kit.ConnectivityKit';
 import { abilityAccessCtrl, Permissions } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { router, window, display } from '@kit.ArkUI';
+import { mdns } from '@kit.NetworkKit';
+import { start as iap2Start, feed as iap2Feed, stop as iap2Stop,
+         isRunning as iap2Running, TriggerConfig,
+         startAirplayServer, stopAirplayServer, airplayServerPort, setVideoSurface, ReceiverConfig,
+         airplayIdentity, AirplayIdentity, probeCarPlay, hotspotIpv4,
+         sendTouch, TouchPoint } from 'liballplay_core.so';
 
-/// iPhone 的 iAP2 SPP 服务 UUID（和 Linux/macOS 端连的是同一个）
+import { PlayMark, BluetoothGlyph, GearIcon } from '../components/Glyphs';
+import { ConnectVisual } from '../components/ConnectVisual';
+import { WifiConfig, loadWifiConfig } from '../common/SettingsStore';
+import { localIpv4, linkedSsid, apIpv4, hotspotActive, netSummary } from '../common/NetInfo';
+import {
+  C_BLUE, C_CARD_LINE, C_EYEBROW, C_FOOTER, C_GREEN, C_HINT, C_INK,
+  C_LANG_LINE, C_MUTED, C_RED, C_RULE, C_TILE_BG, C_VISUAL_BG, C_VISUAL_LINE, C_WHITE
+} from '../common/Theme';
+
+/// iPhone 的 iAP2 SPP 服务 UUID（和 Linux/macOS/Android 端连的是同一个）
 const IAP2_UUID: string = '00000000-deca-fade-deca-deafdecacafe';
-
-/// iAP2 链路起始 marker：FF 55 02 00 EE 10。
-/// 无线场景里**配件不是发起方**：手机先发 marker，本端再回 SYN。
-/// 反过来只做一件事 —— 每秒发一次 marker，等手机开口。
-/// （ArkTS 不允许直接拿 Uint8Array.buffer 当 ArrayBuffer 用 —— 结构类型不支持，
-///   所以老老实实按字节填一个。）
-function markerBytes(): ArrayBuffer {
-  const bytes: number[] = [0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10];
-  const buf: ArrayBuffer = new ArrayBuffer(bytes.length);
-  const view: Uint8Array = new Uint8Array(buf);
-  for (let i = 0; i < bytes.length; i++) view[i] = bytes[i];
-  return buf;
-}
 
 /// 一条日志最多留多少（防止长时间跑把内存吃光）
 const MAX_LOGS: number = 200;
 
-function hexOf(buf: ArrayBuffer): string {
-  const u8 = new Uint8Array(buf);
-  let s: string = '';
-  for (let i = 0; i < u8.length; i++) {
-    const h: string = u8[i].toString(16);
-    s += (h.length < 2 ? '0' + h : h) + ' ';
-  }
-  return s.trim();
+/// 「能装 MFi 凭证」的配置形状：TriggerConfig 与 ReceiverConfig 都有这两个可选字段，
+/// 读 rawfile 的那段逻辑两处共用。
+interface MfiCarrier {
+  mfiKey?: ArrayBuffer;
+  mfiCert?: ArrayBuffer;
 }
+
+// ---- Bonjour TXT（照 core/airplay/server.cpp 的 Receiver::start 抄）----
+// features 必须与 core/airplay/info.cpp 的 DeviceInfo::features 默认值一致：
+// 0x615653AEE2 → TXT 写作 "0x5653aee2,0x61"（低 32 位,高 32 位）。
+const AP_FEATURES: string = '0x5653aee2,0x61';
+const AP_SRCVERS: string = '950.7.1';
+const AP_PROTOVERS: string = '1.1';
+const AP_MODEL: string = 'AllPlay1,1';
+
+/// TXT 的 value 是原始字节，不是字符串（ASCII 就够，TXT 值全是可见字符）
+function asciiBytes(s: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < s.length; i++) out.push(s.charCodeAt(i) & 0xff);
+  return out;
+}
+
+/// 链路状态（和桌面 launcher 的 LinkState 一一对应）
+const ST_IDLE: number = 0;
+const ST_CONNECTING: number = 1;
+const ST_STREAMING: number = 2;
+const ST_ERROR: number = 3;
 
 function nowStamp(): string {
   const d = new Date();
-  const p = (n: number): string => (n < 10 ? '0' + n : n.toString());
-  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  const h: string = d.getHours() < 10 ? '0' + d.getHours() : d.getHours().toString();
+  const m: string = d.getMinutes() < 10 ? '0' + d.getMinutes() : d.getMinutes().toString();
+  const s: string = d.getSeconds() < 10 ? '0' + d.getSeconds() : d.getSeconds().toString();
+  return h + ':' + m + ':' + s;
+}
+
+/// Uint8Array → 独立 ArrayBuffer（拷一份，保证只含有效字节）
+function toArrayBuffer(u8: Uint8Array): ArrayBuffer {
+  const buf: ArrayBuffer = new ArrayBuffer(u8.length);
+  const dst: Uint8Array = new Uint8Array(buf);
+  dst.set(u8);
+  return buf;
 }
 
 @Entry
 @Component
 struct Index {
-  @State status: string = '未开始';
+  @State linkState: number = ST_IDLE;
+  /// CarPlay 画面（XComponent）的控制器：拿 surface id 交给原生解码器
+  private xc: XComponentController = new XComponentController();
+  /// 向手机协商的显示分辨率（横屏）。手机按这个尺寸排版、编码、也给触摸坐标定标；
+  /// XComponent 按 videoW:videoH 摆，横屏后正好铺满。
+  @State videoW: number = 1280;
+  @State videoH: number = 720;
+  /// XComponent 实际占的尺寸（vp）。触摸坐标 t.x/t.y 就是相对它的 —— 用它归一化。
+  private compW: number = 0;
+  private compH: number = 0;
+  /// 手指 id → HID 槽位（0/1）。同一根手指必须一直落在同一槽，否则手机会当成两根手指数打架。
+  private touchSlots: Map<number, number> = new Map<number, number>();
+  private touchWarned: boolean = false;
+  private landscape: boolean = false;
+  @State dotTick: number = 0;
   @State devices: string[] = [];
+  @State selectedName: string = '未选择设备';
+  @State selectedAddr: string = '';
+  @State showPicker: boolean = false;
   @State logs: string[] = [];
-  @State connected: boolean = false;
+  @State showLogs: boolean = false;
+  @State ssid: string = '';
+  @State passphrase: string = '';
+  @State localIp: string = '';
+  /// 宽屏（平板 / 横屏）：两栏并排；手机竖屏改为上下排
+  @State wide: boolean = false;
 
   private socketId: number = -1;
-  private markerTimer: number = -1;
-  private gotFrame: boolean = false;
+  private connected: boolean = false;
+  private nativeRunning: boolean = false;
+  private dotTimer: number = -1;
+  private lastCoreLine: string = '';
+  private mdnsOn: boolean = false;
+  private airplayDeviceId: string = '';
+  private ctrlDiscovery: mdns.DiscoveryService | undefined = undefined;
 
+  // -------------------------------------------------------------------------
+  // 生命周期
+  // -------------------------------------------------------------------------
+  aboutToAppear(): void {
+    this.dotTimer = setInterval(() => {
+      this.dotTick = (this.dotTick + 1) % 4;
+    }, 400);
+    this.refreshLocalIp();
+    this.reloadSettings();
+    this.startProbe();
+    this.startMdns();
+    this.startCtrlWatch();
+  }
+
+  aboutToDisappear(): void {
+    if (this.dotTimer !== -1) {
+      clearInterval(this.dotTimer);
+      this.dotTimer = -1;
+    }
+    this.stopCtrlWatch();
+    this.stopMdns();
+    this.stopProbe();
+    this.disconnect();
+  }
+
+  // -------------------------------------------------------------------------
+  // Bonjour：广播 _airplay._tcp
+  // -------------------------------------------------------------------------
+  // 手机加入 Wi-Fi 后要在网络上"看见"这台车机。0x4301 只告诉它 IP/端口，
+  // 真机实测还要有这条 Bonjour 记录（和桌面宿主用 dns_sd 广播的是同一份 TXT），
+  // 否则它连 SYN 都不发 —— 表现就是"蓝牙握手全绿，画面永远不来"。
+  private startMdns(): void {
+    try {
+      const ctx = getContext(this);
+      const id: AirplayIdentity = airplayIdentity(ctx.filesDir + '/allplay-state');
+      if (id.deviceId.length === 0 || id.pk.length === 0) {
+        this.log('mDNS 未广播：拿不到 AirPlay 身份');
+        return;
+      }
+      const attrs: mdns.ServiceAttribute[] = [
+        { key: 'deviceid', value: asciiBytes(id.deviceId) },
+        { key: 'features', value: asciiBytes(AP_FEATURES) },
+        { key: 'flags', value: asciiBytes('0x4') },
+        { key: 'model', value: asciiBytes(AP_MODEL) },
+        { key: 'srcvers', value: asciiBytes(AP_SRCVERS) },
+        { key: 'protovers', value: asciiBytes(AP_PROTOVERS) },
+        { key: 'pi', value: asciiBytes(id.pi) },
+        { key: 'pk', value: asciiBytes(id.pk) },
+      ];
+      this.airplayDeviceId = id.deviceId;
+      const info: mdns.LocalServiceInfo = {
+        serviceType: '_airplay._tcp',
+        serviceName: 'AllPlay',
+        port: 7000,
+        serviceAttribute: attrs
+      };
+      mdns.addLocalService(ctx, info).then(() => {
+        this.mdnsOn = true;
+        this.log('mDNS：已广播 _airplay._tcp（deviceid=' + id.deviceId + '，端口 7000）');
+      }).catch((e: BusinessError) => {
+        this.log('mDNS 广播失败：' + e.code + ' ' + e.message);
+      });
+      // 车机还要以 _carplay._tcp 的身份出现（Android 端两个都广播，真机才认）
+      const carplay: mdns.LocalServiceInfo = {
+        serviceType: '_carplay._tcp',
+        serviceName: 'AllPlay',
+        port: 7000,
+        serviceAttribute: attrs
+      };
+      mdns.addLocalService(ctx, carplay).then(() => {
+        this.log('mDNS：已广播 _carplay._tcp');
+      }).catch((e: BusinessError) => {
+        this.log('mDNS 广播 _carplay._tcp 失败：' + e.code + ' ' + e.message);
+      });
+    } catch (e) {
+      const err = e as BusinessError;
+      this.log('mDNS 启动异常：' + err.code + ' ' + err.message);
+    }
+  }
+
+  private stopMdns(): void {
+    if (!this.mdnsOn) return;
+    this.mdnsOn = false;
+    try {
+      const ctx = getContext(this);
+      const info: mdns.LocalServiceInfo = {
+        serviceType: '_airplay._tcp',
+        serviceName: 'AllPlay',
+        port: 7000
+      };
+      mdns.removeLocalService(ctx, info).catch((e: BusinessError) => {
+        console.info('[allplay] mDNS 撤广播失败：' + e.code + ' ' + e.message);
+      });
+    } catch (e) {
+      const err = e as BusinessError;
+      console.info('[allplay] mDNS 撤广播异常：' + err.code + ' ' + err.message);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Bonjour 发现：找到手机的 _carplay-ctrl 并"戳一下"
+  // -------------------------------------------------------------------------
+  // 手机上有个 _carplay-ctrl._tcp 服务。给它发 GET /ctrl-int/1/connect
+  // （带 AirPlay-Receiver-Device-ID）之后，手机才会主动连我们的 RTSP 端口。
+  // 只发 0x4301、只广播 _airplay._tcp，手机是不会动的（Android 端同样靠这一枪）。
+  private startCtrlWatch(): void {
+    try {
+      const ctx = getContext(this);
+      const ds: mdns.DiscoveryService = mdns.createDiscoveryService(ctx, '_carplay-ctrl._tcp');
+      this.ctrlDiscovery = ds;
+      ds.on('serviceFound', (found: mdns.LocalServiceInfo) => {
+        this.log('mDNS：发现手机控制服务 ' + found.serviceName + '，开始解析');
+        mdns.resolveLocalService(ctx, found).then((r: mdns.LocalServiceInfo) => {
+          const host: string = r.host !== undefined ? r.host.address : '';
+          const port: number = r.port !== undefined ? r.port : 0;
+          if (host.length === 0 || port === 0) {
+            this.log('mDNS：_carplay-ctrl 解析不到地址/端口');
+            return;
+          }
+          this.log('mDNS：手机控制服务 ' + host + ':' + port + '，发 /ctrl-int/1/connect');
+          if (!probeCarPlay(host, port, this.airplayDeviceId)) {
+            this.log('carplay 探测没发出去（' + host + ':' + port + ' 连不上）');
+          }
+        }).catch((e: BusinessError) => {
+          this.log('mDNS：解析 _carplay-ctrl 失败 ' + e.code + ' ' + e.message);
+        });
+      });
+      ds.startSearchingMDNS();
+      this.log('mDNS：开始找手机的 _carplay-ctrl 服务');
+    } catch (e) {
+      const err = e as BusinessError;
+      this.log('mDNS 发现启动失败：' + err.code + ' ' + err.message);
+    }
+  }
+
+  private stopCtrlWatch(): void {
+    const ds: mdns.DiscoveryService | undefined = this.ctrlDiscovery;
+    if (ds === undefined) return;
+    this.ctrlDiscovery = undefined;
+    try {
+      ds.stopSearchingMDNS();
+      ds.off('serviceFound');
+    } catch (e) {
+      const err = e as BusinessError;
+      console.info('[allplay] 停止 mDNS 发现失败：' + err.code + ' ' + err.message);
+    }
+  }
+
+  /// 0x4301 要报的本机地址：热点开着就报热点网卡的地址，否则报默认网络地址
+  private refreshLocalIp(): void {
+    this.localIp = localIpv4();
+    // 热点网卡在 isHotspotActive() 不可用时也要能认出来：只要有名叫 wlan1/softap 的
+    // 网卡带 IPv4，它就是手机的落点（鸿蒙热点实测是 wlan1 = 192.168.43.1）。
+    // 先问 ArkTS 的网络列表（列得出 wlan1 的设备），再问内核（鸿蒙的 NetManager
+    // 不列 AP 网卡，只有 getifaddrs 看得到 192.168.43.1）
+    let ap: string = apIpv4();
+    if (ap.length === 0) {
+      try { ap = hotspotIpv4(); } catch (e) { ap = ''; }
+    }
+    if (ap.length > 0) this.localIp = ap;
+    this.log('本机网络：' + netSummary() +
+             ' → 0x4301 用 ' + (this.localIp.length > 0 ? this.localIp : '（没地址）') +
+             (ap.length > 0 ? '（热点网卡）' : ''));
+  }
+
+  /// 核对"设置里的 SSID"和"本机实际连的 Wi-Fi"——不一致就一定进不了 CarPlay
+  private checkNetwork(): void {
+    if (apIpv4().length > 0 || hotspotActive()) {
+      this.log('本机热点开着：0x4301 报 ' +
+               (this.localIp.length > 0 ? this.localIp : '（没有热点地址！）') +
+               '，手机应当加入热点「' + (this.ssid.length > 0 ? this.ssid : '未设置') + '」');
+      return;
+    }
+    const real: string = linkedSsid();
+    if (real.length === 0) {
+      this.log('本机 Wi-Fi 名读不到（未连 Wi-Fi 或没有 GET_WIFI_INFO 权限）');
+      return;
+    }
+    if (this.ssid.length === 0) {
+      this.log('本机 Wi-Fi：' + real + '（设置页还没填 SSID）');
+      return;
+    }
+    if (real !== this.ssid) {
+      this.log('⚠ 本机连的是「' + real + '」，设置里填的是「' + this.ssid +
+               '」——手机会去连后者，找不到本机。请把车机 Wi-Fi 改成同一个网络。');
+    } else {
+      this.log('本机 Wi-Fi：' + real + '（与设置一致）');
+    }
+  }
+
+  /// AirPlay 接收端：手机拿到 0x4301 之后 1 秒内就来连这个端口。
+  /// 这里答 /info、/pair-setup、/pair-verify、/auth-setup、SETUP —— 真的 RTSP 服务器
+  /// （core/airplay），不再是那个只收不答的探针。
+  private startProbe(): void {
+    try {
+      const geo: number[] = this.landscapeGeometry();
+      this.videoW = geo[0];
+      this.videoH = geo[1];
+      const cfg: ReceiverConfig = {
+        name: 'AllPlay',
+        port: 7000,
+        stateDir: getContext(this).filesDir + '/allplay-state',
+        btMac: '00:00:00:00:00:00',
+        width: this.videoW,
+        height: this.videoH
+      };
+      this.loadMfiInto(cfg);
+      const ok: boolean = startAirplayServer(cfg, (line: string) => {
+        this.log('[airplay] ' + line);
+        if (line.indexOf('连接进入') >= 0) {
+          this.lastCoreLine = line;
+          this.linkState = ST_CONNECTING;
+          this.setOrientation(true);   // 手机来连就转横屏：视频 SETUP 一到就有 surface
+        } else if (line.indexOf('RECORD') >= 0 || line.indexOf('会话建立') >= 0) {
+          this.lastCoreLine = line;
+          this.linkState = ST_STREAMING;
+          this.setOrientation(true);
+        }
+      });
+      if (ok) {
+        this.log('AirPlay 接收端：监听 ' + airplayServerPort() + '，本机 ' +
+                 (this.localIp.length > 0 ? this.localIp : '未联网'));
+      } else {
+        this.log('AirPlay 接收端启动失败（见上面的 [core] 日志）');
+      }
+    } catch (e) {
+      const err = e as BusinessError;
+      this.log('启动 AirPlay 接收端失败：' + err.code + ' ' + err.message);
+    }
+  }
+
+  private stopProbe(): void {
+    try {
+      stopAirplayServer();
+    } catch (e) {
+      const err = e as BusinessError;
+      this.log('停止 AirPlay 接收端失败：' + err.code + ' ' + err.message);
+    }
+  }
+
+  /// 协商给手机的显示分辨率：[宽, 高]（横屏，偶数）。
+  /// 用**屏幕自己的长宽比**而不是固定 16:9 —— 手机按这个尺寸排 CarPlay 界面，
+  /// 比例一致才能横屏铺满（16:9 在 20:9 的屏幕上必然上下/左右留黑边）。
+  /// 宽度封在 1920：再高 iPhone 编码和本机硬解都更吃力，画质收益却很小。
+  private landscapeGeometry(): number[] {
+    let w: number = 2688;
+    let h: number = 1216;
+    try {
+      const d = display.getDefaultDisplaySync();
+      w = Math.max(d.width, d.height);
+      h = Math.min(d.width, d.height);
+    } catch (e) {
+      const err = e as BusinessError;
+      this.log('读屏幕尺寸失败（按 2688x1216 算）：' + err.code);
+    }
+    if (w <= 0 || h <= 0) { w = 2688; h = 1216; }
+    const outW: number = Math.min(1920, w);
+    let outH: number = Math.round(outW * h / w / 2) * 2;
+    if (outH < 480) outH = 480;
+    return [outW, outH];
+  }
+
+  /// CarPlay 是横屏画面：会话进来就转横屏，断开转回竖屏（启动页是竖屏设计的）。
+  private setOrientation(land: boolean): void {
+    if (this.landscape === land) return;
+    this.landscape = land;
+    window.getLastWindow(getContext(this)).then((win: window.Window) => {
+      win.setPreferredOrientation(
+        land ? window.Orientation.LANDSCAPE : window.Orientation.PORTRAIT);
+    }).catch((e: BusinessError) => {
+      this.log('切换屏幕方向失败：' + e.code + ' ' + e.message);
+    });
+  }
+
+  /// 从设置页回来时刷新一次（SSID / 密码可能刚改过）
+  onPageShow(): void {
+    this.refreshLocalIp();
+    this.reloadSettings();
+  }
+
+  private async reloadSettings(): Promise<void> {
+    const cfg: WifiConfig = await loadWifiConfig(getContext(this));
+    this.ssid = cfg.ssid;
+    this.passphrase = cfg.passphrase;
+    this.checkNetwork();
+  }
+
+  // -------------------------------------------------------------------------
+  // 日志
+  // -------------------------------------------------------------------------
   private log(msg: string): void {
     const line: string = '[' + nowStamp() + '] ' + msg;
     const next: string[] = this.logs.slice();
     next.push(line);
     while (next.length > MAX_LOGS) next.shift();
     this.logs = next;
-    console.info('[probe] ' + msg);
+    console.info('[allplay] ' + msg);
   }
 
+  private coreLog(msg: string): void {
+    this.lastCoreLine = msg;
+    this.log('[core] ' + msg);
+    if (msg.indexOf('认证通过') >= 0) {
+      this.linkState = ST_STREAMING;
+    } else if (msg.indexOf('0xAA04') >= 0) {
+      this.linkState = ST_ERROR;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 蓝牙
+  // -------------------------------------------------------------------------
   private async ensurePermission(): Promise<boolean> {
     const at = abilityAccessCtrl.createAtManager();
     const perms: Permissions[] = ['ohos.permission.ACCESS_BLUETOOTH'];
     try {
       const r = await at.requestPermissionsFromUser(getContext(this), perms);
       const granted: boolean = r.authResults.length > 0 && r.authResults[0] === 0;
-      this.log(granted ? '蓝牙权限：已授权' : '蓝牙权限：被拒绝（authResults=' +
-        JSON.stringify(r.authResults) + '）');
+      this.log(granted ? '蓝牙权限：已授权' : '蓝牙权限：被拒绝');
       return granted;
     } catch (e) {
       const err = e as BusinessError;
@@ -90,109 +453,97 @@ struct Index {
     }
   }
 
-  /// 读一遍已配对设备。探针的前提：iPhone 已经在这台设备的蓝牙设置里配好。
+  /// 读一遍已配对设备（iPhone 必须先在系统蓝牙里配好）
   private refreshPaired(): void {
     try {
       const addrs: string[] = connection.getPairedDevices();
-      this.devices = [];
+      const list: string[] = [];
       for (let i = 0; i < addrs.length; i++) {
         const a: string = addrs[i];
         let name: string = '';
         try {
           name = connection.getRemoteDeviceName(a);
         } catch (e) {
-          name = '?';
+          name = '未知设备';
         }
-        this.devices.push(name + '  ' + a);
+        list.push(name + '  ' + a);
       }
-      this.log('已配对设备 ' + addrs.length + ' 个');
+      this.devices = list;
+      this.log('已配对设备 ' + list.length + ' 个');
     } catch (e) {
       const err = e as BusinessError;
       this.log('读已配对设备失败：' + err.code + ' ' + err.message);
-      this.status = '读已配对设备失败';
+      this.linkState = ST_ERROR;
     }
   }
 
-  private connect(deviceId: string): void {
+  private async openPicker(): Promise<void> {
     if (this.connected) {
-      this.log('已经连着 ' + this.socketId + '，先断开再连');
+      this.log('已连接 ' + this.selectedName + '，先断开再换设备');
       return;
     }
+    const ok: boolean = await this.ensurePermission();
+    if (ok) this.refreshPaired();
+    this.showPicker = true;
+  }
+
+  private connect(deviceId: string, name: string): void {
+    if (this.connected) return;
+    this.selectedName = name;
+    this.selectedAddr = deviceId;
+    this.linkState = ST_CONNECTING;
+
     const opt: socket.SppOptions = {
       uuid: IAP2_UUID,
-      // iAP2 要加密链路；如果这一步报 2900004（Profile not supported）或一直连不上，
-      // 下一个要试的就是把 secure 改成 false。
       secure: true,
       type: socket.SppType.SPP_RFCOMM
     };
-    this.log('sppConnect → ' + deviceId + '（uuid=' + IAP2_UUID + '）…');
-    this.status = '连接中…';
+    this.log('sppConnect → ' + deviceId);
     try {
       socket.sppConnect(deviceId, opt, (err: BusinessError, id: number) => {
         if (err) {
           this.log('sppConnect 失败：' + err.code + ' ' + err.message);
-          this.status = '连接失败（' + err.code + '）';
+          this.linkState = ST_ERROR;
           return;
         }
         this.socketId = id;
         this.connected = true;
-        this.gotFrame = false;
-        this.status = '已连接 socket=' + id + '，等手机开口';
-        this.log('sppConnect 成功，clientSocket=' + id);
+        this.linkState = ST_STREAMING;
+        this.log('已连接 socket=' + id);
         this.watchRead(id);
-        this.startMarker(id);
+        this.startNative(id);
       });
     } catch (e) {
       const err = e as BusinessError;
       this.log('sppConnect 抛异常：' + err.code + ' ' + err.message);
-      this.status = '连接失败';
+      this.linkState = ST_ERROR;
     }
   }
 
   private watchRead(id: number): void {
     socket.on('sppRead', id, (data: ArrayBuffer) => {
       if (!data || data.byteLength === 0) return;
-      const hex = hexOf(data);
-      this.log('收到 ' + data.byteLength + ' 字节：' + hex.slice(0, 160) +
-        (hex.length > 160 ? ' …' : ''));
-      // FF 5A 是 iAP2 数据帧的头；手机主动发的 marker 是 FF 55 02 00 EE 10。
-      if (!this.gotFrame && hex.indexOf('ff 5a') >= 0) {
-        this.gotFrame = true;
-        this.status = '✅ 收到 iAP2 数据帧 —— 蓝牙这条路成立';
-        this.log('★ 看到 FF 5A 数据帧：手机认了这个配件');
-      } else if (hex.indexOf('ff 55 02 00 ee 10') >= 0) {
-        this.log('★ 收到手机自己的 marker');
-        if (!this.gotFrame) this.status = '收到手机 marker —— 链路已通';
-      }
+      // 收到的字节全部交给 core 的链路层，由它决定回 SYN / ACK / 识别报文
+      if (this.nativeRunning) iap2Feed(data);
     });
   }
 
-  private startMarker(id: number): void {
-    this.stopMarker();
-    const tick = (): void => {
+  private disconnect(): void {
+    this.touchSlots.clear();
+    this.setOrientation(false);
+    if (this.nativeRunning || iap2Running()) {
       try {
-        socket.sppWrite(id, markerBytes());
-        this.log('已发 marker（FF 55 02 00 EE 10）');
+        iap2Stop();
       } catch (e) {
         const err = e as BusinessError;
-        this.log('写 marker 失败：' + err.code + ' ' + err.message);
-        this.stopMarker();
+        this.log('停止原生触发失败：' + err.code + ' ' + err.message);
       }
-    };
-    tick();
-    this.markerTimer = setInterval(tick, 1000);
-  }
-
-  private stopMarker(): void {
-    if (this.markerTimer !== -1) {
-      clearInterval(this.markerTimer);
-      this.markerTimer = -1;
+      this.nativeRunning = false;
     }
-  }
-
-  private disconnect(): void {
-    this.stopMarker();
-    if (!this.connected) return;
+    if (!this.connected) {
+      this.linkState = ST_IDLE;
+      return;
+    }
     try {
       socket.sppCloseClientSocket(this.socketId);
       this.log('已断开 socket=' + this.socketId);
@@ -202,80 +553,548 @@ struct Index {
     }
     this.connected = false;
     this.socketId = -1;
-    this.status = '已断开';
+    this.linkState = ST_IDLE;
   }
 
-  aboutToDisappear(): void {
-    this.disconnect();
+  // -------------------------------------------------------------------------
+  // 原生 iAP2
+  // -------------------------------------------------------------------------
+  private startNative(id: number): void {
+    if (iap2Running()) {
+      this.log('原生触发已经在跑，忽略重复启动');
+      return;
+    }
+    const cfg: TriggerConfig = {
+      name: 'AllPlay',
+      model: 'AllPlay1,1',
+      manufacturer: 'AllPlay',
+      serial: '000000000001',
+      firmware: '1.0',
+      hardware: '1.0',
+      // 鸿蒙不开放本机蓝牙地址；识别报文 group 17 要 6 字节，用全 0 占位。
+      // 实测：group 17 **必须发**——删掉它手机会回 0x1D03（识别被拒，
+      // body 里的参数 id 正是 0x0011=17）；发全 0 则会 0x1D02 通过。
+      btMac: '00:00:00:00:00:00',
+      ssid: this.ssid,
+      passphrase: this.passphrase,
+      securityType: 2,
+      airPlayPort: 7000,
+      mfiDir: '',
+      timeoutMs: 45000,
+      // AirPlay 配对身份落盘在应用沙箱里 —— 0x4301 的 publicKey 由它生成
+      stateDir: getContext(this).filesDir + '/allplay-state'
+    };
+    if (this.localIp.length > 0) cfg.ip = this.localIp;
+    this.loadMfiInto(cfg);
+
+    if (this.ssid.length === 0) {
+      this.log('还没设置 Wi-Fi（右上角「设置」）——0x5703 会发空的网络配置');
+    }
+
+    this.nativeRunning = true;
+    this.log('原生 iAP2 触发启动');
+    iap2Start(cfg, (data: ArrayBuffer) => {
+      // core 线程给的字节，必须在 ArkTS 主线程写进 socket
+      try {
+        socket.sppWrite(id, data);
+      } catch (e) {
+        const err = e as BusinessError;
+        this.log('sppWrite 失败：' + err.code + ' ' + err.message);
+      }
+    }, (line: string) => {
+      this.coreLog(line);
+    });
   }
 
-  build() {
-    Column({ space: 12 }) {
-      Text('AllPlay · 鸿蒙 SPP 探针')
-        .fontSize(22)
+  /// 从 HAP 的 rawfile 里读 MFi 凭证（构建前用 scripts/sync-harmony-identity.sh 拷进去）。
+  private loadMfiInto(cfg: MfiCarrier): void {
+    try {
+      const rm = getContext(this).resourceManager;
+      const key: Uint8Array = rm.getRawFileContentSync('identity/identity.pk8');
+      const cert: Uint8Array = rm.getRawFileContentSync('identity/certificate.p7b');
+      cfg.mfiKey = toArrayBuffer(key);
+      cfg.mfiCert = toArrayBuffer(cert);
+      this.log('MFi 身份已读入：私钥 ' + key.length + ' 字节，证书 ' + cert.length + ' 字节');
+    } catch (e) {
+      const err = e as BusinessError;
+      this.log('HAP rawfile 里没有 identity/：' + err.code + ' ' + err.message);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 文案
+  // -------------------------------------------------------------------------
+  private dots(): string {
+    let s: string = '';
+    for (let i = 0; i < this.dotTick; i++) s += '.';
+    return s;
+  }
+
+  private footerText(): string {
+    switch (this.linkState) {
+      case ST_CONNECTING:
+        return '正在连接' + this.dots();
+      case ST_STREAMING:
+        return this.lastCoreLine.length > 0 ? this.lastCoreLine : '已连接';
+      case ST_ERROR:
+        return '连接失败，请重试';
+      default:
+        return '等待设备连接' + this.dots();
+    }
+  }
+
+  private dotColor(): string {
+    if (this.linkState === ST_CONNECTING) return C_BLUE;
+    if (this.linkState === ST_ERROR) return C_RED;
+    return C_GREEN;
+  }
+
+  // -------------------------------------------------------------------------
+  // 界面片段
+  // -------------------------------------------------------------------------
+  @Builder
+  header() {
+    Row() {
+      PlayMark({ diameter: 26, color: C_INK })
+      Text('AllPlay')
+        .fontSize(20)
         .fontWeight(FontWeight.Bold)
-      Text('先确认这台设备能连上 iPhone 的 iAP2 服务，再谈移植 CarPlay。')
-        .fontSize(13)
-        .fontColor('#666666')
+        .fontColor(C_INK)
+        .margin({ left: 9 })
+      Blank()
+      // 桌面这里是语言胶囊（EN / 中文）；鸿蒙换成设置入口
+      Row() {
+        GearIcon({ diameter: 15, color: C_INK })
+        Text('设置')
+          .fontSize(13)
+          .fontColor(C_INK)
+          .margin({ left: 5 })
+      }
+      .height(32)
+      .padding({ left: 12, right: 12 })
+      .borderRadius(16)
+      .border({ width: 1, color: C_LANG_LINE })
+      .backgroundColor(C_WHITE)
+      .onClick(() => {
+        router.pushUrl({ url: 'pages/Settings' });
+      })
+    }
+    .width('100%')
+    .height(60)
+    .padding({ left: 16, right: 16 })
+  }
 
-      Text(this.status)
-        .fontSize(15)
-        .fontWeight(FontWeight.Medium)
+  @Builder
+  deviceCard() {
+    Column() {
+      Text('设备蓝牙名称')
+        .fontSize(12)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(C_EYEBROW)
         .width('100%')
-        .padding(10)
-        .backgroundColor('#F2F2F2')
-        .borderRadius(8)
 
-      Row({ space: 8 }) {
-        Button('申请权限 + 读已配对设备')
-          .fontSize(14)
-          .onClick(async () => {
-            const ok: boolean = await this.ensurePermission();
-            if (ok) this.refreshPaired();
-          })
-        Button('断开')
-          .fontSize(14)
-          .enabled(this.connected)
-          .onClick(() => this.disconnect())
+      Row() {
+        Stack() {
+          BluetoothGlyph({ radius: 14, color: '#1E9BE0' })
+        }
+        .width(40)
+        .height(40)
+        .backgroundColor(C_TILE_BG)
+        .borderRadius(11)
+
+        Column() {
+          Text(this.selectedName)
+            .fontSize(16)
+            .fontColor(C_INK)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (this.selectedAddr.length > 0) {
+            Text(this.selectedAddr)
+              .fontSize(11)
+              .fontColor(C_HINT)
+              .margin({ top: 2 })
+          }
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+        .margin({ left: 14 })
+
+        Text(this.connected ? '已连接' : '选择')
+          .fontSize(12)
+          .fontColor(C_BLUE)
       }
       .width('100%')
+      .height(68)
+      .padding({ left: 12, right: 14 })
+      .margin({ top: 10 })
+      .backgroundColor(C_WHITE)
+      .borderRadius(14)
+      .border({ width: 1, color: C_CARD_LINE })
+      .shadow({ radius: 8, color: 'rgba(26,38,58,0.06)', offsetY: 3 })
+      .onClick(() => {
+        this.openPicker();
+      })
 
-      if (this.devices.length === 0) {
-        Text('没有已配对设备。先到系统「设置 → 蓝牙」里和 iPhone 配对，再回来点上面的按钮。')
-          .fontSize(13)
-          .fontColor('#999999')
-      } else {
-        Text('点一台设备开始连接（要选 iPhone；配错的设备会一直连不上）')
-          .fontSize(13)
-          .fontColor('#666666')
-        ForEach(this.devices, (d: string) => {
-          Button(d)
-            .fontSize(14)
-            .width('100%')
-            .enabled(!this.connected)
-            .onClick(() => {
-              // "名字  AA:BB:.." —— 地址固定在末尾 17 个字符
-              const addr: string = d.slice(d.length - 17);
-              this.connect(addr);
-            })
-        }, (d: string) => d)
-      }
+      Text('请在手机蓝牙列表中选择此设备进行配对，并确保手机 Wi-Fi 已开启。')
+        .fontSize(12)
+        .fontColor(C_HINT)
+        .lineHeight(19)
+        .width('100%')
+        .margin({ top: 12 })
+    }
+    .width('100%')
+  }
 
-      Text('日志').fontSize(14).fontWeight(FontWeight.Medium).width('100%')
+  @Builder
+  visualPanel() {
+    Column() {
+      ConnectVisual({ heightVp: this.wide ? 250 : 180 })
+    }
+    .width('100%')
+    .borderRadius(16)
+    .backgroundColor(C_VISUAL_BG)
+    .border({ width: 1, color: C_VISUAL_LINE })
+    .clip(true)
+  }
+
+  @Builder
+  logPanel() {
+    Column() {
+      Text('诊断日志')
+        .fontSize(12)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(C_EYEBROW)
+        .width('100%')
+        .margin({ bottom: 6 })
       List({ space: 2 }) {
         ForEach(this.logs, (l: string) => {
           ListItem() {
-            Text(l).fontSize(11).fontColor('#333333').width('100%')
+            Text(l)
+              .fontSize(10.5)
+              .fontColor('#333333')
+              .width('100%')
           }
         }, (l: string, i: number) => i.toString() + l)
       }
-      .layoutWeight(1)
       .width('100%')
+      .height(150)
       .padding(8)
       .backgroundColor('#FAFAFA')
-      .borderRadius(8)
+      .borderRadius(10)
     }
-    .padding(16)
+    .width('100%')
+    .margin({ top: 14 })
+  }
+
+  @Builder
+  pickerSheet() {
+    Column() {
+      Text('选择要连接的 iPhone')
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(C_INK)
+        .width('100%')
+      Text('只列出系统蓝牙里已配对的设备')
+        .fontSize(12)
+        .fontColor(C_HINT)
+        .width('100%')
+        .margin({ top: 4 })
+
+      if (this.devices.length === 0) {
+        Text('没有已配对设备。先到系统「设置 → 蓝牙」里和 iPhone 配对，再回来点这里。')
+          .fontSize(13)
+          .fontColor(C_MUTED)
+          .lineHeight(20)
+          .width('100%')
+          .margin({ top: 20 })
+        Blank()
+      } else {
+        List({ space: 6 }) {
+          ForEach(this.devices, (d: string) => {
+            ListItem() {
+              Text(d)
+                .fontSize(15)
+                .fontColor(C_INK)
+                .width('100%')
+                .padding({ left: 14, right: 14, top: 14, bottom: 14 })
+                .backgroundColor('#F7F8FA')
+                .borderRadius(12)
+            }
+            .onClick(() => {
+              // "名字  AA:BB:.." —— 地址固定在末尾 17 个字符
+              const addr: string = d.slice(d.length - 17);
+              const name: string = d.slice(0, d.length - 19).trim();
+              this.showPicker = false;
+              this.connect(addr, name);
+            })
+          }, (d: string) => d)
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .margin({ top: 14 })
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .padding({ left: 20, right: 20, top: 18, bottom: 20 })
+    .backgroundColor(C_WHITE)
+  }
+
+  // -------------------------------------------------------------------------
+  // 页面
+  // -------------------------------------------------------------------------
+  /// XComponent 起来后把 surface id 交给原生硬解。
+  /// 注意：surface 只在 XComponent 挂载时存在；卸载要立刻告诉原生（喂 0），
+  /// 否则解码器会往一块已经被系统回收的 surface 上画。
+  private attachSurface(): void {
+    try {
+      const id: string = this.xc.getXComponentSurfaceId();
+      this.log('[video] surface id=' + id);
+      setVideoSurface(id);
+    } catch (e) {
+      const err = e as BusinessError;
+      this.log('[video] 取 surface 失败：' + err.code + ' ' + err.message);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 触摸：屏幕上的手指 → 事件通道的 HID report
+  // -------------------------------------------------------------------------
+  /// XComponent 里的坐标是 vp、相对组件左上角；手机要的是**归一化 0..1**，
+  /// 所以除以组件的实际宽高。组件按 videoW:videoH 摆，画面铺满组件，两者比例一致。
+  private clamp01(v: number): number {
+    if (v < 0) return 0;
+    if (v > 1) return 1;
+    return v;
+  }
+
+  /// 找一个空槽（0 或 1）；两个都在用返回 -1（第三根手指忽略）。
+  private freeSlot(): number {
+    let used0: boolean = false;
+    let used1: boolean = false;
+    this.touchSlots.forEach((slot: number) => {
+      if (slot === 0) used0 = true;
+      else if (slot === 1) used1 = true;
+    });
+    if (!used0) return 0;
+    if (!used1) return 1;
+    return -1;
+  }
+
+  private onCarplayTouch(e: TouchEvent): void {
+    if (this.compW <= 0 || this.compH <= 0) return;
+    const xs: number[] = [0, 0];
+    const ys: number[] = [0, 0];
+    const downs: boolean[] = [false, false];
+    let any: boolean = false;
+
+    // 1) 先处理抬起：Up/Cancel 可能在 touches，也可能只在 changedTouches 里
+    for (let i = 0; i < e.changedTouches.length; i++) {
+      const t: TouchObject = e.changedTouches[i];
+      const slot: number | undefined = this.touchSlots.get(t.id);
+      if (slot === undefined) continue;
+      if (t.type !== TouchType.Up && t.type !== TouchType.Cancel) continue;
+      xs[slot] = this.clamp01(t.x / this.compW);
+      ys[slot] = this.clamp01(t.y / this.compH);
+      downs[slot] = false;
+      this.touchSlots.delete(t.id);
+      any = true;
+    }
+
+    // 2) 按着的 / 移动中的
+    for (let i = 0; i < e.touches.length; i++) {
+      const t: TouchObject = e.touches[i];
+      if (t.type === TouchType.Up || t.type === TouchType.Cancel) {
+        const slot: number | undefined = this.touchSlots.get(t.id);
+        if (slot === undefined) continue;
+        xs[slot] = this.clamp01(t.x / this.compW);
+        ys[slot] = this.clamp01(t.y / this.compH);
+        downs[slot] = false;
+        this.touchSlots.delete(t.id);
+        any = true;
+        continue;
+      }
+      let slot: number | undefined = this.touchSlots.get(t.id);
+      if (slot === undefined) {
+        const free: number = this.freeSlot();
+        if (free < 0) continue;   // 第三根手指：HID 描述符只有两个槽
+        slot = free;
+        this.touchSlots.set(t.id, slot);
+      }
+      xs[slot] = this.clamp01(t.x / this.compW);
+      ys[slot] = this.clamp01(t.y / this.compH);
+      downs[slot] = true;
+      any = true;
+    }
+    if (!any) return;
+
+    const contacts: TouchPoint[] = [
+      { x: xs[0], y: ys[0], down: downs[0] },
+      { x: xs[1], y: ys[1], down: downs[1] }
+    ];
+    if (!sendTouch(contacts) && !this.touchWarned) {
+      this.touchWarned = true;
+      this.log('[touch] 转发失败（事件通道还没建好）');
+    }
+  }
+
+  build() {
+    Stack() {
+    Column() {
+      this.header()
+      Divider().color(C_RULE).strokeWidth(1)
+
+      Scroll() {
+        Column() {
+          Text('欢迎使用AllPlay')
+            .fontSize(this.wide ? 31 : 27)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(C_INK)
+            .textAlign(TextAlign.Center)
+            .width('100%')
+            .margin({ top: this.wide ? 30 : 22 })
+
+          // 窄屏一行放不下（375vp 上会只剩"服务"两字掉到第二行），拆成两行更整齐
+          Text(this.wide ? '连接成功后，即可在车机屏幕使用完整的CarPlay服务'
+                         : '连接成功后，即可在车机屏幕\n使用完整的CarPlay服务')
+            .fontSize(13)
+            .fontColor(C_MUTED)
+            .textAlign(TextAlign.Center)
+            .lineHeight(21)
+            .width('100%')
+            .padding({ left: 24, right: 24 })
+            .margin({ top: 8 })
+
+          if (this.wide) {
+            Row({ space: 24 }) {
+              Column() {
+                this.deviceCard()
+              }
+              .layoutWeight(1)
+
+              Column() {
+                this.visualPanel()
+              }
+              .layoutWeight(1.15)
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
+            .margin({ top: 28 })
+          } else {
+            Column({ space: 18 }) {
+              this.deviceCard()
+              this.visualPanel()
+            }
+            .width('100%')
+            .margin({ top: 22 })
+          }
+
+          Button('取消')
+            .fontSize(15)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(C_WHITE)
+            .backgroundColor(C_INK)
+            .width(200)
+            .height(48)
+            .borderRadius(12)
+            .margin({ top: 26 })
+            .onClick(() => {
+              this.disconnect();
+            })
+
+          if (this.showLogs) {
+            this.logPanel()
+          }
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, top: 4, bottom: 24 })
+        // 内容不满一屏时整体居中（桌面那版就是上下留白对称的）；
+        // 展开日志撑高之后，minHeight 不再生效，自然退回从顶部滚动。
+        .constraintSize({ minHeight: '100%' })
+        .justifyContent(FlexAlign.Center)
+      }
+      .layoutWeight(1)
+      .align(Alignment.Top)
+      .onAreaChange((_old: Area, now: Area) => {
+        const w: number = Number(now.width);
+        this.wide = w >= 600;
+      })
+
+      Divider().color(C_RULE).strokeWidth(1)
+
+      // ---------------- 页脚 ----------------
+      Row() {
+        Circle()
+          .width(8)
+          .height(8)
+          .fill(this.dotColor())
+        Text(this.footerText())
+          .fontSize(12)
+          .fontColor(C_FOOTER)
+          .fontWeight(FontWeight.Medium)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+          .margin({ left: 8 })
+        Text('AllPlay · CarPlay')
+          .fontSize(12)
+          .fontColor(C_FOOTER)
+          .margin({ left: 12 })
+      }
+      .width('100%')
+      .height(46)
+      .padding({ left: 20, right: 20 })
+      .onClick(() => {
+        // 版面上看不出来的诊断入口
+        this.showLogs = !this.showLogs;
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(C_WHITE)
+    .bindSheet($$this.showPicker, this.pickerSheet(), {
+      height: 460,
+      dragBar: true,
+      backgroundColor: C_WHITE,
+      onDisappear: () => {
+        this.showPicker = false;
+      }
+    })
+
+    // 手机开始连接就挂上 XComponent：视频 SETUP 一到就要有 surface 可解码，
+    // 晚挂上只能等手机 5 秒后重发配置帧，画面会白等一轮。
+    if (this.linkState === ST_CONNECTING || this.linkState === ST_STREAMING) {
+      Column() {
+        XComponent({
+          id: 'carplay',
+          type: XComponentType.SURFACE,
+          controller: this.xc
+        })
+          .onLoad(() => {
+            this.attachSurface();
+          })
+          .onDestroy(() => {
+            setVideoSurface('');
+          })
+          // 触摸：坐标相对组件，按组件实际大小归一化后交给原生转发给手机
+          .onAreaChange((_old: Area, now: Area) => {
+            this.compW = Number(now.width);
+            this.compH = Number(now.height);
+          })
+          .onTouch((e: TouchEvent) => {
+            this.onCarplayTouch(e);
+          })
+          // 画面宽高比 = 和手机协商的显示分辨率（横屏时基本铺满整块屏幕）。
+          // 别用固定的 16:9：屏幕是 20:9 的话会上下留黑边。
+          .width('100%')
+          .aspectRatio(this.videoW / this.videoH)
+      }
+      .width('100%')
+      .height('100%')
+      .justifyContent(FlexAlign.Center)
+      .backgroundColor(Color.Black)
+    }
+    }
     .width('100%')
     .height('100%')
   }

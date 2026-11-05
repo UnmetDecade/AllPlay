@@ -42,11 +42,25 @@ std::unique_ptr<CertificateMfiIdentity> CertificateMfiIdentity::load(const std::
         if (err) *err = "读不到 " + dir + "/certificate.p7b";
         return nullptr;
     }
+    return loadFromMemory(keyDer.data(), keyDer.size(), cert.data(), cert.size(), err);
+}
+
+std::unique_ptr<CertificateMfiIdentity> CertificateMfiIdentity::loadFromMemory(
+    const uint8_t* keyDer, size_t keyLen, const uint8_t* certDer, size_t certLen, std::string* err)
+{
+    if (!keyDer || keyLen == 0) {
+        if (err) *err = "identity.pk8 是空的";
+        return nullptr;
+    }
+    if (!certDer || certLen == 0) {
+        if (err) *err = "certificate.p7b 是空的";
+        return nullptr;
+    }
 
     auto self = std::unique_ptr<CertificateMfiIdentity>(new CertificateMfiIdentity);
 
-    const unsigned char* p = keyDer.data();
-    self->key_ = d2i_AutoPrivateKey(nullptr, &p, long(keyDer.size()));
+    const unsigned char* p = keyDer;
+    self->key_ = d2i_AutoPrivateKey(nullptr, &p, long(keyLen));
     if (!self->key_) {
         if (err) *err = "identity.pk8 不是有效的私钥（PKCS#8 DER）";
         return nullptr;
@@ -55,7 +69,7 @@ std::unique_ptr<CertificateMfiIdentity> CertificateMfiIdentity::load(const std::
         if (err) *err = "identity.pk8 不是 EC 私钥";
         return nullptr;
     }
-    self->cert_ = std::move(cert);
+    self->cert_.assign(certDer, certDer + certLen);
     LOG_INFO("MFi 身份已载入：证书 %zu 字节", self->cert_.size());
     return self;
 }

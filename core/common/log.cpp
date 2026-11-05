@@ -17,6 +17,7 @@ namespace core {
 namespace {
 std::atomic<int> g_level{static_cast<int>(Level::Info)};
 std::mutex       g_mu;
+std::atomic<LogSink> g_sink{nullptr};
 
 const char* levelName(Level lv)
 {
@@ -47,6 +48,8 @@ void logInitFromEnv()
 }
 
 void setLogLevel(Level lv) { g_level.store(static_cast<int>(lv)); }
+
+void setLogSink(LogSink sink) { g_sink.store(sink, std::memory_order_relaxed); }
 Level logLevel() { return static_cast<Level>(g_level.load()); }
 
 void logf(Level lv, const char* file, int line, const char* fmt, ...)
@@ -72,14 +75,14 @@ void logf(Level lv, const char* file, int line, const char* fmt, ...)
         std::strftime(ts, sizeof ts, "%H:%M:%S", &tm);
     }
 
-    std::lock_guard<std::mutex> lk(g_mu);
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
 #if !defined(__ANDROID__)
-    // 桌面：打印到 stderr。Android（API<23）不导出 stderr 符号，且日志走 logcat，这里跳过。
-    std::fprintf(stderr, "[%s] [%s] %s:%d  %s\n", ts, levelName(lv), baseName(file), line, msg);
-    std::fflush(stderr);
+        // 桌面：打印到 stderr。Android（API<23）不导出 stderr 符号，且日志走 logcat，这里跳过。
+        std::fprintf(stderr, "[%s] [%s] %s:%d  %s\n", ts, levelName(lv), baseName(file), line, msg);
+        std::fflush(stderr);
 #endif
 #ifdef __ANDROID__
-    {
         int prio = ANDROID_LOG_INFO;
         switch (lv) {
             case Level::Debug: prio = ANDROID_LOG_DEBUG; break;
@@ -88,8 +91,11 @@ void logf(Level lv, const char* file, int line, const char* fmt, ...)
             case Level::Error: prio = ANDROID_LOG_ERROR; break;
         }
         __android_log_print(prio, "AllPlay", "%s:%d  %s", baseName(file), line, msg);
-    }
 #endif
+    }
+
+    // 额外出口（鸿蒙：hilog / 界面）。放在锁外 —— sink 里再打日志也不会自锁。
+    if (LogSink sink = g_sink.load(std::memory_order_relaxed)) sink(lv, msg);
 }
 
 }  // namespace core

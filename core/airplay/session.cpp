@@ -78,10 +78,15 @@ Session::Session(const SessionConfig& cfg)
       services_(cfg.services), video_(cfg.video), audio_(cfg.audio),
       width_(cfg.width), height_(cfg.height)
 {
-    if (!cfg.mfiDir.empty()) {
+    // 身份来源：外部注入（鸿蒙 HAP rawfile）> mfiDir（identity/ 目录）> 无。
+    if (cfg.mfiIdentity != nullptr) {
+        mfi_ = cfg.mfiIdentity;
+        LOG_INFO("MFi 身份来自外部注入（%zu 字节证书）", mfi_->certificate().size());
+    } else if (!cfg.mfiDir.empty()) {
         std::string err;
-        mfi_ = mfi::CertificateMfiIdentity::load(cfg.mfiDir, &err);
-        if (!mfi_) LOG_WARN("MFi 身份加载失败：%s（/auth-setup 会回 400）", err.c_str());
+        ownedMfi_ = mfi::CertificateMfiIdentity::load(cfg.mfiDir, &err);
+        if (!ownedMfi_) LOG_WARN("MFi 身份加载失败：%s（/auth-setup 会回 400）", err.c_str());
+        mfi_ = ownedMfi_.get();
     }
     pairings_.load(stateDir_);
 }

@@ -1,3 +1,9 @@
+# 从 identity/ 拷进来的 MFi 凭证（scripts/sync-harmony-identity.sh 的产物，绝不入库）
+/entry/src/main/resources/rawfile/identity/
+
+# 本机签名配置（证书路径 / keyAlias / 加密口令）—— 用 build-profile.example.json5 起头
+/build-profile.json5
+
 /node_modules
 /oh_modules
 /local.properties

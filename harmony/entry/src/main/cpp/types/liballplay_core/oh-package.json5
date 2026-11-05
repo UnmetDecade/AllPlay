@@ -1,0 +1,6 @@
+{
+  "name": "liballplay_core.so",
+  "types": "./index.d.ts",
+  "version": "1.0.0",
+  "description": "AllPlay core（iAP2 链路/识别）的 NAPI 绑定"
+}

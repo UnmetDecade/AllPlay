@@ -26,6 +26,8 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -234,6 +236,30 @@ void testMfi(const std::string& dir)
     // 篡改摘要应验不过
     digest[0] ^= 0x01;
     CHECK(!verifyRawSig(id->certificate(), digest, sig), "错摘要验签失败（阴性对照）");
+
+    // 同一份身份从内存加载 —— 鸿蒙走的就是这条路（HAP rawfile 读字节，读不到路径）
+    {
+        auto slurp = [](const std::string& p, std::vector<uint8_t>* out) {
+            std::ifstream in(p, std::ios::binary);
+            out->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            return !out->empty();
+        };
+        std::vector<uint8_t> key, cert;
+        if (slurp(dir + "/identity.pk8", &key) && slurp(dir + "/certificate.p7b", &cert)) {
+            std::string err;
+            auto id2 = core::mfi::CertificateMfiIdentity::loadFromMemory(
+                key.data(), key.size(), cert.data(), cert.size(), &err);
+            CHECK(id2 && id2->certificate() == id->certificate(),
+                  "从内存加载身份（证书与目录加载一致）");
+            if (id2) {
+                digest[0] ^= 0x01;   // 还原成原摘要
+                bool ok2 = false;
+                auto sig2 = id2->signDigest(digest, 32, &ok2);
+                CHECK(ok2 && verifyRawSig(id2->certificate(), digest, sig2),
+                      "内存加载的身份也能签出可验签的名字");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

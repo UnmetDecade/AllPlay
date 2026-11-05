@@ -15,6 +15,7 @@ namespace {
 constexpr uint16_t kStartIdentification        = 0x1d00;
 constexpr uint16_t kIdentificationInformation  = 0x1d01;
 constexpr uint16_t kIdentificationAccepted     = 0x1d02;
+constexpr uint16_t kIdentificationRejected     = 0x1d03;
 constexpr uint16_t kRequestAuthenticationCert  = 0xaa00;
 constexpr uint16_t kAuthenticationCertificate  = 0xaa01;
 constexpr uint16_t kRequestChallengeResponse   = 0xaa02;
@@ -220,6 +221,19 @@ void WirelessTrigger::handleMessage(uint16_t msgId, const std::vector<uint8_t>& 
         setStage(TriggerStage::Identified);
         break;
 
+    case kIdentificationRejected: {
+        // 0x1D03 的参数体是被拒的参数 id 列表：手机明确告诉你"这几项我不收"。
+        // 不看这个就只会在 0x4301 之后一条一条盲试。
+        std::string ids;
+        for (const auto& p : params) {
+            if (!ids.empty()) ids += ",";
+            ids += std::to_string(p.id);
+        }
+        log("iAP2 rx=0x1d03 识别被拒（被拒参数 id：" + (ids.empty() ? "无" : ids) + "）");
+        error_ = "识别被手机拒绝（参数 id " + ids + "）";
+        break;
+    }
+
     case kRequestAuthenticationCert: {
         log("iAP2 rx=0xaa00 请求证书");
         Params p;
@@ -319,16 +333,22 @@ bool WirelessTrigger::run()
     transportSeen_ = false;
     startSessionSent_ = false;
 
-    if (!cfg_.mfiDir.empty()) {
+    // 身份的来源：外部注入（鸿蒙 rawfile / 将来的硬件芯片）> mfiDir > 空证书
+    ownedMfi_.reset();
+    mfi_ = cfg_.mfiIdentity;
+    if (mfi_) {
+        log("MFi 身份来自外部注入（" + std::to_string(mfi_->certificate().size()) + " 字节证书）");
+    } else if (!cfg_.mfiDir.empty()) {
         std::string err;
-        mfi_ = mfi::CertificateMfiIdentity::load(cfg_.mfiDir, &err);
-        if (!mfi_) {
+        ownedMfi_ = mfi::CertificateMfiIdentity::load(cfg_.mfiDir, &err);
+        if (!ownedMfi_) {
             error_ = err;
             log(std::string("MFi 身份加载失败：") + err);
             return false;
         }
+        mfi_ = ownedMfi_.get();
     } else {
-        log("未配置 mfiDir：MFi 会发空证书（真机必失败，仅测试用）");
+        log("未配置 MFi 身份：0xAA01 会发空证书（真机必失败，仅测试用）");
     }
 
     const uint64_t triggerDeadline = nowMs() + uint64_t(cfg_.timeoutMs);

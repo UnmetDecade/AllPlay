@@ -5,6 +5,15 @@
       "copyCodeResource": {
         "enable": false
       }
+    },
+    "externalNativeOptions": {
+      // core/iap2 的 C++ 原生层（NAPI 桥见 src/main/cpp/napi_bridge.cpp）
+      "path": "./src/main/cpp/CMakeLists.txt",
+      "arguments": "",
+      "cppFlags": "",
+      "abiFilters": [
+        "arm64-v8a"
+      ]
     }
   },
   "buildOptionSet": [

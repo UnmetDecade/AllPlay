@@ -41,6 +41,9 @@ struct SessionConfig {
     const DeviceInfo*           info = nullptr;       ///< /info 用
     std::string                 stateDir;             ///< 配对存储目录
     std::string                 mfiDir;               ///< MFi 身份目录（identity/）
+    /// 外部注入的 MFi 身份（鸿蒙从 HAP rawfile 读进来，磁盘上没有 identity/ 目录）。
+    /// 非空时优先于 mfiDir；调用方保证它比 Session 活得久。
+    const core::mfi::IMfiIdentity* mfiIdentity = nullptr;
     const core::PlatformServices* services = nullptr;   ///< 建 TCP 监听器（屏幕流 dataPort）
     core::IVideoOutput*         video = nullptr;      ///< 视频输出（解码+上屏）
     core::IAudioOutput*         audio = nullptr;      ///< 音频输出（解码+播放）
@@ -95,7 +98,8 @@ private:
     const core::DeviceIdentity* identity_ = nullptr;
     const DeviceInfo*           info_ = nullptr;
     std::string                 stateDir_;
-    std::unique_ptr<mfi::IMfiIdentity> mfi_;
+    const mfi::IMfiIdentity* mfi_ = nullptr;                   ///< 非空即可用（注入或自有）
+    std::unique_ptr<mfi::CertificateMfiIdentity> ownedMfi_;    ///< 从 mfiDir 加载时的持有者
     PairingStore                pairings_;
     const core::PlatformServices* services_ = nullptr;
     core::IVideoOutput*         video_ = nullptr;

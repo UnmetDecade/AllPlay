@@ -5,6 +5,7 @@
   "main": "",
   "author": "",
   "license": "",
-  "dependencies": {}
+  "dependencies": {
+    "liballplay_core.so": "file:./src/main/cpp/types/liballplay_core"
+  }
 }
-

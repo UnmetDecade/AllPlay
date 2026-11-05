@@ -22,6 +22,11 @@ void logInitFromEnv();
 void setLogLevel(Level lv);
 Level logLevel();
 
+/// 额外的日志出口（鸿蒙把 core 的日志转进 hilog / 界面）。传 nullptr 取消。
+/// 只在调用方自己装配的地方用；桌面/Android 不设，行为不变。
+using LogSink = void (*)(Level lv, const char* msg);
+void setLogSink(LogSink sink);
+
 /// 一般用下面的宏；file/line 由宏传入（打印时只取文件名）
 void logf(Level lv, const char* file, int line, const char* fmt, ...)
 #if defined(__GNUC__)

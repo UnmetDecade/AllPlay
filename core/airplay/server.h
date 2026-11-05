@@ -41,6 +41,8 @@ struct ReceiverConfig {
     int         fps      = 60;
     std::string stateDir;                   ///< 空 = defaultStateDir()
     std::string mfiDir   = "identity";      ///< MFi 身份目录（identity.pk8 + certificate.p7b）
+    /// 外部注入的 MFi 身份（鸿蒙 HAP rawfile）。非空时优先于 mfiDir。
+    const core::mfi::IMfiIdentity* mfiIdentity = nullptr;
     std::string btMac;                      ///< 本机蓝牙 MAC（/info bluetoothIDs 用）
     core::IVideoOutput* video = nullptr;    ///< 视频输出（解码+上屏；空则屏幕流不建）
     core::IAudioOutput* audio = nullptr;    ///< 音频输出（解码+播放；空则音频流不建）
