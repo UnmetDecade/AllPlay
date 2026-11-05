@@ -258,6 +258,11 @@ void testFlow(const std::string& dir)
     cfg.publicKeyHex = std::string(64, 'a');
     cfg.mfiDir = dir;
     cfg.timeoutMs = 15000;
+    // 0x4301 发出后 run() 不会自己结束 —— 那是无线 CarPlay 的心跳线，得一直读
+    // （见 wireless_client.cpp 里的 kSessionKeepAliveMs）。测试在拿齐证据后置位取消，
+    // 否则 t.join() 会一直挂着。
+    std::atomic<bool> cancel{false};
+    cfg.cancel = &cancel;
 
     WirelessTrigger trigger(&triggerStream, cfg);
     std::atomic<bool> triggerDone{false}, triggerOk{false};
@@ -356,6 +361,7 @@ void testFlow(const std::string& dir)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
+    cancel.store(true);   // 证据已收齐，让常驻的触发线程收工（见上面 cfg.cancel 注释）
     t.join();
     CHECK(triggerDone.load(), "触发线程结束");
     CHECK(triggerOk.load(), "触发返回成功（0x4301 已发出）");

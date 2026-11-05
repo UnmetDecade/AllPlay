@@ -47,6 +47,24 @@ void SdlVideoSink::configure(core::VideoCodec codec, int width, int height,
                              const std::vector<uint8_t>& codecData)
 {
     std::lock_guard<std::mutex> lk(mu_);
+    // 这是"下一场会话的第一帧配置"吗？（dropFrame() 之后第一次 configure）
+    // 是的话，上一场解出来还没上屏的帧、以及解码器里挂着的参考链都得清掉 ——
+    // 否则它们会在新会话刚进 Streaming 时被画出来，用户看到的就是"上一场画面的几帧"。
+    const bool sessionStart = awaitingNewStream_;
+    awaitingNewStream_ = false;
+    if (sessionStart) {
+        while (!queue_.empty()) {
+            av_frame_free(&queue_.front());
+            queue_.pop_front();
+        }
+        dec_.reset();          // 清参考链（extradata 保留，下面 configure 会重新比对）
+        srcW_ = srcH_ = 0;
+        if (tailDropped_) {
+            LOG_INFO("%s：上一场会话收尾后又来了 %llu 帧，已丢弃",
+                     kTag, static_cast<unsigned long long>(tailDropped_));
+            tailDropped_ = 0;
+        }
+    }
     // width/height 只是协商值，真实尺寸看码流；这里只用于日志
     const auto action = dec_.configure(codec, codecData);
     if (action == FfmpegVideoDecoder::Action::Unchanged) {
@@ -70,6 +88,10 @@ void SdlVideoSink::configure(core::VideoCodec codec, int width, int height,
 bool SdlVideoSink::feedAnnexB(const uint8_t* data, size_t len)
 {
     std::lock_guard<std::mutex> lk(mu_);
+    // 上一场会话的尾巴：dropFrame() 之后、新会话配置帧之前到的帧，全部丢掉。
+    // 返回 true（当喂进去了）而不是 false —— false 会让 core 放闸等关键帧，
+    // 这个"帧"本来就不该存在，没必要惊动上层。
+    if (awaitingNewStream_) { ++tailDropped_; return true; }
     if (!dec_.usable()) return false;   // 配置帧还没来 / 建不起来 → 让 core 放闸
 
     const bool ok = dec_.decode(data, len, [this](const AVFrame* f) {
@@ -116,11 +138,16 @@ void SdlVideoSink::dropFrame()
     }
     texW_ = texH_ = 0;
     std::lock_guard<std::mutex> lk(mu_);
+    size_t cleared = 0;
     while (!queue_.empty()) {
         av_frame_free(&queue_.front());
         queue_.pop_front();
+        ++cleared;
     }
+    if (cleared) LOG_INFO("%s：回启动页，丢掉还没上屏的 %zu 帧", kTag, cleared);
     srcW_ = srcH_ = 0;   // 下一场会话由 configure()/feedAnnexB() 重新填
+    awaitingNewStream_ = true;   // 直到下一场的配置帧到来，期间的帧都是上一场的尾巴
+    tailDropped_ = 0;
 }
 
 bool SdlVideoSink::configured() const

@@ -416,7 +416,7 @@ RtspResponse Session::handleSetup(const RtspRequest& req)
     }
 
     // 第一批：参数协商。eventPort/timingPort/keepAlivePort 必须是真实端口
-    if (!eventChannel_) openEventChannel();
+    openEventChannel();   // 已有通道则只换本场密钥（见函数内注释）
     if (!ntpSock_) openNtp();
     const bool wantKeepAlive = bplist::boolOf(bplist::dictGet(root, "keepAliveLowPower"));
     if (wantKeepAlive && !keepAliveSock_) openKeepAlive();
@@ -448,6 +448,16 @@ RtspResponse Session::handleCommand(const RtspRequest& req)
 void Session::openEventChannel()
 {
     if (!services_ || !services_->makeTcpListener || shared_.empty()) return;
+
+    if (eventChannel_) {
+        // 通道对象跨会话复用（端口不变），但密钥是**每场会话**的：写密钥由本场
+        // pair-verify 的 shared_ HKDF 出来。不换的话，宿主周期发的 forceKeyFrame
+        // 在手机侧解不开，iOS 会把整个 CarPlay 会话掐断 —— 实测：手机重连后，
+        // 会话总在 5 秒定时器下一次触发的那一秒整点断开（16:11:01、16:13:01）。
+        eventChannel_->rekey(shared_);
+        return;
+    }
+
     auto l = services_->makeTcpListener();
     std::string lerr;
     if (!l || !l->start("", 0, &lerr)) {

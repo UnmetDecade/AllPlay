@@ -22,6 +22,7 @@
 #include "mfi/mfi_identity.h"
 #include "port/stream.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -57,6 +58,10 @@ struct WirelessTriggerConfig {
 
     // MFi
     std::string mfiDir;       ///< identity/（identity.pk8 + certificate.p7b）
+
+    /// 外部取消旗标（可空）。0x4301 发出后 run() 会长期保持链路，直到手机断开；
+    /// 宿主在 AirPlay 会话结束后置位它，好让这次触发收工、重新排下一次。
+    const std::atomic<bool>* cancel = nullptr;
 
     int timeoutMs = 60000;
 };

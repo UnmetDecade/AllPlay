@@ -26,7 +26,9 @@
 namespace allplay {
 
 /// 把渲染器当前内容存成二进制 PPM（P6）。返回 false = 读回或写文件失败。
-/// 注意：要在 SDL_RenderPresent 之后、下一次 RenderClear 之前调用。
+/// 注意：必须在 SDL_RenderPresent **之前**、画完这一帧之后调用 —— GL 的
+/// backbuffer 在 Present 之后内容未定义，Mac 上碰巧读得到，llvmpipe（110）
+/// 读回来是全黑。
 inline bool dumpRender(SDL_Renderer* ren, const std::string& path)
 {
     int w = 0, h = 0;

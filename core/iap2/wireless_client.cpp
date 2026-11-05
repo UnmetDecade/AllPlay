@@ -60,6 +60,9 @@ std::vector<uint8_t> macBytes(const std::string& mac)
     return out;
 }
 
+// 0x4301 发出之后 iAP2 链路要保持多久（实际上由手机断开链路来提前结束）。
+constexpr uint64_t kSessionKeepAliveMs = 12ULL * 60 * 60 * 1000;
+
 uint64_t nowMs()
 {
     using namespace std::chrono;
@@ -328,13 +331,30 @@ bool WirelessTrigger::run()
         log("未配置 mfiDir：MFi 会发空证书（真机必失败，仅测试用）");
     }
 
-    const uint64_t deadline = nowMs() + uint64_t(cfg_.timeoutMs);
+    const uint64_t triggerDeadline = nowMs() + uint64_t(cfg_.timeoutMs);
+    uint64_t deadline = triggerDeadline;
     link_.start(nowMs());
     log("iAP2 链路启动（等 marker…）");
 
     uint8_t buf[4096];
     while (nowMs() < deadline) {
+        // 宿主说这一场已经不需要这条 iAP2 链路了（手机走了/CarPlay 已收场）：
+        // 收工返回。0x4301 已经发过就仍报成功，让 BtTask 的重排逻辑继续。
+        if (cfg_.cancel && cfg_.cancel->load()) {
+            if (!startSessionSent_) error_ = "已取消";
+            return startSessionSent_;
+        }
+
         link_.tick(nowMs());
+
+        // 0x4301 发出后这条 iAP2 链路就是无线 CarPlay 的"心跳线"：iOS 会一直在上面
+        // 发消息，配件必须继续读、继续 ACK。**停读约 30 秒，iOS 就判定配件掉线，
+        // 主动 TEARDOWN 整场 CarPlay**（实测：触发窗口 90 秒一到就退出循环，两场
+        // 会话分别在开始后 88s / 118s 被手机收走，TEARDOWN 都落在停读之后）。
+        // 所以过了触发窗口不能返回 —— 改成长期保持，直到链路真的断（read 返回
+        // 负值 / 链路判死 / 写失败），那才是"手机不在了"。
+        if (startSessionSent_ && deadline == triggerDeadline)
+            deadline = nowMs() + kSessionKeepAliveMs;
 
         std::vector<uint8_t> out;
         if (link_.takeOutput(&out)) {

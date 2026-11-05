@@ -440,7 +440,15 @@ public:
 
         const std::string wantBus  = std::to_string(bus);
         const std::string wantAddr = std::to_string(address);
-        std::string       found;
+
+        // 同一个 USB 设备可能挂出**多张**网卡：iPhone 进 CarPlay 配置（6）之后，
+        // 内核同时给 ipheth（6.2，Apple 私有，实测常驻 NO-CARRIER）和 cdc_ncm
+        // （6.3，真正跑 IP 的那条）各绑了一张。readdir 的顺序不保证，先撞上
+        // ipheth 就会把 fe80::2 钉到一张永远没有载波的网卡上 —— 手机按 0x4301
+        // 里的地址发来的 SYN 到了另一张网卡上，内核查不到本机地址，静默丢掉
+        // （症状：RX/TX 全是 0 字节，监听 socket 永远不 accept）。
+        // 所以先收齐候选再打分：cdc_ncm > 有载波 > 随便一张。
+        std::vector<std::string> cands;
         while (struct dirent* e = ::readdir(d)) {
             const std::string name = e->d_name;
             if (name == "." || name == ".." || name == "lo") continue;
@@ -450,11 +458,30 @@ public:
             const std::string usbDev = "/sys/class/net/" + name + "/device/..";
             if (readSmallFile(usbDev + "/busnum") != wantBus) continue;
             if (readSmallFile(usbDev + "/devnum") != wantAddr) continue;
-            found = name;
-            break;
+            cands.push_back(name);
         }
         ::closedir(d);
-        return found;
+
+        if (cands.size() <= 1) return cands.empty() ? std::string() : cands.front();
+
+        auto driverOf = [](const std::string& n) {
+            char buf[256] = "";
+            const std::string link = "/sys/class/net/" + n + "/device/driver";
+            const ssize_t k = ::readlink(link.c_str(), buf, sizeof buf - 1);
+            if (k <= 0) return std::string();
+            buf[k] = '\0';
+            const std::string s(buf);
+            return s.substr(s.find_last_of('/') == std::string::npos ? 0 : s.find_last_of('/') + 1);
+        };
+        std::string best;
+        int         bestScore = -1;
+        for (const std::string& n : cands) {
+            int score = 0;
+            if (driverOf(n) == "cdc_ncm") score += 2;
+            if (readSmallFile("/sys/class/net/" + n + "/carrier") == "1") score += 1;
+            if (score > bestScore) { bestScore = score; best = n; }
+        }
+        return best;
 #endif
     }
 

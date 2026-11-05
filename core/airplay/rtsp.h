@@ -73,6 +73,11 @@ public:
     /// 控制连接断开时回调（组合根用它把会话状态复位，UI 回到启动页）。
     void setOnDisconnect(std::function<void()> f) { onDisconnect_ = std::move(f); }
 
+    /// 连接闸门（双通道互斥用）：accept 到新连接时先问一句，返回 false 就直接关掉。
+    /// 组合根用它实现"先连上的赢" —— 有线正在用就把 Wi-Fi 来的连接挡住，反之亦然。
+    /// 不设闸门（默认）时一切照旧。
+    void setConnectionGate(std::function<bool()> g) { gate_ = std::move(g); }
+
 private:
     void acceptLoop();
     void handleConnection(std::shared_ptr<core::ITcpStream> stream);
@@ -85,6 +90,7 @@ private:
     std::shared_ptr<ControlCipher> cipher_;
     std::function<void()>          afterResponse_;
     std::function<void()>          onDisconnect_;
+    std::function<bool()>          gate_;          ///< 双通道互斥：false = 不接这条连接
 
     std::atomic<bool>       stop_{false};
     std::thread             acceptThread_;

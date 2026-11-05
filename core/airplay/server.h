@@ -22,6 +22,7 @@
 #include "port/platform.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -69,6 +70,12 @@ public:
     /// 发触摸（归一化坐标）到事件通道（M4 HID 回传）。
     bool sendTouch(const std::vector<TouchPoint>& contacts) {
         return session_ && session_->sendTouch(contacts);
+    }
+
+    /// 双通道互斥：接不接新来的连接由组合根说了算（见 RtspServer::setConnectionGate）。
+    /// 必须在 start() 之后调 —— start() 之前还没有 RtspServer，设了也没地方挂。
+    void setConnectionGate(std::function<bool()> g) {
+        if (rtsp_) rtsp_->setConnectionGate(std::move(g));
     }
 
     /// 立即向 iPhone 请求关键帧（回前台 Surface 重建后调用，尽快恢复画面）。

@@ -62,8 +62,9 @@ struct Options {
     bool        noVideo   = false;
     bool        noAudio   = false;
     std::string dump;                // --dump：退出前把最后一帧存成 PPM
-    // —— 有线接入（--wired 才启用；和 --bt 互斥，见 main 里的检查）——
+    // —— 有线接入（--wired / --dual 才启用；--wired 和 --bt 互斥，见 main 里的检查）——
     bool        wiredOn   = false;
+    bool        dualOn    = false;       // --dual：有线 + 无线同时监听，谁先连上算谁
     std::string ncmLinkLocal;            // --ncm-link-local：空 = fe80::2
     int         wiredPid  = -1;          // --wired-pid：限定产品号（默认不限）
     // —— 蓝牙触发（--bt 才启用；不加就维持纯接收端，行为与之前完全一致）——
@@ -109,6 +110,9 @@ void printUsage(const char* argv0)
         "                    而且 /dev/bus/usb 是 root 独占的，**整个程序要 sudo 跑**\n"
         "                    （sudo 会 reset 环境：日志用 sudo env ALLPLAY_LOG=… ，\n"
         "                      状态目录要显式给 --state-dir，否则 HOME 变成 /root）\n"
+        "  --dual            双通道：有线 + 无线**同时**监听，谁先连上算谁（另一条路把\n"
+        "                    后来的连接挡在门外，会话结束自动放行）。无线那半和只用无线时\n"
+        "                    一样要靠 mDNS 广播，所以不要加 --no-avahi\n"
         "  --ncm-link-local A 有线：钉在 NCM 网卡上的 IPv6 链路本地（默认 fe80::2）。\n"
         "                    手机是拿 0x4301 里这个地址来连的，改了只是换个值，但两端得一致\n"
         "  --wired-pid N      有线：限定产品号（默认不限，苹果键盘/集线器会被自动排除）\n"
@@ -182,6 +186,8 @@ bool parseArgs(int argc, char** argv, Options* o)
             o->dump = need(a);
         } else if (!std::strcmp(a, "--wired")) {
             o->wiredOn = true;
+        } else if (!std::strcmp(a, "--dual")) {
+            o->dualOn = true;
         } else if (!std::strcmp(a, "--ncm-link-local")) {
             o->ncmLinkLocal = need(a);
         } else if (!std::strcmp(a, "--wired-pid")) {
@@ -230,6 +236,16 @@ bool parseArgs(int argc, char** argv, Options* o)
 /// 桌面上鼠标和触屏一般不会同时用：鼠标固定占 slot 0，手指从空位开始占。
 class TouchPad {
 public:
+    /// 点 → 像素的比例（高 DPI）。SDL 的鼠标/FINGER 事件给的是**窗口点坐标**，
+    /// 而 flush() 里的 videoRect 是 SDL_GetRendererOutputSize 的**像素**矩形。
+    /// Retina 上两者差 2 倍：不换算的话点在屏幕正中会归一化成 (0.25, 0.25)，
+    /// 手机那边看到的就是"偏上偏左"。（实测：Mac 触摸 y 轴偏上。）
+    void setScale(float sx, float sy)
+    {
+        scaleX_ = sx > 0.f ? sx : 1.f;
+        scaleY_ = sy > 0.f ? sy : 1.f;
+    }
+
     void handle(const SDL_Event& e, int winW, int winH)
     {
         switch (e.type) {
@@ -238,8 +254,8 @@ public:
                 if (e.button.button != SDL_BUTTON_LEFT) break;
                 slots_[0].down = true;
                 slots_[0].used = true;
-                slots_[0].x = float(e.button.x);
-                slots_[0].y = float(e.button.y);
+                slots_[0].x = float(e.button.x) * scaleX_;
+                slots_[0].y = float(e.button.y) * scaleY_;
                 dirty_ = true;
                 break;
             case SDL_MOUSEBUTTONUP:
@@ -252,8 +268,8 @@ public:
                 if (e.motion.which == SDL_TOUCH_MOUSEID) break;
                 if (!slots_[0].down) break;
                 slots_[0].used = true;
-                slots_[0].x = float(e.motion.x);
-                slots_[0].y = float(e.motion.y);
+                slots_[0].x = float(e.motion.x) * scaleX_;
+                slots_[0].y = float(e.motion.y) * scaleY_;
                 dirty_ = true;
                 break;
             case SDL_FINGERDOWN:
@@ -264,8 +280,8 @@ public:
                 if (i < 0) break;   // 已经 2 个触点了，多的忽略
                 slots_[i].down = (e.type != SDL_FINGERUP);
                 slots_[i].used = true;
-                slots_[i].x = e.tfinger.x * float(winW);
-                slots_[i].y = e.tfinger.y * float(winH);
+                slots_[i].x = e.tfinger.x * float(winW) * scaleX_;
+                slots_[i].y = e.tfinger.y * float(winH) * scaleY_;
                 dirty_ = true;
                 break;
             }
@@ -330,6 +346,8 @@ private:
     Slot slots_[2];
     bool dirty_ = false;
     bool wasActive_ = false;
+    float scaleX_ = 1.f;   ///< 窗口点 → 渲染像素（见 setScale）
+    float scaleY_ = 1.f;
 };
 
 }  // namespace
@@ -356,7 +374,15 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    Uint32 winFlags = SDL_WINDOW_RESIZABLE;
+    // 启动页是在 1540×850 的设计稿坐标上画完再整体缩放的；默认的最近邻采样会把
+    // 圆角/圆弧放大成台阶（1.6 倍屏上尤其明显）。改成线性采样，边缘是连续过渡的。
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+
+    // ALLOW_HIGHDPI 不能省：不给这个标志，macOS 只让渲染器画"逻辑点"那么大的
+    // 后备缓冲（1280×720），再由系统放大到 Retina 物理像素（2 倍）—— 界面上
+    // 每一个圆角、每一根字都会被整倍放大，就是"超级糊、完全没法看"。
+    // 给了之后 SDL_GetRendererOutputSize 返回物理像素，所有绘制按物理像素走。
+    Uint32 winFlags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     if (opt.fullscreen) winFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     // 状态栏画在 y = opt.screenH 处（见 StatusBar::draw 用的 y_，以及下面的 bar.init），
     // 所以窗口必须比视频面**高出这一条**。只给 screenH 会同时出两个毛病：
@@ -388,12 +414,28 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // 高 DPI 自检：比值 > 1 才说明我们真的按物理像素在画，而不是让系统放大
+    {
+        int wpt = 0, hpt = 0, ow = 0, oh = 0;
+        SDL_GetWindowSize(win, &wpt, &hpt);
+        SDL_GetRendererOutputSize(ren, &ow, &oh);
+        std::printf("[host] 窗口 %dx%d 点 / 渲染面 %dx%d 像素（%.2gx）\n",
+                    wpt, hpt, ow, oh, wpt > 0 ? double(ow) / double(wpt) : 1.0);
+    }
+
     allplay::SharedStatus status;
     allplay::StatusBar   bar;
     bar.init(ren, opt.screenW, opt.screenH, opt.barH);
     allplay::Launcher    launcher;
     if (!launcher.init()) {
         std::fprintf(stderr, "[host] 启动页字体不可用，只画图形\n");
+    }
+    {
+        // 启动页印的是**手机蓝牙列表里看到的那个名字**，也就是蓝牙适配器的名字，
+        // 不是 Bonjour 广播名（--name）。拿不到适配器名（没蓝牙 / 没权限）才退回它。
+        std::string btName = allplay::posix::bluetoothAdapterName();
+        if (btName.empty()) btName = opt.name;
+        launcher.setDeviceName(btName);
     }
 
     // —— 解码输出：必须在 Receiver 之前声明，才能比它活得久 ——
@@ -425,8 +467,17 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    core::airplay::Receiver rx;
-    core::airplay::ReceiverConfig cfg;
+    // —— 两条通道 ——
+    //   rxNet：无线（绑通配 + mDNS 广播），手机自己找过来；
+    //   rxUsb：有线（钉在 NCM 网卡的链路本地，地址由 0x4301 直接告诉手机）。
+    // 只有一条路时另一条保持"没起"，状态合并 / 触摸转发都按 running() 判，
+    // 所以单通道模式的行为和以前完全一样。
+    core::airplay::Receiver rxNet;
+    core::airplay::Receiver rxUsb;
+    const bool useWired    = opt.wiredOn || opt.dualOn;
+    const bool useWireless = !opt.wiredOn || opt.dualOn;   // --wired 单开时不开无线
+
+    core::airplay::ReceiverConfig cfg;                     // 无线那份
     cfg.name      = opt.name;
     cfg.ifname    = opt.ifname;
     cfg.port      = opt.port;
@@ -437,6 +488,9 @@ int main(int argc, char** argv)
     cfg.enableAvahi = !opt.noAvahi;
     cfg.video     = vid;
     cfg.audio     = aud;
+
+    core::airplay::ReceiverConfig cfgUsb = cfg;            // 有线那份：起的时候再补 ifname/bindAddr
+    cfgUsb.enableAvahi = false;   // 有线不广播：地址已经通过 0x4301 直接告诉手机了
 
     // 平台服务要在 main 的整个生命周期里活着：Receiver 只拷了一份，而 Session 到 SETUP
     // 才第一次用它去建数据/事件通道（存临时对象的地址就是当年那个悬垂指针）。
@@ -462,28 +516,49 @@ int main(int argc, char** argv)
         std::fflush(stdout);
     };
 
-    if (!opt.wiredOn) {
-        if (!rx.start(cfg, services, &err)) {
-            std::fprintf(stderr, "[host] 核心启动失败：%s\n", err.c_str());
-            SDL_DestroyRenderer(ren);
-            SDL_DestroyWindow(win);
-            SDL_Quit();
-            return 1;
+    // 双通道互斥：先连上的赢。两条闸门都看**对面**的状态 —— 对面在用（或正在握手）
+    // 就把这条新连接直接关掉。会话一结束，对面回到空闲，闸门自动放行。
+    // 单通道模式下对面那条永远没起（connecting/sessionActive 恒为 false），等于没装。
+    auto installGates = [&] {
+        rxNet.setConnectionGate([&rxUsb] {
+            return !(rxUsb.connecting() || rxUsb.sessionActive());
+        });
+        rxUsb.setConnectionGate([&rxNet] {
+            return !(rxNet.connecting() || rxNet.sessionActive());
+        });
+    };
+
+    if (useWireless) {
+        if (!rxNet.start(cfg, services, &err)) {
+            // 双通道下无线起不来不算致命（比如车机只有有线可用、或者没 Wi-Fi 网卡）：
+            // 有线那条照样能连。单开无线时就是启动失败。
+            if (!opt.dualOn) {
+                std::fprintf(stderr, "[host] 核心启动失败：%s\n", err.c_str());
+                SDL_DestroyRenderer(ren);
+                SDL_DestroyWindow(win);
+                SDL_Quit();
+                return 1;
+            }
+            std::printf("[host] 双通道：无线那半起不来（%s）—— 继续只用有线\n", err.c_str());
+        } else {
+            std::printf("[host] 无线 RTSP :%u  ifname=%s ip=%s deviceid=%s\n",
+                        rxNet.port(), rxNet.ifname().c_str(), rxNet.ip().c_str(),
+                        rxNet.info().deviceId.c_str());
+            if (cfg.enableAvahi) {
+                std::printf("[host] Bonjour: %s\n",
+                            rxNet.avahiError().empty()
+                                ? "已广播 _airplay._tcp"
+                                : ("不可用（" + rxNet.avahiError() + "）").c_str());
+            }
+            std::printf("[host] READY —— 等 iPhone 连接（假手机：tools/fake_phone）\n");
         }
-        std::printf("[host] RTSP :%u  ifname=%s ip=%s deviceid=%s\n",
-                    rx.port(), rx.ifname().c_str(), rx.ip().c_str(), rx.info().deviceId.c_str());
-        if (cfg.enableAvahi) {
-            std::printf("[host] Bonjour: %s\n",
-                        rx.avahiError().empty() ? "已广播 _airplay._tcp"
-                                                : ("不可用（" + rx.avahiError() + "）").c_str());
-        }
-        std::printf("[host] READY —— 等 iPhone 连接（假手机：tools/fake_phone）\n");
-    } else {
-        // 有线不广播：地址是我们通过 0x4301 直接告诉手机的，mDNS 反而多余。
-        cfg.enableAvahi = false;
-        std::printf("[host] 有线模式：准备 USB 链路…\n"
+        installGates();
+    }
+    if (useWired) {
+        std::printf("[host] %s：准备 USB 链路…\n"
                     "       手机首次会弹\"信任此电脑\"，去点一下；锁屏时它只报 1 个配置，\n"
-                    "       得先解锁（这不是线的问题）。\n");
+                    "       得先解锁（这不是线的问题）。\n",
+                    opt.dualOn ? "双通道（有线那半）" : "有线模式");
         if (!wiredTask.beginBringUp(wopt, wiredLog)) {
             std::fprintf(stderr, "[host] 有线任务没能启动\n");
             SDL_DestroyRenderer(ren);
@@ -511,7 +586,7 @@ int main(int argc, char** argv)
         std::printf("[bt] %s\n", s.c_str());
         std::fflush(stdout);
     };
-    if (opt.btOn && !btTask.start(rx, btOpt, btLog)) {
+    if (opt.btOn && !btTask.start(rxNet, btOpt, btLog)) {
         std::fprintf(stderr, "[host] 蓝牙触发没能启动\n");
     }
 
@@ -524,13 +599,25 @@ int main(int argc, char** argv)
     Uint64   lastFpsAt = SDL_GetTicks64();
     uint64_t lastFrames = 0;
 
+    // 刚获得焦点的那一下鼠标按下不算"点按钮"。
+    // macOS 的 SDLView 实现了 acceptsFirstMouse —— 点一下窗口把它激活，这一下也会
+    // 送进来；要是正好落在「取消」上，启动页就一闪而过，看起来像"根本没起来"。
+    Uint64   focusAt     = SDL_GetTicks64();
+    constexpr Uint64 kClickGuardMs = 300;
+
+    // --bt 的常驻重连：手机离开/掉线之后隔一会儿自动再叫一次（车机行为）。
+    // 触发本身最多跑 o.retry 轮，跑完 btTask.done() 变 true，这里才允许再起。
+    constexpr Uint64 kBtRearmMs = 5000;
+    Uint64   btRearmAt = SDL_GetTicks64() + kBtRearmMs;
+    Uint64   btWaitingSince = 0;   ///< 触发线程在 WaitingPair 里连续待了多久（看门狗用）
+
     while (running && !g_stop) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = false;
             else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) running = false;
             else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_w &&
-                     opt.wiredOn && !wiredReceiverUp) {
+                     useWired && !wiredReceiverUp) {
                 // 手机解锁了、线重插了、刚才没人点"信任"…… 都不用重启程序。
                 // Receiver 已经起来之后不给重来：那条链路是 0x4301 报出去过的，不能偷偷换。
                 if (wiredTask.beginBringUp(wopt, wiredLog)) {
@@ -544,13 +631,26 @@ int main(int argc, char** argv)
             }
             else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_b && opt.btOn) {
                 // 触发失败、或手机掉线之后，不用重启程序
-                if (btTask.start(rx, btOpt, btLog)) {
+                if (btTask.start(rxNet, btOpt, btLog)) {
                     std::printf("[host] 重新触发蓝牙…\n");
                     std::fflush(stdout);
                 } else {
                     std::printf("[host] 上一次触发还在跑，稍候再按 B\n");
                     std::fflush(stdout);
                 }
+            }
+            else if (e.type == SDL_WINDOWEVENT &&
+                     e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                focusAt = SDL_GetTicks64();
+            }
+            else if (!wasStreaming && e.type == SDL_MOUSEBUTTONDOWN &&
+                     SDL_GetTicks64() - focusAt < kClickGuardMs) {
+                // 激活窗口的那一下：吞掉，别当成点「取消」（也别塞给触摸板）
+            }
+            else if (!wasStreaming && launcher.handleEvent(e, opt.screenW, opt.screenH)) {
+                std::printf("[host] 启动页：点了「取消」，退出\n");
+                std::fflush(stdout);
+                running = false;
             }
             else pad.handle(e, opt.screenW, opt.screenH);
         }
@@ -567,33 +667,36 @@ int main(int argc, char** argv)
         // 会话结束（拔线、手机锁屏、重枚举）之后 runPump 把相位落到 Done，而
         // wiredReceiverUp 还立着 —— 不把它放下来，这程序就只剩"重启"一条路：
         // 连 W 都被 !wiredReceiverUp 挡在门外。放下来 + 冷却几秒自己重来，拔了再插就行。
-        if (opt.wiredOn && wiredReceiverUp && wiredTask.pumpDone()) {
-            std::printf("[host] 有线链路断了 —— 收起 RTSP，%llu 秒后自动重新准备\n",
+        if (useWired && wiredReceiverUp && wiredTask.pumpDone()) {
+            std::printf("[host] 有线链路断了 —— 收起有线 RTSP，%llu 秒后自动重新准备\n",
                         static_cast<unsigned long long>(kWiredRearmMs / 1000));
             std::fflush(stdout);
-            rx.stop();                 // 网卡可能整块消失过（重枚举），监听得跟着重来
+            rxUsb.stop();              // 网卡可能整块消失过（重枚举），监听得跟着重来
             wiredReceiverUp = false;
             wiredRearmAt    = SDL_GetTicks64() + kWiredRearmMs;
         }
 
-        // —— 有线：USB 侧就绪之后才起 Receiver（全程序**只有这一处**调 rx.start）——
-        if (opt.wiredOn && !wiredReceiverUp) {
+        // —— 有线：USB 侧就绪之后才起 Receiver（全程序**只有这一处**调 rxUsb.start）——
+        if (useWired && !wiredReceiverUp) {
             const allplay::WiredPhase wp = wiredTask.phase();
             if (wp == allplay::WiredPhase::Ready) {
                 const allplay::WiredBringUp& bu = wiredTask.result();
-                cfg.ifname   = bu.ifname;
-                cfg.bindAddr = bu.bindAddr;   // 链路本地，server.cpp 会自己补 %网卡
-                if (!rx.start(cfg, services, &err)) {
+                cfgUsb.ifname   = bu.ifname;
+                cfgUsb.bindAddr = bu.bindAddr;   // 链路本地，server.cpp 会自己补 %网卡
+                if (!rxUsb.start(cfgUsb, services, &err)) {
                     // 这里失败基本只有一个原因：那张网卡的 7000 被占了。
+                    // 双通道下无线那半还在，所以不退出，等下一轮重试。
                     std::fprintf(stderr, "[host] 有线：Receiver 起不来：%s\n", err.c_str());
-                    running = false;
+                    if (!useWireless || !rxNet.running()) running = false;
+                    else wiredRearmAt = SDL_GetTicks64() + kWiredRearmMs;
                 } else {
                     wiredReceiverUp = true;
-                    std::printf("[host] 有线 RTSP [%s%%%s]:%u（deviceid %s）\n", rx.ip().c_str(),
-                                rx.ifname().c_str(), unsigned(rx.port()),
-                                rx.info().deviceId.c_str());
-                    // 0x4301 里报的端口/deviceid/公钥，全部取自 rx 自己 —— 见 startPump 注释
-                    if (!wiredTask.startPump(rx, wiredLog)) {
+                    std::printf("[host] 有线 RTSP [%s%%%s]:%u（deviceid %s）\n",
+                                rxUsb.ip().c_str(), rxUsb.ifname().c_str(), unsigned(rxUsb.port()),
+                                rxUsb.info().deviceId.c_str());
+                    // 0x4301 里报的端口/deviceid/公钥，全部取自 rxUsb 自己 —— 见 startPump 注释
+                    installGates();
+                    if (!wiredTask.startPump(rxUsb, wiredLog)) {
                         std::printf("[host] 有线：0x4301 那一支没起来\n");
                     }
                     std::fflush(stdout);
@@ -617,19 +720,60 @@ int main(int argc, char** argv)
             }
         }
 
-        // —— 核心状态 → LinkState ——
+        // —— 核心状态 → LinkState（两条通道合并成一个状态）——
+        // 规则：有任意一条在出画面就是 Streaming；有任意一条在握手就是 Connecting；
+        // 只要还有一条在听，就是 WaitingPair（哪怕另一条还在准备）。
         allplay::LinkState st;
-        if (opt.wiredOn && !wiredReceiverUp) {
-            // Receiver 还没起不是"错误"，是"还在准备" —— 报 Error 会让启动页写"Error"，
+        if (rxUsb.sessionActive() || rxNet.sessionActive())
+            st = allplay::LinkState::Streaming;
+        else if (rxUsb.connecting() || rxNet.connecting())
+            st = allplay::LinkState::Connecting;
+        else if (rxUsb.running() || rxNet.running())
+            st = allplay::LinkState::WaitingPair;
+        else if (useWired && wiredTask.phase() == allplay::WiredPhase::Failed)
+            // 还没起来不算"错误"，是"还在准备" —— 报 Error 会让启动页写"Error"，
             // 把"手机锁着、等人点信任"说成故障。只有真失败了才报 Error。
-            st = (wiredTask.phase() == allplay::WiredPhase::Failed) ? allplay::LinkState::Error
-                                                                   : allplay::LinkState::Connecting;
-        }
-        else if (!rx.running())          st = allplay::LinkState::Error;
-        else if (rx.sessionActive()) st = allplay::LinkState::Streaming;
-        else if (rx.connecting())    st = allplay::LinkState::Connecting;
-        else                         st = allplay::LinkState::WaitingPair;
+            st = allplay::LinkState::Error;
+        else
+            st = allplay::LinkState::Connecting;
         status.state.store(static_cast<int>(st));
+
+        // —— 蓝牙常驻重连（--bt）：手机离开/掉线后自动再叫一次 ——
+        // 车机的行为是"配件一直在，手机回来自己连上"，不需要人去按键。
+        // 三个条件都满足才叫：上一次触发线程已收工、两条通道都空闲（WaitingPair）、
+        // 过了冷却期 —— 否则会和正在进行的握手打架（手机连着时又叫一次会把链路搅乱）。
+        // 但触发线程现在是"常驻"的：0x4301 发出后它会一直守着 iAP2 链路，手机走了
+        // 也不一定结束。若它在 WaitingPair 里停了太久（手机拿了 0x4301 却没连
+        // AirPlay），就主动取消，重新叫一次 —— 否则永远不会再触发。
+        constexpr Uint64 kBtParkedMs = 45000;
+        if (opt.btOn && !btTask.done() && st == allplay::LinkState::WaitingPair) {
+            if (btWaitingSince == 0) btWaitingSince = SDL_GetTicks64();
+            else if (SDL_GetTicks64() - btWaitingSince > kBtParkedMs) {
+                btTask.stop();
+                btRearmAt = SDL_GetTicks64() + kBtRearmMs;
+                btWaitingSince = 0;
+                std::printf("[host] 蓝牙链路空等太久 —— 取消，准备重新触发\n");
+                std::fflush(stdout);
+            }
+        } else {
+            btWaitingSince = 0;
+        }
+
+        if (opt.btOn && btTask.done() && st == allplay::LinkState::WaitingPair &&
+            SDL_GetTicks64() >= btRearmAt) {
+            if (btTask.start(rxNet, btOpt, btLog)) {
+                btRearmAt = SDL_GetTicks64() + kBtRearmMs;
+                btWaitingSince = SDL_GetTicks64();
+                std::printf("[host] 手机不在了 —— 已自动重新触发蓝牙，等它回来\n");
+                std::fflush(stdout);
+            }
+        }
+
+        // 触摸发给**正在用的那条**通道（双通道下只有一条能连上）
+        auto activeRx = [&]() -> core::airplay::Receiver& {
+            if (rxUsb.running() && (rxUsb.sessionActive() || rxUsb.connecting())) return rxUsb;
+            return rxNet;
+        };
 
         // 进入 Streaming 的那一刻切全屏（对齐安卓：连上就铺满）
         const bool streaming = (st == allplay::LinkState::Streaming);
@@ -638,6 +782,13 @@ int main(int argc, char** argv)
             pad.reset();
             std::printf("[host] 会话%s\n", streaming ? "开始 —— 切视频面" : "结束 —— 回启动页");
             std::fflush(stdout);
+            if (opt.btOn && !streaming) {
+                // 会话结束了：把还挂在 iAP2 链路上的触发线程撤掉，好让重排逻辑
+                // 在手机回来时重新叫 0x4301（否则它会一直守在旧链路上）。
+                btTask.stop();
+                btRearmAt = SDL_GetTicks64() + kBtRearmMs;
+                btWaitingSince = 0;
+            }
             if (streaming && opt.fullscreen) {
                 SDL_SetWindowFullscreen(win, SDL_WINDOW_FULLSCREEN_DESKTOP);
             }
@@ -651,6 +802,16 @@ int main(int argc, char** argv)
 
         int winW = 0, winH = 0;
         SDL_GetRendererOutputSize(ren, &winW, &winH);
+
+        // 高 DPI：渲染面是物理像素，窗口尺寸是逻辑点，两者比值给启动页做鼠标换算
+        {
+            int wpt = winW, hpt = winH;
+            SDL_GetWindowSize(win, &wpt, &hpt);
+            launcher.setPixelRatio(wpt > 0 ? double(winW) / double(wpt) : 1.0);
+            // 触摸同一件事：事件是"点"，videoRect 是"像素"（见 TouchPad::setScale）
+            pad.setScale(wpt > 0 ? float(double(winW) / double(wpt)) : 1.f,
+                         hpt > 0 ? float(double(winH) / double(hpt)) : 1.f);
+        }
 
         // 状态栏只在显式开启时占位置
         const int barH = opt.barOn ? bar.height() : 0;
@@ -677,9 +838,15 @@ int main(int argc, char** argv)
         }
 
         if (opt.barOn) bar.draw(ren, status);
+
+        // 读回必须在 Present **之前**。GL 的 backbuffer 在 Present 之后内容未定义，
+        // llvmpipe/Wayland 上读回来是全黑（Mac 上碰巧还能读到，所以这个错一直没暴露）。
+        if (!opt.dump.empty() && opt.frames > 0 && rendered == opt.frames - 1) {
+            allplay::dumpRender(ren, opt.dump);
+        }
         SDL_RenderPresent(ren);
 
-        pad.flush(rx, videoRect, streaming);
+        pad.flush(activeRx(), videoRect, streaming);
 
         // —— 无头触摸注入（--inject-touch）——
         // 塞进 SDL 事件队列，下一轮 SDL_PollEvent 取出后走的是**和真实鼠标完全相同**的
@@ -722,9 +889,6 @@ int main(int argc, char** argv)
             status.lastFrameMs.store(now);
         }
 
-        if (!opt.dump.empty() && opt.frames > 0 && rendered == opt.frames - 1) {
-            allplay::dumpRender(ren, opt.dump);
-        }
         if (opt.frames > 0 && ++rendered >= opt.frames) {
             std::printf("[host] 冒烟：已渲染 %d 帧，正常退出\n", rendered);
             break;
@@ -738,7 +902,8 @@ int main(int argc, char** argv)
     // 有线：先停接入任务（join pump；它每 200ms 查一次停止位），再停核心。
     // 顺序不能反 —— pump 线程还攥着 iAP2 链路（Impl 里的 link），得让它先收手。
     wiredTask.stop();
-    rx.stop();          // 先停核心（join 屏幕流/音频流线程），再让 sink 析构
+    rxNet.stop();       // 先停核心（join 屏幕流/音频流线程），再让 sink 析构
+    rxUsb.stop();       // 两条通道都要停：accept 线程会读对面的状态（闸门），别留悬垂引用
 #ifdef ALLPLAY_HAVE_FFMPEG
     // 音频不做"有没有声音"的自动判定（无头跑时设备是 dummy，听不见）；
     // 这里给出的是**可机检**的证据：解出多少帧（对上手机发的帧数就说明解码链通）、
@@ -751,6 +916,7 @@ int main(int argc, char** argv)
                 (unsigned long long)audioSink.dropped(),
                 audioSink.deviceOpen() ? "" : "（设备没开）");
 #endif
+    launcher.releaseTextures();   // 文字纹理是渲染器的子对象，先放掉再毁渲染器
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
     SDL_Quit();

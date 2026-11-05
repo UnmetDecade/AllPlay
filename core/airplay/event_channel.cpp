@@ -113,6 +113,17 @@ EventChannel::EventChannel(std::unique_ptr<core::ITcpListener> listener,
 
 EventChannel::~EventChannel() { stop(); }
 
+void EventChannel::rekey(const std::vector<uint8_t>& sharedSecret)
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    writeKey_ = crypto::hkdfSha512(sharedSecret, "Events-Salt", "Events-Write-Encryption-Key", 32);
+    readKey_  = crypto::hkdfSha512(sharedSecret, "Events-Salt", "Events-Read-Encryption-Key", 32);
+    cipher_.reset();
+    plain_.clear();
+    if (stream_) stream_->close();   // 上一场的连接已作废，读线程会自己退出内层循环
+    stream_.reset();
+}
+
 void EventChannel::stop()
 {
     if (stop_.exchange(true)) return;

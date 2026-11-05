@@ -53,13 +53,17 @@ public:
     /// 上一次触发是否已结束。false = 还在跑。
     bool done() const { return done_->load(); }
 
-    /// 收尾：detach，不 join（见 bt_task.cpp 的说明）。
+    /// 收尾：置取消旗标 → 线程在 100ms 内自己收工（会把 done 置 true），然后 detach。
+    /// 手机离开后调用它，下一次 start() 才能重新叫 CarPlay —— 否则 0x4301 发出后
+    /// 线程会一直守在旧链路上，永远不会再叫。
     void stop();
 
 private:
     std::thread                        thread_;
     /// 用 shared_ptr 而不是成员 bool：线程要能写它，又不许引用 this（见 stop()）。
     std::shared_ptr<std::atomic<bool>> done_ = std::make_shared<std::atomic<bool>>(true);
+    /// 本次触发的取消旗标（每次 start() 新建一个，旧线程拿着旧的，互不影响）。
+    std::shared_ptr<std::atomic<bool>> cancel_;
 };
 
 }  // namespace allplay

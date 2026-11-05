@@ -422,6 +422,79 @@ std::vector<core::BtDevice> bluezPairedDevices(std::string* err)
 }
 
 // ---------------------------------------------------------------------------
+// BlueZ D-Bus：适配器名（手机蓝牙列表里显示的那个名字）
+// ---------------------------------------------------------------------------
+/// 取 org.bluez.Adapter1 的 Alias（用户改过的名字就存这儿）；
+/// 没改过时 Alias 与 Name 相同（默认是主机名）。用 GetManagedObjects 而不是直接
+/// 拼 /org/bluez/hci0 —— hci 编号在多适配器机器上不保证是 0。
+/// 不用 hci_read_local_name：那条路要 CAP_NET_ADMIN，普通用户跑必失败。
+std::string bluezAdapterName()
+{
+    DBusConnection* c = systemBus();
+    if (!c) return "";
+
+    DBusMessage* m = dbus_message_new_method_call(
+        "org.bluez", "/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects");
+    if (!m) return "";
+    DBusError e;
+    dbus_error_init(&e);
+    DBusMessage* r = dbus_connection_send_with_reply_and_block(c, m, 3000, &e);
+    dbus_message_unref(m);
+    if (!r) {
+        dbus_error_free(&e);
+        return "";
+    }
+
+    std::string name;
+    DBusMessageIter it, arr;
+    if (dbus_message_iter_init(r, &it) &&
+        dbus_message_iter_get_arg_type(&it) == DBUS_TYPE_ARRAY) {
+        dbus_message_iter_recurse(&it, &arr);
+        while (name.empty() && dbus_message_iter_get_arg_type(&arr) == DBUS_TYPE_DICT_ENTRY) {
+            DBusMessageIter de, ifaces;
+            dbus_message_iter_recurse(&arr, &de);
+            dbus_message_iter_next(&de);              // 跳过 object path
+            dbus_message_iter_recurse(&de, &ifaces);
+
+            while (name.empty() && dbus_message_iter_get_arg_type(&ifaces) == DBUS_TYPE_DICT_ENTRY) {
+                DBusMessageIter ide, props;
+                dbus_message_iter_recurse(&ifaces, &ide);
+                const char* ifname = nullptr;
+                dbus_message_iter_get_basic(&ide, &ifname);
+                dbus_message_iter_next(&ide);
+
+                if (ifname && !std::strcmp(ifname, "org.bluez.Adapter1")) {
+                    std::string alias, plain;
+                    dbus_message_iter_recurse(&ide, &props);
+                    while (dbus_message_iter_get_arg_type(&props) == DBUS_TYPE_DICT_ENTRY) {
+                        DBusMessageIter pde, var;
+                        dbus_message_iter_recurse(&props, &pde);
+                        const char* key = nullptr;
+                        dbus_message_iter_get_basic(&pde, &key);
+                        dbus_message_iter_next(&pde);
+                        dbus_message_iter_recurse(&pde, &var);
+                        if (key && dbus_message_iter_get_arg_type(&var) == DBUS_TYPE_STRING) {
+                            const char* v = nullptr;
+                            dbus_message_iter_get_basic(&var, &v);
+                            if (v) {
+                                if (!std::strcmp(key, "Alias"))      alias = v;
+                                else if (!std::strcmp(key, "Name"))  plain = v;
+                            }
+                        }
+                        dbus_message_iter_next(&props);
+                    }
+                    name = !alias.empty() ? alias : plain;
+                }
+                dbus_message_iter_next(&ifaces);
+            }
+            dbus_message_iter_next(&arr);
+        }
+    }
+    dbus_message_unref(r);
+    return name;
+}
+
+// ---------------------------------------------------------------------------
 // NetworkManager D-Bus：当前 Wi-Fi SSID
 // ---------------------------------------------------------------------------
 /// iAP2 的 0x5703 要把"车机的 Wi-Fi"告诉手机。这里取当前连着的那个 SSID。
@@ -610,6 +683,37 @@ std::string controllerAddress()
     char s[19] = {0};
     if (ba2str(&ba, s) < 0) return "";
     return s;   // 形如 "C8:FF:28:7B:D4:60"
+}
+
+std::string bluetoothAdapterName()
+{
+    std::string n = bluezAdapterName();
+    if (!n.empty()) return n;
+
+    // bluetoothd 没跑 / 机器上根本没有适配器时拿不到 Adapter1.Alias。
+    // 但 BlueZ 的默认适配器名就是主机名（PRETTY_HOSTNAME 优先），
+    // 所以这里照着 BlueZ 的规则回退 —— 别退回 Bonjour 名，那是两回事。
+    if (FILE* f = std::fopen("/etc/machine-info", "r")) {
+        char line[256];
+        while (std::fgets(line, sizeof line, f)) {
+            const char* k = "PRETTY_HOSTNAME=";
+            if (!std::strncmp(line, k, std::strlen(k))) {
+                std::string v = line + std::strlen(k);
+                while (!v.empty() && (v.back() == '\n' || v.back() == '\r' ||
+                                      v.back() == '"' || v.back() == ' '))
+                    v.pop_back();
+                if (v.size() && v.front() == '"') v.erase(0, 1);
+                std::fclose(f);
+                if (!v.empty()) return v;
+                break;
+            }
+        }
+        std::fclose(f);
+    }
+    char host[256] = {0};
+    if (gethostname(host, sizeof host - 1) == 0 && host[0])
+        return host;
+    return "";
 }
 
 std::string currentSSID()

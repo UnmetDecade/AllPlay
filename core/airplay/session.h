@@ -116,8 +116,10 @@ private:
 
     ControlKeys controlKeys_;
     bool controlKeysReady_ = false;
-    bool sessionActive_ = false;
-    bool connecting_ = false;   ///< 已收到过 RTSP 请求（表示 iPhone 正在连接）
+    // 由处理 RTSP 的连接线程写、主线程读；双通道下还会被**另一条通道**的
+    // accept 线程读（互斥闸门），所以必须是原子的，不能是裸 bool。
+    std::atomic<bool> sessionActive_{false};
+    std::atomic<bool> connecting_{false};   ///< 已收到过 RTSP 请求（表示 iPhone 正在连接）
 
     std::unique_ptr<EventChannel> eventChannel_;
 

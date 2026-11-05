@@ -10,6 +10,7 @@
 #include "common/log.h"
 #include "posix/posix.h"
 
+#include <atomic>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -142,16 +143,31 @@ int main(int argc, char** argv)
         c.mfiDir       = identityDir;
         c.timeoutMs    = 90000;
 
+        // 0x4301 发出后这条 iAP2 链路就是无线 CarPlay 的心跳线，runBtTrigger 会一直读到
+        // 手机离开（见 wireless_client.cpp 的 kSessionKeepAliveMs）。所以这里放到线程里跑，
+        // 主线程只等 Ctrl-C —— 否则按了 Ctrl-C 也得等手机断链才退得出去。
+        std::atomic<bool> btCancel{false};
+        c.cancel = &btCancel;
+
         std::printf("[selftest] 蓝牙：btMac=%s ssid=%s ip=%s port=%u\n",
                     c.btMac.c_str(), c.ssid.c_str(),
                     c.ipAddresses.empty() ? "?" : c.ipAddresses[0].c_str(), rx.port());
         std::fflush(stdout);
 
         auto transport = allplay::posix::makeBluetooth();
-        auto r = core::bt::runBtTrigger(transport.get(), bp, [](const std::string& s) {
-            std::printf("[bt] %s\n", s.c_str());
-            std::fflush(stdout);
+        core::bt::BtTriggerResult r;
+        std::atomic<bool> btDone{false};
+        std::thread btThread([&] {
+            r = core::bt::runBtTrigger(transport.get(), bp, [](const std::string& s) {
+                std::printf("[bt] %s\n", s.c_str());
+                std::fflush(stdout);
+            });
+            btDone.store(true);
         });
+        while (!btDone.load() && !g_stop)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        btCancel.store(true);   // Ctrl-C（或手机已离开）：让链路收工
+        btThread.join();
         std::printf("[selftest] 蓝牙触发：%s%s%s\n", r.ok ? "成功" : "失败",
                     r.ok ? "" : "：", r.ok ? "" : r.error.c_str());
         std::fflush(stdout);

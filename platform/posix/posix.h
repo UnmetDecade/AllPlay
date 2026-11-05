@@ -35,6 +35,10 @@ std::unique_ptr<core::IBluetooth>     makeBluetooth();
 std::string controllerAddress();
 std::string currentSSID();
 
+/// 蓝牙适配器对外显示的名字 —— 手机蓝牙列表里看到的**就是它**（启动页要印的那个）。
+/// Linux 走 BlueZ Adapter1.Alias；macOS 走 IOBluetoothHostController。拿不到返回空串。
+std::string bluetoothAdapterName();
+
 /// 组装一份完整的 POSIX PlatformServices（network + 三个工厂）。
 core::PlatformServices makePlatformServices();
 

@@ -54,7 +54,7 @@ BtTriggerResult runBtTrigger(core::IBluetooth* transport, const BtTriggerParams&
             result.error = trigger0.error();
             say("触发失败：" + result.error);
         } else {
-            say("触发成功：0x4301 已发出（RFCOMM 保持打开，等手机连 AirPlay）");
+            say("iAP2 链路已结束：0x4301 发过，CarPlay 期间链路一直保持到手机断开");
         }
         return result;
     }
@@ -107,7 +107,7 @@ BtTriggerResult runBtTrigger(core::IBluetooth* transport, const BtTriggerParams&
         result.error = trigger.error();
         say("触发失败：" + result.error);
     } else {
-        say("触发成功：0x4301 已发出（RFCOMM 保持打开，等手机连 AirPlay）");
+        say("iAP2 链路已结束：0x4301 发过，CarPlay 期间链路一直保持到手机断开");
     }
     return result;
 }

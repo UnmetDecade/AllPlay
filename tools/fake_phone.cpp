@@ -377,6 +377,8 @@ struct Options {
     int         frames = 0;        // >0：推满 N 帧就收工
     std::string pin    = "3939";
     int         seconds = 0;       // >0：推流最多跑 N 秒
+    int         videoDelayMs = 0;  // --video-delay：RECORD 之后、推第一帧之前干等多久
+                                   //   用来复现"切到视频面但还没新画面"的空窗（查残留帧）
     bool        noTouch = false;
     bool        verbose = false;
     bool        help    = false;
@@ -393,6 +395,7 @@ void printUsage(const char* argv0)
         "  --loop          放完从头再来\n"
         "  --frames N      推满 N 帧就收工（默认 0 = 整个文件过一遍）\n"
         "  --seconds N     推流最多跑 N 秒\n"
+        "  --video-delay MS  RECORD 之后先干等 MS 毫秒再推第一帧（复现切视频面后的空窗）\n"
         "  --pin S         pair-setup 的 PIN（默认 3939）\n"
         "  --aac PATH       48kHz 立体声 ADTS 裸流；给了就建音频流并推（验音频链路）\n"
         "  --no-touch      不连事件通道（不验触摸）\n"
@@ -422,6 +425,7 @@ bool parseArgs(int argc, char** argv, Options* o)
         else if (!std::strcmp(a, "--loop"))       o->loop = true;
         else if (!std::strcmp(a, "--frames"))     o->frames = std::atoi(need(a));
         else if (!std::strcmp(a, "--seconds"))    o->seconds = std::atoi(need(a));
+        else if (!std::strcmp(a, "--video-delay")) o->videoDelayMs = std::atoi(need(a));
         else if (!std::strcmp(a, "--pin"))        o->pin = need(a);
         else if (!std::strcmp(a, "--no-touch"))   o->noTouch = true;
         else if (!std::strcmp(a, "-v") || !std::strcmp(a, "--verbose")) o->verbose = true;
@@ -981,6 +985,14 @@ int main(int argc, char** argv)
             return 1;
         }
         std::printf("[phone] RECORD → %d（宿主此刻应切到视频面）\n", resp.status);
+    }
+
+    // 故意空等：让宿主停在"已切视频面、还没有任何新画面"的窗口里。
+    // 这时如果有上一场会话的残留帧被画出来，就是 sdl_video_sink 的尾巴帧保护没生效。
+    if (opt.videoDelayMs > 0) {
+        std::printf("[phone] 推流前空等 %d ms（查视频面空窗）\n", opt.videoDelayMs);
+        std::fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::milliseconds(opt.videoDelayMs));
     }
 
     // ---- 7) 连 dataPort 推流 ----

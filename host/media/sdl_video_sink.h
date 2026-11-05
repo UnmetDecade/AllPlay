@@ -65,6 +65,10 @@ public:
     /// 丢掉当前这一帧（**只在主线程调**）。会话结束时回启动页要用：
     /// 否则纹理里那张末帧会被 present() 一直重画，屏上卡着最后一帧回不去
     /// ——日志里明明打了"回启动页"，画面却纹丝不动。
+    ///
+    /// 同时把 sink 标成"等下一场"：会话收尾时视频线程还可能再吐几帧进来
+    /// （dropFrame 清完队列之后才到的），留着它们，下一场会话一进 Streaming
+    /// 就会先把**上一场的画面**画出来几帧再换新画面。见 feedAnnexB()。
     void dropFrame();
 
     /// 视频固有尺寸（0 = 还没解出过帧）。主线程读，用于算 letterbox。
@@ -93,6 +97,12 @@ private:
     std::deque<AVFrame*> queue_;            ///< 待上屏（受 mu_）
     size_t               queueCap_ = 3;
     int                  srcW_ = 0, srcH_ = 0;
+    /// dropFrame() 之后、下一场会话的配置帧到来之前为 true：这期间喂进来的帧
+    /// 都是上一场的尾巴，一律丢掉（受 mu_）。
+    bool                 awaitingNewStream_ = false;
+    /// 上面那段"滴答期"里丢掉的帧数（受 mu_）：下一场 configure() 时报一次，
+    /// 用来证明这块保护真的在起作用，而不是碰巧没帧到达。
+    uint64_t             tailDropped_ = 0;
 
     // —— 以下只在主线程碰 ——
     SDL_Texture*          tex_ = nullptr;

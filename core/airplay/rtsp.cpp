@@ -12,7 +12,9 @@ namespace core::airplay {
 
 namespace {
 
-constexpr int kConnTimeoutMs = 10000;   // 断开检测：iPhone 每 ~2s 发 feedback，10s 无请求即判断开
+// 断开检测：iPhone 每 ~2s 发 feedback，5s 无请求即判断开（原来是 10s —— 太钝，
+// 手机拿走后画面要冻 10 秒才回启动页；5s 留够一次丢包的余量）。
+constexpr int kConnTimeoutMs = 5000;
 
 std::string toLower(std::string s)
 {
@@ -26,22 +28,23 @@ struct Channel {
     core::ITcpStream* stream = nullptr;
     const std::shared_ptr<ControlCipher>* cipher = nullptr;   // 指向 RtspServer::cipher_
     std::vector<uint8_t> plain;                               // 解密后的明文缓冲
+    int lastRead = 0;   // 最后一次 read 的返回值：0=超时（手机安静了），<0=断开
 
     int read(uint8_t* buf, size_t n, int timeoutMs)
     {
-        if (!cipher || !*cipher) return stream->read(buf, n, timeoutMs);
+        if (!cipher || !*cipher) return lastRead = stream->read(buf, n, timeoutMs);
 
         while (plain.empty()) {
             uint8_t raw[2048];
             int got = stream->read(raw, sizeof raw, timeoutMs);
-            if (got <= 0) return got;                    // 超时/断开
+            if (got <= 0) return lastRead = got;         // 超时/断开
             (*cipher)->feed(raw, size_t(got));
             std::vector<uint8_t> pt;
             while ((*cipher)->next(&pt)) {
                 if (!pt.empty()) plain.insert(plain.end(), pt.begin(), pt.end());
                 pt.clear();
             }
-            if ((*cipher)->failed()) return -1;          // 鉴权失败
+            if ((*cipher)->failed()) return lastRead = -1;   // 鉴权失败
             // 没凑齐一整帧（TCP 分片）→ 外层 while 继续读；空明文帧同理继续拉下一帧
         }
         size_t take = std::min(n, plain.size());
@@ -156,6 +159,13 @@ void RtspServer::acceptLoop()
     while (!stop_.load()) {
         auto stream = listener_->accept(200);   // 200ms 轮询，stop 及时退出
         if (!stream) continue;
+        if (gate_ && !gate_()) {
+            // 另一条通道正在用（双通道"先连上的赢"）：直接关掉，连线程都不起。
+            // 手机那边表现为连接被重置，它会重试或退回另一条路。
+            stream->close();
+            LOG_INFO("连接被拒：另一条通道正在使用");
+            continue;
+        }
 
         auto sh = std::shared_ptr<core::ITcpStream>(std::move(stream));
         {
@@ -176,6 +186,7 @@ void RtspServer::handleConnection(std::shared_ptr<core::ITcpStream> stream)
 {
     Channel ch{stream.get(), &cipher_, {}};
     bool keep = true;
+    size_t reqCount = 0;
     while (keep && !stop_.load()) {
         // ---- 请求行 ----
         std::string line;
@@ -247,7 +258,14 @@ void RtspServer::handleConnection(std::shared_ptr<core::ITcpStream> stream)
         if (afterResponse_) afterResponse_();
 
         keep = isKeepAlive(req);
+        ++reqCount;
     }
+    LOG_INFO("控制连接结束：共 %zu 条请求，最后一次读%s", reqCount,
+             ch.lastRead == 0 ? "超时（手机不再发包）" : "返回断开（对端关闭/出错）");
+    // 密文只属于这一场会话：pair-verify 装进来的控制密钥，下一场要重新协商。
+    // 不在这里清掉的话，下一条连接的第一句（明文 OPTIONS）会被当成密文去解，
+    // 手机表现为"连上就被对端断开"—— 进程不重启就再也连不上。
+    cipher_.reset();
     if (onDisconnect_) onDisconnect_();   // 控制连接断开（手机断开/退出）→ 复位会话状态
 }
 

@@ -422,6 +422,15 @@ std::string currentSSID()
     }
 }
 
+std::string bluetoothAdapterName()
+{
+    @autoreleasepool {
+        IOBluetoothHostController* c = [IOBluetoothHostController defaultController];
+        const char* n = [[c nameAsString] UTF8String];
+        return n ? n : "";
+    }
+}
+
 }  // namespace allplay::posix
 
 // delegate 实现要放在 MacRfcommStream 完整定义之后（成员调用需要完整类型）

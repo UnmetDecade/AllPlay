@@ -50,6 +50,11 @@ public:
     uint16_t port() const { return port_; }
     void stop();
 
+    /// 换用新一场 pair-verify 的 sharedSecret 重算读写密钥，并踢掉旧连接。
+    /// 通道对象跨会话复用（监听端口不变），但密钥是**每场会话**的 —— 不换的话，
+    /// 宿主发给手机的包手机一侧解不开，iOS 会把整个 CarPlay 会话掐断。
+    void rekey(const std::vector<uint8_t>& sharedSecret);
+
     /// 发触摸（归一化坐标 → 缩放成像素 → HID report → 加密 POST /command）。
     bool sendTouch(const std::vector<TouchPoint>& contacts);
 
