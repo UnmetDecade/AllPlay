@@ -6,7 +6,9 @@
 **协议核心只写一遍。** 每个平台只实现自己的"屏幕 / 喇叭 / 蓝牙 / 网络"，彼此平级 ——
 没有主次平台，也不共享平台代码。
 
-`GPL-3.0` · `Android ✅` · `Linux ✅` · `macOS ⏳` · `Windows ⏳`
+`GPL-3.0` · `Android ✅` · `Linux ✅` · `macOS ✅` · `Windows ⏳`
+
+![AllPlay 在 macOS 上的启动页：等 iPhone 连接](docs/images/allplay-launcher-mac.png)
 
 ---
 
@@ -42,7 +44,7 @@ CarPlay 本该是 iPhone 和车机之间的私有链路。AllPlay 实现的是**
 |---|---|---|---|---|---|
 | **Android** | MediaCodec 硬解 → Surface | AudioTrack | `BluetoothSocket`（JNI） | — | ✅ 端到端跑通 |
 | **Linux / Ubuntu** | ffmpeg 软解 → SDL2 纹理 | SDL2（AAC-LC / Opus / LPCM） | BlueZ：SDP + 裸 RFCOMM（客户端模式） | libusb + 内核 `cdc_ncm` | ✅ **真假两路都端到端跑通** |
-| **macOS** | 同 Linux（**共用同一份宿主代码**） | 同 Linux | IOBluetooth | —（macOS 无 `cdc_ncm`，未做） | ⏳ 宿主可跑，蓝牙未真机验收 |
+| **macOS** | 同 Linux（**共用同一份宿主代码**） | 同 Linux | IOBluetooth | —（macOS 无 `cdc_ncm`，未做） | ✅ **无线真机端到端**（蓝牙触发 → 投屏 → 触摸，掉线自动重连） |
 | **Windows** | ffmpeg（待接） | — | `AF_BTH`（待接入） | — | ⏳ 骨架 |
 
 有线的媒体面**不自己写**：切进 CarPlay 配置后，内核的 `cdc_ncm` 会自己建出一块真网卡，
