@@ -136,3 +136,9 @@ export interface TouchPoint {
  * @returns 是否发出去（事件通道未就绪时为 false）
  */
 export const sendTouch: (contacts: TouchPoint[]) => boolean;
+
+/** 自检：不开会话，直接用 48k 立体声正弦走一遍音频渲染器（仅调试用） */
+export const testAudioSink: (ms?: number) => boolean;
+
+/** 自检：用一段 ADTS 样片验证 AAC 解码，ADTS 与裸帧+ASC 两条路各跑一遍（仅调试用） */
+export const testAudioAac: (bytes: Uint8Array) => boolean;

@@ -121,6 +121,15 @@ private:
     int postTransportSends_ = 0;
     bool transportSeen_ = false;
     bool startSessionSent_ = false;   ///< 0x4301 已发出（发出后控制循环继续跑，直到断链/超时）
+
+    /// 识别报文里"消息清单"(参数 6/7)的详略程度。
+    /// iOS 16/18（iPhone 13 mini、16）收完整清单；iOS 13（iPhone SE2）无论全量、
+    /// 最小集还是干脆不报，都会回 0x1D03 拒掉——三组实验都做完仍失败，判定为
+    /// 老系统本身不收，不再为它做兼容。这里保留"被拒就收窄重试"的兜底，
+    /// 万一将来遇到别的挑剔机型还能自动降级。
+    enum class IdList { Full, Minimal, Omit };
+    IdList idListMode_ = IdList::Full;
+    int    identRetries_ = 0;
 };
 
 }  // namespace core::iap2

@@ -86,6 +86,7 @@ private:
     RtspResponse handlePairVerify(const RtspRequest& req);
     RtspResponse handleSetup(const RtspRequest& req);
     RtspResponse handleCommand(const RtspRequest& req);
+    RtspResponse handleFeedback(const RtspRequest& req);
 
     RtspResponse tlv8Response(const std::vector<uint8_t>& body);
     RtspResponse pairErr(int state);

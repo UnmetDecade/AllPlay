@@ -607,7 +607,7 @@ struct Index {
   }
 
   /// 从 HAP 的 rawfile 里读 MFi 凭证（构建前用 scripts/sync-harmony-identity.sh 拷进去）。
-  private loadMfiInto(cfg: MfiCarrier): void {
+  private loadMfiInto(cfg: TriggerConfig | ReceiverConfig): void {
     try {
       const rm = getContext(this).resourceManager;
       const key: Uint8Array = rm.getRawFileContentSync('identity/identity.pk8');

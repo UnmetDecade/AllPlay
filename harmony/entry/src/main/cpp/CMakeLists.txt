@@ -106,11 +106,14 @@ target_link_libraries(allplay_core PUBLIC
 if(TARGET allplay_airplay)
     target_compile_definitions(allplay_core PRIVATE ALLPLAY_HAVE_AIRPLAY=1)
     # 硬解：AVCodec NDK（vdec / codecbase / core）+ 用 surfaceId 换 NativeWindow
-    target_sources(allplay_core PRIVATE harmony_decoder.cpp)
+    # 音频：acodec 解码 + ohaudio 渲染（PCM 直接交给系统播放器）
+    target_sources(allplay_core PRIVATE harmony_decoder.cpp harmony_audio.cpp)
     target_link_libraries(allplay_core PUBLIC
         allplay_airplay
         native_media_vdec
+        native_media_acodec
         native_media_codecbase
         native_media_core
-        native_window)
+        native_window
+        ohaudio)
 endif()

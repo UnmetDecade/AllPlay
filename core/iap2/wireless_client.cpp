@@ -122,16 +122,30 @@ void WirelessTrigger::sendIdentification()
     Params g30;
     g30.u16(0, 42).str(1, "RouteGuidance").u16(2, 64).u16(4, 64).u16(6, 8);
 
+    // 参数 6/7 是"我能发的 / 我能收的"消息号清单。有的机型（SE2）见到清单里
+    // 有不认识的号会整条拒，所以按 idListMode_ 逐级收窄。
+    static const std::vector<uint16_t> kSentMinimal = {0x4301, 0x5703, 0xaa01, 0xaa03};
+    static const std::vector<uint16_t> kRecvMinimal = {0x4300, 0xaa00, 0xaa02, 0xaa04, 0xaa05};
+
     Params body;
     body.str(0, cfg_.name)
         .str(1, cfg_.model)
         .str(2, cfg_.manufacturer)
         .str(3, cfg_.serial)
         .str(4, cfg_.firmware)
-        .str(5, cfg_.hardware)
-        .u16List(6, kMessagesSent)
-        .u16List(7, kMessagesReceived)
-        .u8(8, 0)
+        .str(5, cfg_.hardware);
+    if (idListMode_ != IdList::Omit) {
+        // 必须升序、无重复：iOS 18 不校验，iOS 13 会校验，乱了就整项拒（实测 SE2/iOS 13）
+        const bool minimal = idListMode_ == IdList::Minimal;
+        std::vector<uint16_t> sent = minimal ? kSentMinimal : kMessagesSent;
+        std::vector<uint16_t> recv = minimal ? kRecvMinimal : kMessagesReceived;
+        for (auto* v : {&sent, &recv}) {
+            std::sort(v->begin(), v->end());
+            v->erase(std::unique(v->begin(), v->end()), v->end());
+        }
+        body.u16List(6, sent).u16List(7, recv);
+    }
+    body.u8(8, 0)
         .u16(9, 20)
         .group(10, g10)
         .str(12, cfg_.language)
@@ -141,6 +155,18 @@ void WirelessTrigger::sendIdentification()
 
     sendMessage(kIdentificationInformation, body);
     log("iAP2 已发识别信息（0x1D01）");
+
+    // 首次发送把字节打出来：被拒时唯一能对照的东西
+    if (identRetries_ == 0 && idListMode_ == IdList::Full) {
+        const auto enc = body.encode();
+        std::string hx;
+        char b[4];
+        for (size_t i = 0; i < enc.size() && i < 200; ++i) {
+            std::snprintf(b, sizeof b, "%02x", enc[i]);
+            hx += b;
+        }
+        log("iAP2 识别报文 " + std::to_string(enc.size()) + " 字节：" + hx);
+    }
 }
 
 void WirelessTrigger::sendSubscriptions()
@@ -211,10 +237,18 @@ void WirelessTrigger::handleMessage(uint16_t msgId, const std::vector<uint8_t>& 
     parseParams(body.data(), body.size(), &params);
 
     switch (msgId) {
-    case kStartIdentification:
-        log("iAP2 rx=0x1d00 StartIdentification");
+    case kStartIdentification: {
+        // 请求体里带的是手机要求/支持的识别参数集合，被拒时是唯一线索
+        std::string hx;
+        char b[4];
+        for (size_t i = 0; i < body.size() && i < 160; ++i) {
+            std::snprintf(b, sizeof b, "%02x", body[i]);
+            hx += b;
+        }
+        log("iAP2 rx=0x1d00 StartIdentification（" + std::to_string(body.size()) + " 字节：" + hx + "）");
         sendIdentification();
         break;
+    }
 
     case kIdentificationAccepted:
         log("iAP2 rx=0x1d02 识别被接受");
@@ -225,11 +259,26 @@ void WirelessTrigger::handleMessage(uint16_t msgId, const std::vector<uint8_t>& 
         // 0x1D03 的参数体是被拒的参数 id 列表：手机明确告诉你"这几项我不收"。
         // 不看这个就只会在 0x4301 之后一条一条盲试。
         std::string ids;
+        bool listRejected = false;
         for (const auto& p : params) {
             if (!ids.empty()) ids += ",";
             ids += std::to_string(p.id);
+            if (p.id == 6 || p.id == 7) listRejected = true;
         }
         log("iAP2 rx=0x1d03 识别被拒（被拒参数 id：" + (ids.empty() ? "无" : ids) + "）");
+
+        // 参数 6/7（消息清单）被拒就收窄再试：别的机型收、SE2 这类不收，
+        // 说明是清单里有它不认识的号。收窄不影响 CarPlay 本身要用的那几条。
+        if (listRejected && identRetries_ < 2) {
+            ++identRetries_;
+            idListMode_ = identRetries_ == 1 ? IdList::Minimal : IdList::Omit;
+            log(std::string("iAP2 收窄消息清单后重发识别：") +
+                (idListMode_ == IdList::Minimal ? "只报 CarPlay 必需的" : "不再报清单"));
+            error_.clear();
+            sendIdentification();
+            break;
+        }
+
         error_ = "识别被手机拒绝（参数 id " + ids + "）";
         break;
     }

@@ -43,7 +43,7 @@ CarPlay 本该是 iPhone 和车机之间的私有链路。AllPlay 实现的是**
 | 平台 | 视频上屏 | 音频 | 无线触发 | 有线（USB） | 状态 |
 |---|---|---|---|---|---|
 | **Android** | MediaCodec 硬解 → Surface | AudioTrack | `BluetoothSocket`（JNI） | — | ✅ 端到端跑通 |
-| **HarmonyOS** | AVCodec NDK 硬解 → XComponent surface | ⏳（先接住不播） | ArkTS `socket.sppConnect` | — | ✅ **真机端到端**（蓝牙触发 → 投屏全屏 → 触摸，Mate 60） |
+| **HarmonyOS** | AVCodec NDK 硬解 → XComponent surface | OH AudioCodec 解码 → OHAudio 渲染（AAC-LC） | ArkTS `socket.sppConnect` | — | ✅ **真机端到端**（蓝牙触发 → 投屏全屏 → 触摸 → 出声，Mate 60） |
 | **Linux / Ubuntu** | ffmpeg 软解 → SDL2 纹理 | SDL2（AAC-LC / Opus / LPCM） | BlueZ：SDP + 裸 RFCOMM（客户端模式） | libusb + 内核 `cdc_ncm` | ✅ **真假两路都端到端跑通** |
 | **macOS** | 同 Linux（**共用同一份宿主代码**） | 同 Linux | IOBluetooth | —（macOS 无 `cdc_ncm`，未做） | ✅ **无线真机端到端**（蓝牙触发 → 投屏 → 触摸，掉线自动重连） |
 | **Windows** | ffmpeg（待接） | — | `AF_BTH`（待接入） | — | ⏳ 骨架 |
@@ -270,7 +270,11 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 - **全屏**：按屏幕长宽比协商显示分辨率（如 1920×868），iPhone 会按这个尺寸重排 CarPlay 界面，
   横屏后 1:1 铺满；启动页仍是竖屏。
 - **触摸**：XComponent `onTouch` → 归一化坐标 → `core` 的事件通道 → HID `touchReport`（双触点）。
-- 音频流已接住但暂不播放；流式播放时界面上的"取消"会被画面盖住。
+- **音频**（`harmony_audio.cpp`）：`OH_AudioCodec` 同步模式解码 → `OHAudio` 渲染。
+  手机给的是**裸 AAC 帧**（type=102、`0x800000`、48kHz 立体声），每帧前面自己补 7 字节 ADTS 头，
+  并把 `OH_MD_KEY_AAC_IS_ADTS` 置 1 —— 走带外 ASC 那条路在这台机的解码器上解不出东西。
+  播放侧是 700ms 的环形池 + 250ms 续播水位，Wi-Fi 抖动和水流都靠它吸收。
+  流式播放时界面上的"取消"会被画面盖住。
 
 ## 当前状态
 

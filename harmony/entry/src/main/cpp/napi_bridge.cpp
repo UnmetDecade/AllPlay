@@ -31,6 +31,7 @@
 #endif
 #ifdef ALLPLAY_HAVE_AIRPLAY
 #include "airplay/server.h"
+#include "harmony_audio.h"
 #include "harmony_decoder.h"
 #include "harmony_platform.h"
 #endif
@@ -888,6 +889,8 @@ private:
     int width_ = 0, height_ = 0;
 };
 
+// 音频：OH_AudioCodec 解码 → OHAudio 渲染（harmony_audio.cpp）。
+// 解码/送声卡都在 core 的 AudioStream 线程里同步做，这里只负责日志与计数。
 class HarmonyAudioOutput : public core::IAudioOutput {
 public:
     void configure(core::AudioCodec codec, int sampleRate, int channels) override
@@ -897,9 +900,29 @@ public:
         rxLogSink(core::Level::Info,
                   ("音频配置：" + std::string(name) + " " + std::to_string(sampleRate) + "Hz/" +
                    std::to_string(channels) + "ch").c_str());
+        sink_.configure(codec, sampleRate, channels);
     }
-    void feed(const uint8_t* /*payload*/, size_t /*len*/, uint32_t /*sample*/) override {}
-    void reset() override {}
+
+    void feed(const uint8_t* payload, size_t len, uint32_t sample) override
+    {
+        sink_.feed(payload, len, sample);
+        const long long n = packets_.fetch_add(1) + 1;
+        if (n == 1 || n % 1500 == 0) {
+            const std::string msg = std::string("音频包 #") + std::to_string(n) +
+                                    "，解码输出 " + std::to_string(sink_.decodedFrames()) +
+                                    "，已送声卡 " + std::to_string(sink_.playedBuffers());
+            rxLogSink(core::Level::Info, msg.c_str());
+        }
+    }
+
+    void reset() override { sink_.reset(); }
+
+    void selfTest(int ms) { sink_.selfTest(ms); }
+    void selfTestAac(const uint8_t* data, size_t len) { sink_.selfTestAac(data, len); }
+
+private:
+    allplay::harmony::OhosAudioSink sink_;
+    std::atomic<long long> packets_{0};
 };
 
 HarmonyVideoOutput g_videoOut;
@@ -1112,6 +1135,52 @@ static napi_value SetVideoSurface(napi_env env, napi_callback_info info)
     return out;
 }
 
+// testAudioSink(ms) —— 不开会话，直接放一段正弦验证 OHAudio 渲染器
+static napi_value TestAudioSink(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t ms = 1000;
+    if (argc >= 1) napi_get_value_int32(env, args[0], &ms);
+    if (ms < 100) ms = 100;
+    if (ms > 5000) ms = 5000;
+    OH_LOG_INFO(LOG_APP, "testAudioSink(%{public}d)", ms);
+    g_audioOut.selfTest(ms);
+
+    napi_value out = nullptr;
+    napi_get_boolean(env, true, &out);
+    return out;
+}
+
+// testAudioAac(bytes: Uint8Array) —— 用一段 ADTS 样片自检 AAC 解码（不需要手机）
+static napi_value TestAudioAac(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value args[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    const uint8_t* data = nullptr;
+    size_t len = 0;
+    bool ok = false;
+    if (argc >= 1) {
+        napi_typedarray_type tt = napi_uint8_array;
+        void* raw = nullptr;
+        napi_value ab = nullptr;
+        size_t off = 0;
+        if (napi_get_typedarray_info(env, args[0], &tt, &len, &raw, &ab, &off) == napi_ok) {
+            data = static_cast<const uint8_t*>(raw);
+            ok = true;
+        }
+    }
+    OH_LOG_INFO(LOG_APP, "testAudioAac(%{public}zu 字节)", ok ? len : size_t(0));
+    if (ok) g_audioOut.selfTestAac(data, len);
+
+    napi_value out = nullptr;
+    napi_get_boolean(env, ok, &out);
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // 模块注册
 // ---------------------------------------------------------------------------
@@ -1133,6 +1202,8 @@ static napi_value Init(napi_env env, napi_value exports)
         {"airplayServerPort", nullptr, AirplayServerPort, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"setVideoSurface", nullptr, SetVideoSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"sendTouch", nullptr, SendTouch, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"testAudioSink", nullptr, TestAudioSink, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"testAudioAac", nullptr, TestAudioAac, nullptr, nullptr, nullptr, napi_default, nullptr},
 #endif
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);

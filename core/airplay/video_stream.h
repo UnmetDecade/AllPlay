@@ -19,6 +19,7 @@
 #include "port/tcp.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -53,6 +54,9 @@ private:
 
     static bool detectConfig(const std::vector<uint8_t>& body, core::VideoCodec* codec,
                              std::vector<uint8_t>* codecData);
+    /// 每 5s 打一次：发端到底给了多少帧/多少码率，我们这边拦了多少
+    void reportWindow();
+
     static std::vector<uint8_t> avccToAnnexB(const std::vector<uint8_t>& p);
     static bool isRandomAccess(core::VideoCodec codec, const uint8_t* d, size_t n);
 
@@ -71,6 +75,14 @@ private:
     uint64_t frames_  = 0;   // 收到的视频帧计数（日志节流）
     bool configured_ = false;
     bool needsKeyFrame_ = true;
+
+    // 5s 窗口统计：发端到底给了多少帧/多少码率，和我们这边拦了多少
+    // （判断"卡"是发端供不上，还是我们消费不动，就看这三个数）
+    uint64_t winFrames_ = 0;
+    uint64_t winBytes_  = 0;
+    uint64_t winGated_  = 0;   // 等关键帧期间被拦下的帧
+    uint64_t winDrop_   = 0;   // 交不出去（解码器入队失败）的帧
+    std::chrono::steady_clock::time_point winStart_ = std::chrono::steady_clock::now();
     core::VideoCodec codec_ = core::VideoCodec::H264;
 };
 

@@ -121,19 +121,41 @@ void ScreenStream::handleConnection(core::ITcpStream& stream)
 
         const bool ra = isRandomAccess(codec_, annexb.data(), annexb.size());
         ++frames_;
+        ++winFrames_;
+        winBytes_ += annexb.size();
         if (frames_ <= 5 || frames_ % 300 == 0)
             LOG_INFO("屏幕流：视频帧 %zuB %s%s", annexb.size(), ra ? "IDR" : "非IDR",
                      (needsKeyFrame_ && !ra) ? "（闸门拦）" : "→解码");
 
         // IDR 自含（instant decoder refresh），解码器解到 IDR 会自动重置参考链，无需显式 flush。
         // 注意：不能在首帧输出前 flush——MediaCodec.flush() 会丢掉 configure 时设的 CSD，导致永久黑屏。
-        if (needsKeyFrame_ && !ra) continue;            // 闸门：等关键帧
+        if (needsKeyFrame_ && !ra) {                    // 闸门：等关键帧
+            ++winGated_;
+            reportWindow();
+            continue;
+        }
         if (ra) needsKeyFrame_ = false;
         if (video_ && !video_->feedAnnexB(annexb.data(), annexb.size())) {
             needsKeyFrame_ = true;            // 入队失败（丢帧）→ 重新放闸，等下一个关键帧
+            ++winDrop_;
             if (onNeedKeyFrame_) onNeedKeyFrame_();   // 立刻请关键帧，别等 5s 盲发
         }
+        reportWindow();
     }
+}
+
+void ScreenStream::reportWindow()
+{
+    const auto now = std::chrono::steady_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - winStart_).count();
+    if (ms < 5000) return;
+    const double sec = double(ms) / 1000.0;
+    LOG_INFO("屏幕流：%.1fs 内 %llu 帧（%.1f fps），%.0f KB/s，闸门拦 %llu，交不出 %llu",
+             sec, (unsigned long long)winFrames_, double(winFrames_) / sec,
+             double(winBytes_) / 1024.0 / sec, (unsigned long long)winGated_,
+             (unsigned long long)winDrop_);
+    winFrames_ = winBytes_ = winGated_ = winDrop_ = 0;
+    winStart_ = now;
 }
 
 bool ScreenStream::detectConfig(const std::vector<uint8_t>& body, core::VideoCodec* codec,

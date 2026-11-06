@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <thread>
@@ -126,7 +127,7 @@ RtspResponse Session::handle(const RtspRequest& req)
     if (req.method == "RECORD") { sessionActive_ = true; connecting_ = false; return RtspResponse::ok(); }
     if (req.method == "TEARDOWN") { markDisconnected(); return RtspResponse::ok(); }
     if (req.method == "POST" && pathIs(path, "/command")) return handleCommand(req);
-    if (req.method == "POST" && pathIs(path, "/feedback")) return RtspResponse::ok();
+    if (req.method == "POST" && pathIs(path, "/feedback")) return handleFeedback(req);
 
     return RtspResponse::ok();   // ANNOUNCE 等未识别路径
 }
@@ -446,6 +447,29 @@ RtspResponse Session::handleCommand(const RtspRequest& req)
     if (type == "forceKeyFrame") {
         for (auto& s : streams_) s->requestKeyFrame();
         LOG_INFO("/command forceKeyFrame：已请求关键帧（%zu 个屏幕流）", streams_.size());
+    }
+    return RtspResponse::ok();
+}
+
+RtspResponse Session::handleFeedback(const RtspRequest& req)
+{
+    // 手机每 ~2s 发一次。正经接收端要按自己实际的缓冲深度回一份 timing plist，
+    // 手机据此调码率/帧率；回空的等于让它闭着眼睛按最高档发。
+    static int n = 0;
+    if (++n <= 3 || n % 30 == 0) {
+        std::string hx;
+        for (size_t i = 0; i < req.body.size() && i < 64; ++i) {
+            char b[3];
+            std::snprintf(b, sizeof b, "%02x", req.body[i]);
+            hx += b;
+        }
+        LOG_INFO("/feedback #%d：ct=%s body=%zu head=%s", n, req.header("Content-Type").c_str(),
+                 req.body.size(), hx.c_str());
+        if (!req.body.empty() && req.body[0] == '<') {
+            std::string txt(req.body.begin(), req.body.end());
+            if (txt.size() > 600) txt.resize(600);
+            LOG_INFO("/feedback 正文：%s", txt.c_str());
+        }
     }
     return RtspResponse::ok();
 }
