@@ -5,6 +5,7 @@
 #include "crypto/hkdf.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace core::airplay {
@@ -59,9 +60,22 @@ void AudioStream::stop()
 void AudioStream::run()
 {
     uint8_t buf[kMaxDatagram];
+    // 收包间隔看门狗：AAC 一帧 ~21ms，连续两帧之间超过 80ms 就是手机那边送不过来
+    // （或者我们这条线程被抢了）。这是"卡顿"最直接的物证 —— 把间隔和序号差打出来，
+    // 就能区分"网络晚到"和"解码/声卡跟不上"。
+    auto lastRx = std::chrono::steady_clock::now();
+    uint16_t lastSeq = 0;
+    bool haveLast = false;
+    int gapLogs = 0;
+
     while (!stop_.load()) {
         const int n = dataSock_->recv(buf, sizeof buf, kTimeoutMs);
         if (n <= 0) continue;   // 超时/关闭
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto gapMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRx).count();
+        lastRx = now;
 
         // wire = [12B RTP 头][密文][16B tag][8B nonce]
         if (size_t(n) < kRtpHeader + 16 + kNonceTail) continue;
@@ -80,6 +94,15 @@ void AudioStream::run()
         const uint32_t sample = (uint32_t(buf[4]) << 24) | (uint32_t(buf[5]) << 16) |
                                 (uint32_t(buf[6]) << 8) | uint32_t(buf[7]);
         const uint16_t seq = uint16_t((buf[2] << 8) | buf[3]);   // RTP 序号（乱序重排用）
+        if (gapMs > 80 && gapLogs < 40) {
+            ++gapLogs;
+            LOG_WARN("音频收包空档 %lldms（seq %u→%u，丢了 %d 个）", (long long)gapMs,
+                     unsigned(haveLast ? lastSeq : seq), unsigned(seq),
+                     haveLast ? int(int16_t(uint16_t(seq - lastSeq)) - 1) : 0);
+        }
+        lastSeq = seq;
+        haveLast = true;
+
         if (pt.size() > 0) {
             static uint64_t audioPkts = 0;
             if (++audioPkts == 1) {

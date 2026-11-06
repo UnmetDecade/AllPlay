@@ -84,6 +84,13 @@ bool pushAdtsHeader(std::vector<uint8_t>& out, size_t payloadLen, int rate, int 
     return true;
 }
 
+long long monoMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 int bytesPerSample(int ohBits)
 {
     switch (ohBits) {
@@ -130,6 +137,7 @@ void OhosAudioSink::stopRendererLocked()
     renderRate_ = 0;
     renderCh_ = 0;
     renderFmt_ = 0;
+    lastCbMs_.store(0);   // 新渲染器要重新起算，别拿旧时刻算出个假空档
 }
 
 void OhosAudioSink::configure(core::AudioCodec codec, int sampleRate, int channels)
@@ -247,6 +255,8 @@ bool OhosAudioSink::ensureRendererLocked(int rate, int channels, int ohBits)
 
     OH_AudioRenderer_Callbacks cb{};
     cb.OH_AudioRenderer_OnWriteData = &OhosAudioSink::OnWriteData;
+    cb.OH_AudioRenderer_OnInterruptEvent = &OhosAudioSink::OnInterrupt;
+    cb.OH_AudioRenderer_OnError = &OhosAudioSink::OnError;
     OH_AudioStreamBuilder_SetRendererCallback(builder, cb, this);
 
     OH_AudioRenderer* r = nullptr;
@@ -278,11 +288,21 @@ double OhosAudioSink::setRingFormatLocked(int rate, int channels, int bytesPerSa
     std::lock_guard<std::mutex> rk(ringMu_);
     bytesPerFrame_ = channels * (bytesPerSample > 0 ? bytesPerSample : 2);
     // 实测水位会在 ±140ms 里来回摆（手机那边一旦丢包，core 的 jitter buffer
-    // 要攒够几包才肯吐，吐出来又是一大坨）。池子给到 700ms，续播水位 250ms，
-    // 摆到最低点也还剩一百多毫秒，不至于贴底欠载。
-    ringCap_ = size_t(rate) * size_t(bytesPerFrame_) * 7 / 10;
+    // 要攒够几包才肯吐，吐出来又是一大坨）。池子给到 1s：慢机型（SE2）编码吃力，
+    // 送音频是一阵一阵的，700ms 在它身上不够用；iPhone 16 则几乎用不满。
+    // 续播水位固定 250ms，不跟着池子放大 —— 否则一次欠载要静音大半秒才回来。
+    ringCap_ = size_t(rate) * size_t(bytesPerFrame_) * 10 / 10;
     if (ringCap_ < 8192) ringCap_ = 8192;
-    prefill_ = ringCap_ * 5 / 14;   // ~250ms
+    // 两个水位：开流头一拍和续播不是一回事。
+    // 手机刚开流时会**先卡 2.4 秒**（实测），然后一口气把积压吐过来；
+    // 那之前只攒 250ms 就开播，第一帧就欠载、连爆好几次。
+    // 所以头一拍等 600ms 再开声，开声之后立刻降回 250ms ——
+    // 后面偶尔的欠载要快恢复，不能一直拖着 600ms 的静音。
+    resumePrefill_ = size_t(rate) * size_t(bytesPerFrame_) / 4;      // 250ms
+    startPrefill_  = size_t(rate) * size_t(bytesPerFrame_) * 3 / 5;  // 600ms
+    if (startPrefill_ > ringCap_ * 3 / 4) startPrefill_ = ringCap_ * 3 / 4;
+    if (resumePrefill_ > ringCap_ / 2) resumePrefill_ = ringCap_ / 2;
+    prefill_ = startPrefill_;
     waiting_ = true;   // 起步也先攒够再播，别一上来就欠载
     if (rate <= 0 || bytesPerFrame_ <= 0) return 0.0;
     return double(ringCap_ / size_t(bytesPerFrame_)) * 1000.0 / double(rate);
@@ -292,12 +312,40 @@ void OhosAudioSink::pushPcm(const uint8_t* p, size_t n)
 {
     if (n == 0) return;
     pcmBytes_.fetch_add((long long)n);
+
+    // 声卡回调停摆看门狗：解码还在出帧，但声卡回调长时间没来 = 声音断了。
+    // 来电、别的应用抢焦点、路由切换都会这样，以前只能靠人耳发现。
+    const long long now = monoMs();
+    const long long last = lastCbMs_.load();
+    if (last != 0 && cbGapLogs_ < 60) {
+        const long long gap = now - last;
+        if (gap > 300) {
+            ++cbGapLogs_;
+            LOG_WARN("[aud] 声卡回调停了 %lldms（上次 #%lld，解码已到 %lld）",
+                     gap, played_.load(), decoded_.load());
+        }
+    }
+
     std::lock_guard<std::mutex> rk(ringMu_);
     ring_.insert(ring_.end(), p, p + n);
-    // 落后太多就丢最老的：音频宁可掉一点也别越积越延迟
+    // 落后太多就丢最老的：音频宁可掉一点也别越积越延迟。
+    // 但**一次丢到 70%**，不是"超出多少丢多少"。实测开流时手机会先囤两秒再一口气吐过来，
+    // 逐帧丢弃会把这团积压切成四十来个 9~21ms 的小断口 —— 每一个都是一声"咔"，
+    // 连起来就是用户听到的那片噪音。切一个大断口只响一下，水位也立刻回到目标，
+    // 后面不会反复贴着上限磨。
     size_t avail = ring_.size() - ringHead_;
     if (avail > ringCap_) {
-        ringHead_ += avail - ringCap_;
+        const size_t target = ringCap_ * 7 / 10;
+        const size_t drop = avail - target;
+        const double bps = double(rate_) * double(bytesPerFrame_ > 0 ? bytesPerFrame_ : 4);
+        static int dropLogs = 0;
+        if (dropLogs < 20) {
+            ++dropLogs;
+            LOG_WARN("[aud] 缓冲溢出：水位 %.0fms 超上限，一次切掉最老 %.0fms 回到 %.0fms",
+                     double(avail) * 1000.0 / bps, double(drop) * 1000.0 / bps,
+                     double(target) * 1000.0 / bps);
+        }
+        ringHead_ += drop;
         // 按整帧丢，避免把一帧 PCM 劈开
         ringHead_ -= ringHead_ % size_t(bytesPerFrame_ > 0 ? bytesPerFrame_ : 1);
     }
@@ -526,6 +574,7 @@ int32_t OhosAudioSink::OnWriteData(OH_AudioRenderer* /*renderer*/, void* userDat
 {
     auto* self = static_cast<OhosAudioSink*>(userData);
     auto* out = static_cast<uint8_t*>(buffer);
+    self->lastCbMs_.store(monoMs());
     // 只拿 ringMu_：这条是声卡回调线程，绝不能被仍在等解码器输入 buffer 的线程堵住
     std::lock_guard<std::mutex> lk(self->ringMu_);
     if (out == nullptr || length <= 0) return 0;
@@ -551,6 +600,15 @@ int32_t OhosAudioSink::OnWriteData(OH_AudioRenderer* /*renderer*/, void* userDat
             return 0;
         }
         self->waiting_ = false;
+        // 开声了就降回续播水位：这一场后面再欠载要 250ms 就回来，不能一直等 600ms
+        if (self->prefill_ != self->resumePrefill_) {
+            LOG_INFO("[aud] 开声，续播水位从 %.0fms 降到 %.0fms",
+                     double(self->prefill_) * 1000.0 /
+                         (double(self->renderRate_) * double(self->renderCh_) * 2.0),
+                     double(self->resumePrefill_) * 1000.0 /
+                         (double(self->renderRate_) * double(self->renderCh_) * 2.0));
+            self->prefill_ = self->resumePrefill_;
+        }
     }
 
     const size_t take = std::min(want, have);
@@ -562,7 +620,15 @@ int32_t OhosAudioSink::OnWriteData(OH_AudioRenderer* /*renderer*/, void* userDat
     if (take < want) {
         std::memset(out + take, 0, want - take);
         self->waiting_ = true;          // 抽空了：下次先攒够再说
-        ++self->underruns_;
+        const long long un = ++self->underruns_;
+        // 每次欠载都打一行：之前每 600 次回调才打一行，5 次欠载全被吞了。
+        // 欠载是"听着断一下"的直接来源，必须能和上游的收包空档对上时间。
+        LOG_WARN("[aud] 欠载 #%lld：只拿到 %zu/%d 字节（缺 %.0fms，水位剩 %zu，入 %lld / 出 %lld）",
+                 un, take, int(length),
+                 double(want - take) * 1000.0 /
+                     (double(self->renderRate_ > 0 ? self->renderRate_ : 48000) *
+                      double(self->renderCh_ > 0 ? self->renderCh_ : 2) * 2.0),
+                 have - take, self->pcmBytes_.load(), self->takenBytes_.load());
     }
     if (self->ringHead_ == self->ring_.size()) {
         self->ring_.clear();
@@ -575,6 +641,23 @@ int32_t OhosAudioSink::OnWriteData(OH_AudioRenderer* /*renderer*/, void* userDat
                  n, take, int(length), take < want ? "（补静音）" : "", left, self->underruns_,
                  self->pcmBytes_.load(), self->takenBytes_.load());
     }
+    return 0;
+}
+
+int32_t OhosAudioSink::OnInterrupt(OH_AudioRenderer* /*renderer*/, void* /*userData*/,
+                                   OH_AudioInterrupt_ForceType type, OH_AudioInterrupt_Hint hint)
+{
+    // 来电、别的应用抢焦点、耳机插拔都会走到这里。系统会自己暂停/恢复声卡，
+    // 我们要做的只是把它记下来 —— 以前这条路径完全静默，"来电后卡死"无从查起。
+    LOG_WARN("[aud] 声卡被打断：type=%d hint=%d（type: 0=强制 1=共享；hint: 0=打断 1=降音 2=暂停 3=恢复 4=停止）",
+             int(type), int(hint));
+    return 0;
+}
+
+int32_t OhosAudioSink::OnError(OH_AudioRenderer* /*renderer*/, void* /*userData*/,
+                               OH_AudioStream_Result error)
+{
+    LOG_ERROR("[aud] 声卡报错：%d", int(error));
     return 0;
 }
 

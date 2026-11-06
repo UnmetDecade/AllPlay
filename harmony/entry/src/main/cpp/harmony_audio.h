@@ -69,6 +69,11 @@ private:
 
     static int32_t OnWriteData(OH_AudioRenderer* renderer, void* userData,
                                void* buffer, int32_t length);
+    /// 系统打断（来电、别的应用抢焦点、路由切换）：不处理会表现为"声音没了/卡住"
+    static int32_t OnInterrupt(OH_AudioRenderer* renderer, void* userData,
+                               OH_AudioInterrupt_ForceType type, OH_AudioInterrupt_Hint hint);
+    static int32_t OnError(OH_AudioRenderer* renderer, void* userData,
+                           OH_AudioStream_Result error);
 
     // 两把锁，锁序 mu_ → ringMu_（OnWriteData 只拿 ringMu_，永不等 mu_）：
     // 解码那条路会为了等输入 buffer 阻塞十几毫秒，播放回调绝不能排在它后面。
@@ -94,11 +99,17 @@ private:
     std::vector<uint8_t> ring_;   // PCM 环形缓冲（线性数组 + 读头，攒够大再压缩）
     size_t ringHead_ = 0;
     size_t ringCap_ = 0;
-    size_t prefill_ = 0;          // 欠载后要重新攒够这么多字节才续播
+    size_t prefill_ = 0;          // 现在生效的续播水位（开头高、跑起来后降下来）
+    size_t startPrefill_ = 0;     // 开流头一次的水位：要扛住手机开流时的卡顿
+    size_t resumePrefill_ = 0;    // 跑起来后的续播水位：欠载恢复要快
     bool   waiting_ = false;      // 正在等缓冲填上来（这段时间输出静音）
     long long underruns_ = 0;
     int chunkBase_ = 0;           // 声卡回调的常规块大小（字节），用来识别"补账"大块
     int chunkOdd_ = 0;            // 非常规块出现次数
+    /// 上一次声卡回调的时刻（毫秒，CLOCK_MONOTONIC）。声卡回调停了 = 声音没了/卡住，
+    /// 而解码还在往里灌 —— 这种"上不接下"以前完全看不出来，只能靠人耳判断。
+    std::atomic<long long> lastCbMs_{0};
+    int cbGapLogs_ = 0;
 
     std::atomic<long long> packets_{0};
     std::atomic<long long> decoded_{0};
