@@ -3,6 +3,7 @@
 // ============================================================================
 // 覆盖：
 //   ① 线格式：参数编解码往返、字符串 NUL、CSM 拆帧（含垃圾前置/分片）
+//   ①b 方控：媒体键 → HID usage/报表 → 0x4E02 报文、按键队列的进出与溢出
 //   ② 链路层：两个 LinkEngine 经内存管道握手（marker→SYN→ACK→NORMAL），
 //      控制载荷双向可靠送达、序号/校验和路径正确
 //   ③ MFi 签名：identity/ 加载 + 32 字节摘要签名 + 用证书公钥验签
@@ -10,10 +11,12 @@
 //      跑完 识别→MFi→订阅→0x5703→0x4301
 //
 // 用法： iap2_test [identity目录]   （默认 <项目根>/identity）
+#include "iap2/hid.h"
 #include "iap2/link.h"
 #include "iap2/wire.h"
 #include "iap2/wireless_client.h"
 #include "mfi/mfi_identity.h"
+#include "port/control.h"
 
 #include <openssl/bn.h>
 #include <openssl/ecdsa.h>
@@ -133,6 +136,56 @@ void testWire()
     CHECK(!fr.next(&id, &body), "分片未齐不发帧");
     fr.feed(frame.data() + 3, frame.size() - 3);
     CHECK(fr.next(&id, &body) && id == 0x4301 && body == enc, "CSM 拆帧（容忍前置垃圾/分片）");
+}
+
+// ---------------------------------------------------------------------------
+// ①b 方控（媒体键 → HID 报表 → iAP2 报文）
+// ---------------------------------------------------------------------------
+void testHid()
+{
+    std::printf("== ①b 方控编码 ==\n");
+    using namespace core::iap2;
+
+    const HidUsage next = mediaKeyUsage(core::MediaKey::NextTrack);
+    CHECK(next.page == 0x000c && next.id == 0x00b5, "下一首 → Consumer Scan Next(0xB5)");
+    const HidUsage hook = mediaKeyUsage(core::MediaKey::PhoneAccept);
+    CHECK(hook.page == 0x000b && hook.id == 0x0020, "接听 → Telephony HookSwitch");
+
+    // 按下报 usage，抬起报 0（HID 惯例）
+    const auto down = hidReport(core::MediaKey::NextTrack, true);
+    CHECK(down.size() == 4 && down[0] == 0x0c && down[1] == 0x00 && down[2] == 0xb5 &&
+          down[3] == 0x00, "按下报表 = 页 0x000C / usage 0x00B5（小端）");
+    const auto up = hidReport(core::MediaKey::NextTrack, false);
+    CHECK(up.size() == 4 && up[2] == 0 && up[3] == 0, "抬起报表 usage = 0");
+    const auto withId = hidReport(core::MediaKey::PlayPause, true, 3);
+    CHECK(withId.size() == 5 && withId[0] == 3, "带报表 ID 时首字节是 ID");
+
+    // 报文：CSM id = 0x4E02，参数 0 = 报表
+    const auto frame = hidReportMessage(core::MediaKey::NextTrack, true);
+    CsmFramer fr;
+    fr.feed(frame.data(), frame.size());
+    uint16_t id = 0;
+    std::vector<uint8_t> body;
+    CHECK(fr.next(&id, &body) && id == kAccessoryHidReport, "报文的 CSM id = 0x4E02");
+    std::vector<Param> ps;
+    CHECK(parseParams(body.data(), body.size(), &ps) && ps.size() == 1 && ps[0].id == 0 &&
+          ps[0].payload == down, "参数 0 = 报表字节");
+
+    // 队列：先进先出；超过容量丢最老的
+    core::MediaKeyQueue q;
+    q.push(core::MediaKey::Play, true);
+    q.push(core::MediaKey::Play, false);
+    core::MediaKeyEvent ev;
+    CHECK(q.pop(&ev) && ev.key == core::MediaKey::Play && ev.down, "队列先进先出");
+    CHECK(q.pop(&ev) && !ev.down, "队列出到抬起事件");
+    CHECK(!q.pop(&ev), "空队列返回 false");
+    const size_t extra = 3;
+    for (size_t i = 0; i < core::MediaKeyQueue::kCapacity + extra; ++i)
+        q.push(core::MediaKey::NextTrack, i % 2 == 0);
+    CHECK(q.size() == core::MediaKeyQueue::kCapacity, "满了不再长");
+    // 最老的三条被丢掉，队首是第 3 条（i=3 → down=false）
+    CHECK(q.pop(&ev) && ev.key == core::MediaKey::NextTrack && !ev.down,
+          "溢出丢最老的那条");
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +465,7 @@ int main(int argc, char** argv)
 {
     const std::string dir = argc > 1 ? argv[1] : "identity";
     testWire();
+    testHid();
     testLink();
     testMfi(dir);
     testFlow(dir);

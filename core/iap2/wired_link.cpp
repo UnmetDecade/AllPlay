@@ -7,6 +7,7 @@
 #include "iap2/wired_link.h"
 
 #include "common/log.h"
+#include "iap2/hid.h"
 #include "iap2/wire.h"
 #include "mfi/mfi_identity.h"
 
@@ -157,6 +158,26 @@ bool WiredLink::negotiate(int timeoutMs, std::string* err)
         *err = "等 " + std::to_string(timeoutMs) + " ms 没协商完（对端一次都没回 SYN？）";
     }
     return false;
+}
+
+bool WiredLink::sendMediaKey(core::MediaKey key, bool down)
+{
+    Params p;
+    p.bytes(0, hidReport(key, down));
+    sendMessage(kAccessoryHidReport, p);
+    LOG_INFO("[%s] 方控：%s%s", kTag, core::mediaKeyName(key), down ? "（按下）" : "（抬起）");
+    return true;
+}
+
+int WiredLink::pumpMediaKeys(core::MediaKeyQueue& q)
+{
+    int n = 0;
+    core::MediaKeyEvent ev;
+    while (q.pop(&ev)) {
+        sendMediaKey(ev.key, ev.down);
+        ++n;
+    }
+    return n;
 }
 
 void WiredLink::sendMessage(uint16_t msgId, const Params& params)

@@ -20,6 +20,7 @@
 #include "iap2/link.h"
 #include "iap2/wire.h"
 #include "mfi/mfi_identity.h"
+#include "port/control.h"
 #include "port/stream.h"
 
 #include <atomic>
@@ -66,6 +67,11 @@ struct WirelessTriggerConfig {
     /// 宿主在 AirPlay 会话结束后置位它，好让这次触发收工、重新排下一次。
     const std::atomic<bool>* cancel = nullptr;
 
+    /// 方控按键队列（可空）。上层（UI / 系统媒体键 / 将来的硬件按键）往这里 push，
+    /// run() 每轮排干一次并编码成 iAP2 HID 报表发出去。**必须比本对象活得久**。
+    /// 传空 = 这条链路不支持方控（行为与以前完全一致）。
+    core::MediaKeyQueue* keyQueue = nullptr;
+
     int timeoutMs = 60000;
 };
 
@@ -102,6 +108,8 @@ private:
     void sendMessage(uint16_t msgId, const Params& params);
     void sendIdentification();
     void sendSubscriptions();
+    /// 排干方控队列（run() 的线程里调用；链路是单线程的，别在别的线程直接发）
+    void pumpMediaKeys();
     void sendWifiConfiguration();
     void sendStartSession();
     void handleMessage(uint16_t msgId, const std::vector<uint8_t>& body);

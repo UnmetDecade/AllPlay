@@ -22,6 +22,7 @@
 
 #include "iap2/link.h"
 #include "iap2/wire.h"
+#include "port/control.h"
 #include "port/stream.h"
 
 #include <cstdint>
@@ -141,6 +142,13 @@ public:
 
     /// 泵一次，把这一轮攒到的完整 CSM 消息依次交出来。false = 传输层断开。
     bool pump(int readTimeoutMs, std::vector<Message>* out);
+
+    /// 方控：发一次按键（编码见 iap2/hid.h）。**必须和 pump 在同一个线程调用**——
+    /// 链路层的 seq/ack 是单线程状态。返回值只表示"进了发送队列"。
+    bool sendMediaKey(core::MediaKey key, bool down);
+
+    /// 方控：把队列里的按键一次发完，返回发出的条数。同上，只在 pump 线程里用。
+    int pumpMediaKeys(core::MediaKeyQueue& q);
 
     LinkEngine&       engine() { return engine_; }
     const LinkEngine& engine() const { return engine_; }

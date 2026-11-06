@@ -29,8 +29,10 @@ add_library(allplay_core STATIC
     airplay/audio_stream.cpp
     iap2/wire.cpp
     iap2/link.cpp
+    iap2/hid.cpp
     iap2/wireless_client.cpp
     iap2/wired_link.cpp
+    port/control.cpp
     usb/usbmux.cpp
     usb/plist_xml.cpp
     usb/tls_stream.cpp

@@ -63,12 +63,17 @@ AirPlay 直接绑到那块网卡上就行，NTB16 / 以太网 / IPv6 全是内�
 ```
 host/          宿主层（组合根）—— 装配下面三层，管窗口/主循环/输入
 platform/      适配层 —— 用系统 API 实现 core/port 的接口（POSIX / BlueZ / IOBluetooth / Win32 / JNI）
-core/port/     接口层 —— 纯抽象，无实现（ITcpStream / IBluetooth / IVideoOutput / PlatformServices …）
+core/port/     接口层 —— 纯抽象，无实现（ITcpStream / IBluetooth / IVideoOutput / MediaKeyQueue …）
 core/          协议核心 —— 纯 C++，不含任何平台头，唯一三方依赖是 OpenSSL
 ```
 
 **只有 `core/` 是"这个项目本身"**：RTSP、iAP2、加密原语、屏幕流、事件通道全在这里，
 可以脱离任何平台单独编译和自测。平台差异一律通过 `core/port/*.h` 注入。
+
+反方向的输入（**方控 / 媒体键**）也走同一套分层：`core/port/control.h` 只定义"按了什么键"
+和线程安全的 `MediaKeyQueue`，上层把物理按键按进队列，`iap2` 侧（无线 `WirelessTrigger`、
+有线 `WiredLink`）负责编码成 HID 报表发回手机。**按键从哪来（界面、系统媒体键、硬件 GPIO）
+由各平台自己实现**，`core` 不碰。
 
 <details>
 <summary>分层架构图（点击展开）</summary>

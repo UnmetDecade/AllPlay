@@ -46,7 +46,9 @@ add_library(allplay_proto STATIC
     ${ALLPLAY_ROOT}/core/common/log.cpp
     ${ALLPLAY_ROOT}/core/iap2/wire.cpp
     ${ALLPLAY_ROOT}/core/iap2/link.cpp
+    ${ALLPLAY_ROOT}/core/iap2/hid.cpp
     ${ALLPLAY_ROOT}/core/iap2/wireless_client.cpp
+    ${ALLPLAY_ROOT}/core/port/control.cpp
 )
 target_include_directories(allplay_proto PUBLIC ${ALLPLAY_ROOT}/core)
 # wireless_client.h 里带着 IMfiIdentity 指针 —— 头文件要么拉 openssl/evp.h，

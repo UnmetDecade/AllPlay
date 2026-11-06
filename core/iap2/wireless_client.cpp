@@ -1,6 +1,7 @@
 #include "iap2/wireless_client.h"
 
 #include "common/log.h"
+#include "iap2/hid.h"
 
 #include <algorithm>
 #include <chrono>
@@ -195,6 +196,25 @@ void WirelessTrigger::sendSubscriptions()
     sendMessage(kStartCallStateUpdates, calls);
 
     log("iAP2 已发 5 条订阅");
+}
+
+void WirelessTrigger::pumpMediaKeys()
+{
+    if (!cfg_.keyQueue) return;
+    // 会话没起来之前按下的键没有意义（CarPlay 还没接管媒体），直接丢掉，
+    // 免得一开场就把几秒前松开的键补发给手机。
+    if (!link_.ready()) {
+        cfg_.keyQueue->clear();
+        return;
+    }
+    core::MediaKeyEvent ev;
+    while (cfg_.keyQueue->pop(&ev)) {
+        Params p;
+        p.bytes(0, hidReport(ev.key, ev.down));
+        sendMessage(kAccessoryHidReport, p);
+        log(std::string("方控：") + core::mediaKeyName(ev.key) +
+            (ev.down ? "（按下）" : "（抬起）"));
+    }
 }
 
 void WirelessTrigger::sendWifiConfiguration()
@@ -415,6 +435,8 @@ bool WirelessTrigger::run()
         }
 
         link_.tick(nowMs());
+        // 方控：上层随时可以 push，这里每轮排干（链路单线程，发包只能在这个线程）
+        pumpMediaKeys();
 
         // 0x4301 发出后这条 iAP2 链路就是无线 CarPlay 的"心跳线"：iOS 会一直在上面
         // 发消息，配件必须继续读、继续 ACK。**停读约 30 秒，iOS 就判定配件掉线，

@@ -7,6 +7,21 @@
 
 ---
 
+## [未发布]
+
+### 新增
+
+- **方控接口**（`core/port/control.h`）：`MediaKey`（播放/暂停、上一首/下一首、Siri、
+  接听/挂断…）+ 线程安全的 `MediaKeyQueue` + `IMediaKeySink`。方向是**车机 → 手机**，
+  与 `media.h` 相反。按键从哪来（界面按钮、系统媒体键、将来的硬件驱动）由上层实现。
+- **HID 编码**（`core/iap2/hid.h`）：`MediaKey` → HID usage（消费者页 0x0C / 电话页 0x0B）
+  → 报表字节 → `0x4E02` 报文。无线的 `WirelessTrigger` 在 `run()` 里排干队列，
+  有线的 `WiredLink` 提供 `sendMediaKey` / `pumpMediaKeys` 由调用方在 pump 之间调用。
+  **`0x4E0x` 这一族消息号与报表格式尚未在真机上核验**，接真机时用抓包对一遍（要改只有一处）。
+- 自测补 ①b 段：usage 映射、按下/抬起报表、报文往返、队列 FIFO 与溢出。
+
+---
+
 ## [v0.8] — 鸿蒙音频出声 · 2026-11-06
 
 Mate 60 上 CarPlay 的声音出来了：手机建的音频流（type=102、AAC-LC、48kHz 立体声、裸帧）
