@@ -287,19 +287,19 @@ double OhosAudioSink::setRingFormatLocked(int rate, int channels, int bytesPerSa
 {
     std::lock_guard<std::mutex> rk(ringMu_);
     bytesPerFrame_ = channels * (bytesPerSample > 0 ? bytesPerSample : 2);
-    // 实测水位会在 ±140ms 里来回摆（手机那边一旦丢包，core 的 jitter buffer
-    // 要攒够几包才肯吐，吐出来又是一大坨）。池子给到 1s：慢机型（SE2）编码吃力，
-    // 送音频是一阵一阵的，700ms 在它身上不够用；iPhone 16 则几乎用不满。
-    // 续播水位固定 250ms，不跟着池子放大 —— 否则一次欠载要静音大半秒才回来。
-    ringCap_ = size_t(rate) * size_t(bytesPerFrame_) * 10 / 10;
+    // 池子 1.5s。手机送音频是**成团**的：实测连续两包之间能空 550ms（RTP 序号连着，
+    // 一包没丢，就是没发），一坨十几包再一起到。水位必须比这个空档高，否则每来一波
+    // 就把池子抽干一次 —— 这就是"偶尔、轻微卡一下"的全部来源。
+    ringCap_ = size_t(rate) * size_t(bytesPerFrame_) * 3 / 2;
     if (ringCap_ < 8192) ringCap_ = 8192;
     // 两个水位：开流头一拍和续播不是一回事。
     // 手机刚开流时会**先卡 2.4 秒**（实测），然后一口气把积压吐过来；
-    // 那之前只攒 250ms 就开播，第一帧就欠载、连爆好几次。
-    // 所以头一拍等 600ms 再开声，开声之后立刻降回 250ms ——
-    // 后面偶尔的欠载要快恢复，不能一直拖着 600ms 的静音。
-    resumePrefill_ = size_t(rate) * size_t(bytesPerFrame_) / 4;      // 250ms
-    startPrefill_  = size_t(rate) * size_t(bytesPerFrame_) * 3 / 5;  // 600ms
+    // 那之前只攒一点点就开播，第一帧就欠载、连爆好几次。
+    // 所以头一拍等 800ms 再开声，开声之后降回续播水位。
+    // 续播水位 700ms 来自实测的最大团间空档 552ms（再留 150ms 余量）：
+    // 250ms / 450ms 都被一波 550ms 的空档直接抽干过。
+    resumePrefill_ = size_t(rate) * size_t(bytesPerFrame_) * 7 / 10;   // 700ms
+    startPrefill_  = size_t(rate) * size_t(bytesPerFrame_) * 4 / 5;    // 800ms
     if (startPrefill_ > ringCap_ * 3 / 4) startPrefill_ = ringCap_ * 3 / 4;
     if (resumePrefill_ > ringCap_ / 2) resumePrefill_ = ringCap_ / 2;
     prefill_ = startPrefill_;
@@ -329,13 +329,13 @@ void OhosAudioSink::pushPcm(const uint8_t* p, size_t n)
     std::lock_guard<std::mutex> rk(ringMu_);
     ring_.insert(ring_.end(), p, p + n);
     // 落后太多就丢最老的：音频宁可掉一点也别越积越延迟。
-    // 但**一次丢到 70%**，不是"超出多少丢多少"。实测开流时手机会先囤两秒再一口气吐过来，
-    // 逐帧丢弃会把这团积压切成四十来个 9~21ms 的小断口 —— 每一个都是一声"咔"，
+    // 但**一次丢到开流水位**，不是"超出多少丢多少"。实测开流时手机会先囤两秒再一口气吐过来，
+    // 逐帧丢弃会把这团积压切成几十个 9~21ms 的小断口 —— 每一个都是一声"咔"，
     // 连起来就是用户听到的那片噪音。切一个大断口只响一下，水位也立刻回到目标，
     // 后面不会反复贴着上限磨。
     size_t avail = ring_.size() - ringHead_;
     if (avail > ringCap_) {
-        const size_t target = ringCap_ * 7 / 10;
+        const size_t target = startPrefill_;
         const size_t drop = avail - target;
         const double bps = double(rate_) * double(bytesPerFrame_ > 0 ? bytesPerFrame_ : 4);
         static int dropLogs = 0;
