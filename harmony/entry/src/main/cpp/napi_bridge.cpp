@@ -347,6 +347,12 @@ bool getBuffer(napi_env env, napi_value obj, const char* key, std::vector<uint8_
 
 }  // namespace
 
+#ifdef ALLPLAY_HAVE_AIRPLAY
+/// 手机是否已经拨到接收端（实现和接收端实例一起在文件后半段）。
+/// 触发线程用它判断"0x4301 之后手机到底连没连上来"。
+bool rxPhoneConnected();
+#endif
+
 // ===========================================================================
 // 导出给 ArkTS 的四个函数
 // ===========================================================================
@@ -484,6 +490,11 @@ static napi_value Start(napi_env env, napi_callback_info info)
                 " port=" + std::to_string(cfg.airPlayPort) +
                 " security=" + std::to_string(cfg.securityType));
     }
+
+#ifdef ALLPLAY_HAVE_AIRPLAY
+    // 0x4301 之后手机不拨号就重发（见 WirelessTriggerConfig::phoneConnected）
+    cfg.phoneConnected = []() { return rxPhoneConnected(); };
+#endif
 
     // ---- 工作线程 ----
     {
@@ -808,6 +819,16 @@ std::mutex   g_rxMu;                       // 保护 g_receiver / g_rxMfi
 std::unique_ptr<core::airplay::Receiver> g_receiver;
 std::unique_ptr<core::mfi::CertificateMfiIdentity> g_rxMfi;
 std::atomic<napi_threadsafe_function> g_rxTsfn{nullptr};   // 日志 → ArkTS
+
+/// 触发线程问："手机拨过来没有？"
+/// 接收端还没起来时返回 true = "没法判断，别催"—— 但**不**代表手机已连上；
+/// run() 只在它为 true 时停止催，所以接收端一建起来就会立刻反映真实状态。
+bool rxPhoneConnected()
+{
+    std::lock_guard<std::mutex> lk(g_rxMu);
+    if (!g_receiver) return true;
+    return g_receiver->connecting() || g_receiver->sessionActive();
+}
 
 /// core 的日志（LOG_INFO 等）转进 hilog + 界面。用原子量而不是 g_rxMu：
 /// Receiver::start() 持锁期间 core 会打日志，sink 里再去拿锁就自锁了。

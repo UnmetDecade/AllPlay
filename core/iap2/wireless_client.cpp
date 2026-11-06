@@ -64,6 +64,10 @@ std::vector<uint8_t> macBytes(const std::string& mac)
 
 // 0x4301 发出之后 iAP2 链路要保持多久（实际上由手机断开链路来提前结束）。
 constexpr uint64_t kSessionKeepAliveMs = 12ULL * 60 * 60 * 1000;
+/// 0x4301 发出后多久没看到手机拨号就催一次。3 秒：正常机型在 1 秒内就连上了
+/// （iPhone 16 实测 ~200ms），等 10 秒纯粹是让用户对着黑屏干等。
+constexpr uint64_t kAirPlayRetryMs     = 3000;
+constexpr int      kAirPlayRetryMax    = 2;
 
 uint64_t nowMs()
 {
@@ -247,6 +251,7 @@ void WirelessTrigger::sendStartSession()
     sendMessage(kCarPlayStartSession, body);
     setStage(TriggerStage::StartSessionSent);
     startSessionSent_ = true;
+    startSessionAtMs_ = nowMs();
     log("iAP2 已发 0x4301 CarPlayStartSession（airPlayPort=" +
         std::to_string(cfg_.airPlayPort) + "）——等手机连 AirPlay");
 }
@@ -437,6 +442,25 @@ bool WirelessTrigger::run()
         link_.tick(nowMs());
         // 方控：上层随时可以 push，这里每轮排干（链路单线程，发包只能在这个线程）
         pumpMediaKeys();
+
+        // 0x4301 之后手机迟迟不拨号就催：iOS 把这条路由判死之后不会自己重试，
+        // 用户看到的就是"一直黑屏"，只有关开一次 Wi-Fi 才会连上来。
+        if (startSessionSent_ && cfg_.phoneConnected && !phoneSeen_) {
+            if (cfg_.phoneConnected()) {
+                phoneSeen_ = true;
+                log("手机已连上 AirPlay（0x4301 之后 " +
+                    std::to_string(nowMs() - startSessionAtMs_) + "ms）");
+            } else if (nowMs() - startSessionAtMs_ >= kAirPlayRetryMs &&
+                       phoneRetries_ < kAirPlayRetryMax) {
+                ++phoneRetries_;
+                // 先补一份 Wi-Fi 配置再重发会话：手机上一轮很可能没走到 0x5703 的
+                // 落网动作，只重发 0x4301 它照样不动。
+                sendWifiConfiguration();
+                log("3 秒没等到手机连 AirPlay，重发 0x5703 + 0x4301（第 " +
+                    std::to_string(phoneRetries_) + " 次）");
+                sendStartSession();
+            }
+        }
 
         // 0x4301 发出后这条 iAP2 链路就是无线 CarPlay 的"心跳线"：iOS 会一直在上面
         // 发消息，配件必须继续读、继续 ACK。**停读约 30 秒，iOS 就判定配件掉线，

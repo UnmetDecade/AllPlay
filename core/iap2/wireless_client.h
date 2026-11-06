@@ -72,6 +72,13 @@ struct WirelessTriggerConfig {
     /// 传空 = 这条链路不支持方控（行为与以前完全一致）。
     core::MediaKeyQueue* keyQueue = nullptr;
 
+    /// 手机是否已经拨到 AirPlay 端口（可空）。0x4301 发出后 iOS 有概率**不拨号**：
+    /// 实测无线那次，0x4301 → 手机连进来空了 14.5 秒，黑屏的几次干脆一直没连。
+    /// 人工关开一次 Wi-Fi 才会重连 —— 说明手机把这条路由判死之后不会自己重试。
+    /// 给了这个回调，run() 就能在 kAirPlayRetryMs 内没看到连接时重发 0x5703+0x4301，
+    /// 用报文催它重来一次，省得用户自己去动 Wi-Fi。传空 = 不催（老行为）。
+    std::function<bool()> phoneConnected;
+
     int timeoutMs = 60000;
 };
 
@@ -129,6 +136,9 @@ private:
     int postTransportSends_ = 0;
     bool transportSeen_ = false;
     bool startSessionSent_ = false;   ///< 0x4301 已发出（发出后控制循环继续跑，直到断链/超时）
+    bool phoneSeen_ = false;          ///< 手机已经连上 AirPlay（只认第一次，之后不再催）
+    uint64_t startSessionAtMs_ = 0;   ///< 上一次发 0x4301 的时刻（算"多久没连上来"）
+    int  phoneRetries_ = 0;           ///< 已经催过几次
 
     /// 识别报文里"消息清单"(参数 6/7)的详略程度。
     /// iOS 16/18（iPhone 13 mini、16）收完整清单；iOS 13（iPhone SE2）无论全量、
