@@ -108,6 +108,7 @@ EventChannel::EventChannel(std::unique_ptr<core::ITcpListener> listener,
     readKey_  = crypto::hkdfSha512(sharedSecret, "Events-Salt", "Events-Read-Encryption-Key", 32);
     stop_.store(false);
     thread_ = std::thread([this] { run(); });
+    writer_ = std::thread([this] { writeLoop(); });
     LOG_INFO("事件通道就绪 :%u", port_);
 }
 
@@ -122,6 +123,12 @@ void EventChannel::rekey(const std::vector<uint8_t>& sharedSecret)
     plain_.clear();
     if (stream_) stream_->close();   // 上一场的连接已作废，读线程会自己退出内层循环
     stream_.reset();
+    // 上一场攒下的包用新密钥发出去只会让手机困惑，直接丢
+    {
+        std::lock_guard<std::mutex> ok(outMu_);
+        out_.clear();
+        outBytes_ = 0;
+    }
 }
 
 void EventChannel::stop()
@@ -132,7 +139,73 @@ void EventChannel::stop()
         std::lock_guard<std::mutex> lk(mu_);
         if (stream_) stream_->close();
     }
+    outCv_.notify_all();
     if (thread_.joinable()) thread_.join();
+    if (writer_.joinable()) writer_.join();
+}
+
+bool EventChannel::submit(std::vector<uint8_t> plain, bool droppable)
+{
+    constexpr size_t kMaxQueuedBytes = 128 * 1024;
+    std::lock_guard<std::mutex> lk(outMu_);
+
+    if (droppable) {
+        // 触摸是"位置快照"，新的直接覆盖还没发出去的旧的 —— 快速滑动时
+        // 每秒几十上百个包，攒着发只会越积越延迟，而且鼠标也跟不上。
+        for (auto it = out_.begin(); it != out_.end();) {
+            if (it->droppable) {
+                outBytes_ -= it->plain.size();
+                it = out_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    if (outBytes_ + plain.size() > kMaxQueuedBytes) {
+        // 队列被 ACK 塞满 = 对端根本不读，这条连接已经废了；丢最老的换活路
+        if (!out_.empty()) {
+            outBytes_ -= out_.front().plain.size();
+            out_.pop_front();
+        }
+    }
+    outBytes_ += plain.size();
+    out_.push_back(OutMsg{std::move(plain), droppable});
+    outCv_.notify_one();
+    return true;
+}
+
+void EventChannel::writeLoop()
+{
+    for (;;) {
+        OutMsg msg;
+        {
+            std::unique_lock<std::mutex> lk(outMu_);
+            outCv_.wait(lk, [&] { return stop_.load() || !out_.empty(); });
+            if (out_.empty()) return;   // stop 且没东西可发了
+            msg = std::move(out_.front());
+            out_.pop_front();
+            outBytes_ -= msg.plain.size();
+        }
+
+        // 取连接的两个 shared_ptr 后就松锁：下面的 send 可能因为手机不读而阻塞很久，
+        // 绝不能在 mu_ 里阻塞（读线程还要拿它回 ACK，UI 线程也还在等这里返回）。
+        std::shared_ptr<core::ITcpStream> stream;
+        std::shared_ptr<ControlCipher> cipher;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            stream = stream_;
+            cipher = cipher_;
+        }
+        if (!stream || !cipher) continue;
+
+        auto framed = cipher->encrypt(msg.plain.data(), msg.plain.size());
+        if (!stream->writeAll(framed.data(), framed.size())) {
+            const int n = writeFails_.fetch_add(1) + 1;
+            if (n <= 5 || n % 50 == 0)
+                LOG_WARN("事件通道写失败第 %d 次（%zu 字节，%s）", n, framed.size(),
+                         msg.droppable ? "触摸" : "命令/ACK");
+        }
+    }
 }
 
 void EventChannel::run()
@@ -145,7 +218,7 @@ void EventChannel::run()
         {
             std::lock_guard<std::mutex> lk(mu_);
             stream_ = std::move(s);
-            cipher_.reset(new ControlCipher(readKey_.data(), writeKey_.data()));
+            cipher_ = std::make_shared<ControlCipher>(readKey_.data(), writeKey_.data());
             plain_.clear();
         }
 
@@ -189,9 +262,9 @@ void EventChannel::run()
                     LOG_INFO("事件通道收到 %s %s body=%zu", m.method.c_str(), m.uri.c_str(),
                              m.body.size());
                 }
-                const auto ack = ackFor(m);
-                auto framed = cipher_->encrypt(ack.data(), ack.size());
-                if (!stream_->writeAll(framed.data(), framed.size())) break;
+                // ACK 也只入队：读线程绝不能因为对端不读而卡在这里，
+                // 否则整条通道（包括触摸）一起停摆。
+                submit(ackFor(m), false);
             }
         }
 
@@ -206,23 +279,7 @@ void EventChannel::run()
 
 bool EventChannel::sendCommand(const std::shared_ptr<core::bplist::Value>& cmd)
 {
-    std::lock_guard<std::mutex> lk(mu_);
-    if (!stream_ || !cipher_) return false;
-
-    const std::vector<uint8_t> body = bplist::serialize(cmd);
-    char head[256];
-    std::snprintf(head, sizeof head,
-                  "POST /command RTSP/1.0\r\n"
-                  "Content-Type: application/x-apple-binary-plist\r\n"
-                  "Content-Length: %zu\r\n"
-                  "CSeq: %llu\r\n\r\n",
-                  body.size(), (unsigned long long)++cseq_);
-
-    std::vector<uint8_t> wire(head, head + std::strlen(head));
-    wire.insert(wire.end(), body.begin(), body.end());
-    auto framed = cipher_->encrypt(wire.data(), wire.size());   // cipher 有状态，需在锁内
-    // 也持锁写：保证写计数器顺序 == 实际发包顺序（否则手机侧 ChaCha 计数错位、解密失败）
-    return stream_->writeAll(framed.data(), framed.size());
+    return sendCommandImpl(cmd, false);
 }
 
 bool EventChannel::sendTouch(const std::vector<TouchPoint>& contacts)
@@ -233,10 +290,32 @@ bool EventChannel::sendTouch(const std::vector<TouchPoint>& contacts)
         {"uuid",      bplist::str("2a2a2a2a")},
         {"hidReport", bplist::data(report)},
     });
-    const bool ok = sendCommand(cmd);
-    if (!ok)
-        LOG_WARN("触摸发送失败：事件通道未就绪");
-    return ok;
+    // 触摸走"可丢"通道：它由 UI 线程调用，绝不能在 socket 上等，
+    // 也允许后来居上（位置快照，中间那些点没人要）。
+    return sendCommandImpl(cmd, true);
+}
+
+bool EventChannel::sendCommandImpl(const std::shared_ptr<core::bplist::Value>& cmd, bool droppable)
+{
+    // 只做"拼出明文 + 入队"，真正的加密和发送在写线程里，
+    // 这样 UI 线程永远不会卡在 send() 上（这是"一直滑动就卡死"的根因）。
+    std::vector<uint8_t> wire;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!stream_ || !cipher_) return false;   // 手机还没连事件通道
+
+        const std::vector<uint8_t> body = bplist::serialize(cmd);
+        char head[256];
+        std::snprintf(head, sizeof head,
+                      "POST /command RTSP/1.0\r\n"
+                      "Content-Type: application/x-apple-binary-plist\r\n"
+                      "Content-Length: %zu\r\n"
+                      "CSeq: %llu\r\n\r\n",
+                      body.size(), (unsigned long long)++cseq_);
+        wire.assign(head, head + std::strlen(head));
+        wire.insert(wire.end(), body.begin(), body.end());
+    }
+    return submit(std::move(wire), droppable);
 }
 
 }  // namespace core::airplay

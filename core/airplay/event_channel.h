@@ -20,7 +20,9 @@
 #include "port/tcp.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -63,19 +65,36 @@ public:
 
 private:
     void run();   // accept + 读侧（解密 + 解析 + 回 200 ACK）
+    /// 独立的写线程：加密 + 发出去。见 .cpp 里"为什么不能让调用方自己写"。
+    void writeLoop();
+    /// 入队一段待发明文。非阻塞 —— 触摸是 UI 线程调的，绝不能在这里等 socket。
+    bool submit(std::vector<uint8_t> plain, bool droppable);
+    bool sendCommandImpl(const std::shared_ptr<core::bplist::Value>& cmd, bool droppable);
+
+    struct OutMsg {
+        std::vector<uint8_t> plain;
+        bool droppable = false;   ///< true = 触摸这种"新的覆盖旧的"的包，队列挤时可丢
+    };
 
     std::unique_ptr<core::ITcpListener> listener_;
     int  width_ = 1280, height_ = 720;
     uint16_t port_ = 0;
     std::atomic<bool> stop_{false};
     std::thread thread_;
+    std::thread writer_;
 
     std::mutex mu_;                          // 保护 stream_/cipher_/cseq_/plain_
     std::shared_ptr<core::ITcpStream> stream_;
-    std::unique_ptr<ControlCipher> cipher_;
+    std::shared_ptr<ControlCipher> cipher_;
     uint64_t cseq_ = 0;
     std::vector<uint8_t> writeKey_, readKey_;
     std::vector<uint8_t> plain_;             // 读侧解密后的明文缓冲（未凑整帧的部分）
+
+    std::mutex outMu_;                       // 保护发送队列
+    std::condition_variable outCv_;
+    std::deque<OutMsg> out_;
+    size_t outBytes_ = 0;
+    std::atomic<int> writeFails_{0};
 };
 
 }  // namespace core::airplay
