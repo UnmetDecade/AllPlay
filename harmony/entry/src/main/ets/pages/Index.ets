@@ -30,7 +30,7 @@ import { start as iap2Start, feed as iap2Feed, stop as iap2Stop,
 
 import { PlayMark, BluetoothGlyph, GearIcon } from '../components/Glyphs';
 import { ConnectVisual } from '../components/ConnectVisual';
-import { WifiConfig, loadWifiConfig } from '../common/SettingsStore';
+import { WifiConfig, loadWifiConfig, securityTypeLabel } from '../common/SettingsStore';
 import { localIpv4, linkedSsid, apIpv4, hotspotActive, netSummary } from '../common/NetInfo';
 import {
   C_BLUE, C_CARD_LINE, C_EYEBROW, C_FOOTER, C_GREEN, C_HINT, C_INK,
@@ -112,6 +112,8 @@ struct Index {
   @State logs: string[] = [];
   @State showLogs: boolean = false;
   @State ssid: string = '';
+  /// iAP2 的 securityType：0 开放 / 1 WEP / 2 WPA2 / 3 WPA3（设置页里选）
+  @State securityType: number = 2;
   @State passphrase: string = '';
   @State localIp: string = '';
   /// 宽屏（平板 / 横屏）：两栏并排；手机竖屏改为上下排
@@ -312,7 +314,8 @@ struct Index {
       this.log('⚠ 本机连的是「' + real + '」，设置里填的是「' + this.ssid +
                '」——手机会去连后者，找不到本机。请把车机 Wi-Fi 改成同一个网络。');
     } else {
-      this.log('本机 Wi-Fi：' + real + '（与设置一致）');
+      this.log('本机 Wi-Fi：' + real + '（与设置一致，加密方式 ' +
+               securityTypeLabel(this.securityType) + '）');
     }
   }
 
@@ -410,6 +413,7 @@ struct Index {
     const cfg: WifiConfig = await loadWifiConfig(getContext(this));
     this.ssid = cfg.ssid;
     this.passphrase = cfg.passphrase;
+    this.securityType = cfg.securityType;
     this.checkNetwork();
   }
 
@@ -577,7 +581,7 @@ struct Index {
       btMac: '00:00:00:00:00:00',
       ssid: this.ssid,
       passphrase: this.passphrase,
-      securityType: 2,
+      securityType: this.securityType,
       airPlayPort: 7000,
       mfiDir: '',
       timeoutMs: 45000,
@@ -589,6 +593,9 @@ struct Index {
 
     if (this.ssid.length === 0) {
       this.log('还没设置 Wi-Fi（右上角「设置」）——0x5703 会发空的网络配置');
+    } else if (this.securityType !== 0 && this.passphrase.length === 0) {
+      this.log('⚠ 「' + this.ssid + '」是' + securityTypeLabel(this.securityType) +
+               '网络，但设置里没填密码 —— 手机连不上');
     }
 
     this.nativeRunning = true;

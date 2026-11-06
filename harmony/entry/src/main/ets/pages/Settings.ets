@@ -11,7 +11,10 @@
 
 import { router } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { WifiConfig, loadWifiConfig, saveWifiConfig } from '../common/SettingsStore';
+import {
+  SEC_OPEN, SEC_WEP, SEC_WPA2, SEC_WPA3_TRANSITION,
+  WifiConfig, loadWifiConfig, saveWifiConfig
+} from '../common/SettingsStore';
 import { localIpv4 } from '../common/NetInfo';
 import { ChevronLeft } from '../components/Glyphs';
 import {
@@ -23,6 +26,7 @@ import {
 struct Settings {
   @State ssid: string = '';
   @State passphrase: string = '';
+  @State securityType: number = SEC_WPA2;
   @State localIp: string = '';
   @State saveHint: string = '';
   @State loaded: boolean = false;
@@ -31,6 +35,7 @@ struct Settings {
     const cfg: WifiConfig = await loadWifiConfig(getContext(this));
     this.ssid = cfg.ssid;
     this.passphrase = cfg.passphrase;
+    this.securityType = cfg.securityType;
     this.localIp = localIpv4();
     this.loaded = true;
   }
@@ -39,6 +44,12 @@ struct Settings {
     const cfg = new WifiConfig();
     cfg.ssid = this.ssid.trim();
     cfg.passphrase = this.passphrase;
+    cfg.securityType = this.securityType;
+    // 加密网络没密码发出去也没用，手机连不上；开放网络则允许空密码
+    if (!cfg.isComplete()) {
+      this.saveHint = cfg.ssid.length === 0 ? '先填网络名称' : '这个加密方式需要密码';
+      return;
+    }
     try {
       await saveWifiConfig(getContext(this), cfg);
       this.saveHint = '已保存';
@@ -59,6 +70,21 @@ struct Settings {
       .fontColor(C_EYEBROW)
       .width('100%')
       .margin({ top: 18, bottom: 8 })
+  }
+
+  @Builder
+  securityChip(value: number, label: string) {
+    Text(label)
+      .fontSize(14)
+      .fontWeight(this.securityType === value ? FontWeight.Medium : FontWeight.Normal)
+      .fontColor(this.securityType === value ? C_WHITE : C_INK)
+      .backgroundColor(this.securityType === value ? C_BLUE : '#F2F3F5')
+      .borderRadius(10)
+      .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+      .margin({ right: 8, bottom: 8 })
+      .onClick(() => {
+        this.securityType = value;
+      })
   }
 
   build() {
@@ -124,18 +150,42 @@ struct Settings {
               this.ssid = v;
             })
 
-          this.fieldLabel('密码')
-          TextInput({ text: this.passphrase, placeholder: 'WPA2 密码' })
-            .type(InputType.Password)
-            .height(48)
-            .fontSize(16)
-            .fontColor(C_INK)
-            .backgroundColor(C_WHITE)
-            .borderRadius(12)
-            .border({ width: 1, color: C_CARD_LINE })
-            .onChange((v: string) => {
-              this.passphrase = v;
-            })
+          this.fieldLabel('加密方式')
+          Flex({ wrap: FlexWrap.Wrap }) {
+            this.securityChip(SEC_OPEN, '无密码')
+            this.securityChip(SEC_WEP, 'WEP')
+            this.securityChip(SEC_WPA2, 'WPA2')
+            this.securityChip(SEC_WPA3_TRANSITION, 'WPA3')
+          }
+          .width('100%')
+
+          Text(this.securityType === SEC_OPEN
+            ? '开放网络：手机连上去不用密码。'
+            : (this.securityType === SEC_WPA2
+              ? '家用路由器最常见的一项。WPA2/WPA3 混合模式也选这个。'
+              : (this.securityType === SEC_WPA3_TRANSITION
+                ? '路由器只开 WPA3（或 WPA3 过渡模式）时选这个。'
+                : 'WEP 已淘汰，只在老设备上用。')))
+            .fontSize(12)
+            .fontColor(C_HINT)
+            .width('100%')
+            .lineHeight(18)
+            .margin({ bottom: 4 })
+
+          if (this.securityType !== SEC_OPEN) {
+            this.fieldLabel('密码')
+            TextInput({ text: this.passphrase, placeholder: 'WPA2 密码' })
+              .type(InputType.Password)
+              .height(48)
+              .fontSize(16)
+              .fontColor(C_INK)
+              .backgroundColor(C_WHITE)
+              .borderRadius(12)
+              .border({ width: 1, color: C_CARD_LINE })
+              .onChange((v: string) => {
+                this.passphrase = v;
+              })
+          }
 
           this.fieldLabel('本机地址')
           Row() {
