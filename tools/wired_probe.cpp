@@ -31,6 +31,10 @@
 //   pkill -f gvfsd-gphoto2
 //   （第三件 —— 内核驱动 ipheth —— 本程序会自己 detach，不用管）
 // 另外 /dev/bus/usb/* 是 root 独占的，**整个程序要 sudo 跑**。
+//
+// macOS 上**什么都不用停**：控制面走系统 usbmuxd（就是 Finder 用的那条隧道），
+// 媒体面网卡由 AppleUSBNCMData 建好，程序不用 sudo。前提是这台 Mac 在 Finder 里
+// 被手机信任过。对应地，--pid / --wait 这两个"切配置"选项在 macOS 上不起作用。
 #include "airplay/info.h"
 #include "airplay/server.h"
 #include "iap2/wired_link.h"
@@ -183,6 +187,7 @@ void usage()
         "  wired_probe --link         跑完整控制面：链路协商 → 识别 → MFi → 电源/订阅\n"
         "                             → 等 0x4300 → 回 0x4301（要带 NCM 网卡的 IPv6）\n"
         "  wired_probe --mfi-dir D    配合 --link：MFi 身份目录（identity.pk8 + certificate.p7b）\n"
+        "  wired_probe --state-dir D  配对材料存哪（默认 defaultStateDir()；不存就每次都弹信任框）\n"
         "  wired_probe --airplay-port N  0x4301 报给手机的 AirPlay 端口（默认 7000）\n"
         "  wired_probe --ncm-link-local A  钉在 NCM 网卡上的 IPv6 链路本地地址\n"
         "                             （默认 fe80::2，同 DiPlay 的 config.linkLocal）\n"
@@ -219,6 +224,7 @@ int main(int argc, char** argv)
     bool     doMarker = false;
     bool     doLink = false;
     std::string mfiDir;
+    std::string stateDir;          ///< 配对材料存哪（空 = defaultStateDir()）
 
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
@@ -229,6 +235,7 @@ int main(int argc, char** argv)
         else if (std::strcmp(a, "--marker") == 0) doMarker = true;
         else if (std::strcmp(a, "--link") == 0) { doLink = true; doPair = true; }
         else if (std::strcmp(a, "--mfi-dir") == 0 && i + 1 < argc) mfiDir = argv[++i];
+        else if (std::strcmp(a, "--state-dir") == 0 && i + 1 < argc) stateDir = argv[++i];
         else if (std::strcmp(a, "--port") == 0 && i + 1 < argc) port = uint16_t(std::atoi(argv[++i]));
         else if (std::strcmp(a, "--airplay-port") == 0 && i + 1 < argc)
             airPlayPort = uint16_t(std::atoi(argv[++i]));
@@ -238,10 +245,23 @@ int main(int argc, char** argv)
         else { usage(); return 2; }
     }
 
-    // ---- ① 打开 USB 侧：切配置 + 选配置 + 拿 USBMUX 管道 ----
+    // ---- ① 打开有线链路 ----
     std::printf("=== ① 打开有线链路 ===\n");
     allplay::posix::WiredUsbInfo info;
     std::string err;
+#ifdef __APPLE__
+    (void)opt;   // macOS 不枚举 USB，产品号/切配置等待都没有意义
+    // macOS 不切配置、不抢接口：控制面借系统 usbmuxd 的隧道（跟 Finder/Xcode 用的是
+    // 同一条），媒体面网卡由 AppleUSBNCMData 自己建好。前提：这台 Mac 被手机信任过。
+    std::unique_ptr<core::usb::IMux> mux = allplay::posix::openSystemUsbMuxd(&info, &err);
+    if (!mux) {
+        std::printf("✗ 打开失败：%s\n", err.c_str());
+        return 1;
+    }
+    std::printf("  ✓ 序列号 %s（系统 usbmuxd）\n", info.serial.c_str());
+    std::printf("  ✓ USBMUX 接口 %u（iAP2 的 USBHostTransport 号；NCM 网卡归 AppleUSBNCMData）\n",
+                info.usbMuxInterface);
+#else
     auto pipe = allplay::posix::openWiredCarPlay(opt, &info, &err);
     if (!pipe) {
         std::printf("✗ 打开失败：%s\n", err.c_str());
@@ -254,11 +274,19 @@ int main(int argc, char** argv)
                 "（建网卡的是内核 cdc_ncm）\n",
                 info.usbMuxInterface, info.bulkOut, info.bulkIn, info.ncmControlInterface,
                 info.ncmDataInterface);
+#endif
 
     // ---- ② 另一条路：整条控制面（--pair）----
     if (doPair) {
         std::printf("\n=== ② 控制面：配对 → 会话 → TLS → carkit 服务 ===\n");
+#ifdef __APPLE__
+        core::usb::WiredControl wc(std::move(mux));
+#else
         core::usb::WiredControl wc(*pipe);
+#endif
+        // 配对材料按手机序列号存下来复用 —— 不存的话每轮都换一套 HostID/证书，
+        // 手机每次都当陌生人，**每次都弹"要信任此电脑吗？"**。
+        wc.setPairStore(info.serial, stateDir);
         if (!wc.connect(&err)) {
             std::printf("✗ 控制面没跑通：%s\n", err.c_str());
             return 1;
@@ -333,12 +361,20 @@ int main(int argc, char** argv)
             ep.sourceVersion = core::airplay::kSourceVersion;
 
             allplay::posix::WiredNcmLink ncm;
+#ifdef __APPLE__
+            std::printf("\n=== ⑦ 有线媒体面（AppleUSBNCMData 建的网卡）===\n");
+            if (!allplay::posix::prepareWiredNcmDarwin(info.serial, &ncm, &err)) {
+                std::printf("✗ 有线媒体面起不来：%s\n", err.c_str());
+                return 1;
+            }
+#else
             std::printf("\n=== ⑦ 有线媒体面（内核 cdc_ncm）===\n");
             if (!allplay::posix::prepareWiredNcm(int(info.bus), int(info.address), ncmLinkLocal, &ncm,
                                                  &err)) {
                 std::printf("✗ 有线媒体面起不来：%s\n", err.c_str());
                 return 1;
             }
+#endif
             ep.ipv6Addresses = ncm.ipv6;
             std::printf("  ✓ NCM 网卡 %s：MAC %s，IPv6 %s%s\n", ncm.ifname.c_str(), ncm.mac.c_str(),
                         ncm.ipv6.front().c_str(), ncm.pinned ? "（地址是这次钉的）" : "");
@@ -442,7 +478,12 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    // ---- ② usbmux v2 握手 ----
+    // ---- ② 拿一条到手机端口的通道 ----
+#ifdef __APPLE__
+    // macOS 上没有我们自己的 usbmux v2：系统 daemon 就是那一层，直接要隧道。
+    std::printf("\n=== ② 经系统 usbmuxd 连手机端口 ===\n");
+    auto ch = mux->connectTcp(port, 5000, &err);
+#else
     std::printf("\n=== ② usbmux v2 握手 ===\n");
     core::usb::UsbMux mux(*pipe);
     if (!mux.begin(&err)) {
@@ -454,11 +495,12 @@ int main(int argc, char** argv)
     // ---- ③ 开迷你 TCP 到 lockdown ----
     std::printf("\n=== ③ 连手机端口 %u ===\n", port);
     auto ch = mux.connectTcp(port, 5000, &err);
+#endif
     if (!ch) {
         std::printf("✗ 连不上：%s\n", err.c_str());
         return 1;
     }
-    std::printf("  ✓ SYN-ACK 回来了，迷你 TCP 通了\n");
+    std::printf("  ✓ 隧道通了（端口 %u）\n", unsigned(port));
 
     // ---- ④ 可选：发一条 lockdown QueryType ----
     if (doQuery) {

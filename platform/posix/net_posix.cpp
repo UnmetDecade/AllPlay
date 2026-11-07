@@ -428,8 +428,9 @@ public:
     std::string interfaceForUsbDevice(int bus, int address) override
     {
 #if defined(__APPLE__)
-        // macOS 没有内核 cdc_ncm（有线 CarPlay 那条路走的是 Apple 自家栈），
-        // 这里给不出网卡名 —— 调用方会退回到"显式指定接口"。
+        // macOS 上没有内核 cdc_ncm 可查：NCM 网卡是 AppleUSBNCMData 挂出来的，
+        // 映射关系只在 IORegistry 里（按序列号找，见 usbmuxd_mac.cpp 的
+        // prepareWiredNcmDarwin）。这里给不出网卡名 —— 调用方会退回到"显式指定接口"。
         (void)bus;
         (void)address;
         return {};
@@ -488,6 +489,12 @@ public:
     std::vector<std::string> interfaceIPv6LinkLocal(const std::string& ifname) override
     {
         std::vector<std::string> out;
+#if defined(__ANDROID__)
+        // Android 宿主没接有线（USB cdc_ncm）这条路（见 core/port/network.h 的默认实现），
+        // 且 getifaddrs 要 API 24+ 才有（minSdk 19 下不声明）—— 直接给空，退回接口默认行为。
+        (void)ifname;
+        return out;
+#else
         if (ifname.empty()) return out;
 
         struct ifaddrs* head = nullptr;
@@ -503,6 +510,7 @@ public:
         }
         freeifaddrs(head);
         return out;
+#endif
     }
 };
 

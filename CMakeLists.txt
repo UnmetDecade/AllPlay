@@ -56,9 +56,11 @@ if(NOT WIN32)
         set_source_files_properties(platform/posix/bt_iobluetooth.mm
             PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
         set(POSIX_FRAMEWORKS "-framework IOBluetooth" "-framework CoreWLAN" "-framework Foundation")
-        set(POSIX_USB_SRC "")
+        # 有线（USB）CarPlay：macOS 不碰 USB —— 控制面借系统 usbmuxd 的隧道，媒体面用
+        # AppleUSBNCMData 自己建好的 en 网卡（见 platform/posix/usbmuxd_mac.cpp 文件头）。
+        set(POSIX_USB_SRC platform/posix/usbmuxd_mac.cpp)
         message(STATUS "蓝牙传输: IOBluetooth (macOS)")
-        message(STATUS "有线传输: 跳过（有线 CarPlay 走 Linux 的 cdc_ncm + libusb，macOS 侧未做）")
+        message(STATUS "有线传输: 系统 usbmuxd + AppleUSBNCMData (macOS，不需要 DriverKit)")
     else()
         set(POSIX_MDNS_SRC platform/posix/mdns_avahi.cpp)
         set(POSIX_BT_SRC   platform/posix/bt_bluez.cpp)
@@ -107,24 +109,26 @@ if(NOT WIN32)
     target_link_libraries(core_selftest PRIVATE allplay_posix)
     target_compile_options(core_selftest PRIVATE -Wall -Wextra)
 
-    # USB 探针（有线 CarPlay 的第一道验证）：只依赖 libusb-1.0，不碰协议核心。
-    # 先跑它确认"能不能切进 CarPlay 配置、内核认不认 NCM 网卡"，再决定要不要写整条栈。
-    if(NOT APPLE)
-        if(LIBUSB_FOUND)   # 探测在平台分支里做过一次
-            add_executable(usb_probe tools/usb_probe.cpp)
-            target_link_libraries(usb_probe PRIVATE PkgConfig::LIBUSB)
-            target_compile_options(usb_probe PRIVATE -Wall -Wextra)
-            message(STATUS "USB 探针 usb_probe: 启用（libusb ${LIBUSB_VERSION}）")
+    # 有线控制面探针：在"切进 CarPlay 配置"之上，验 usbmux v2 + 迷你 TCP +
+    # lockdown plist 通道这一段。要 allplay_posix（usb_libusb）与 allplay_core（usbmux）。
+    # macOS 上同一个探针换一条传输层（系统 usbmuxd + AppleUSBNCMData），所以也编。
+    if(APPLE)
+        add_executable(wired_probe tools/wired_probe.cpp tools/wired_selftest.cpp)
+        target_link_libraries(wired_probe PRIVATE allplay_posix)
+        target_compile_options(wired_probe PRIVATE -Wall -Wextra)
+        message(STATUS "有线探针 wired_probe: 启用（macOS，系统 usbmuxd）")
+    elseif(LIBUSB_FOUND)   # 探测在平台分支里做过一次
+        add_executable(usb_probe tools/usb_probe.cpp)
+        target_link_libraries(usb_probe PRIVATE PkgConfig::LIBUSB)
+        target_compile_options(usb_probe PRIVATE -Wall -Wextra)
+        message(STATUS "USB 探针 usb_probe: 启用（libusb ${LIBUSB_VERSION}）")
 
-            # 有线控制面探针：在"切进 CarPlay 配置"之上，验 usbmux v2 + 迷你 TCP +
-            # lockdown plist 通道这一段。要 allplay_posix（usb_libusb）与 allplay_core（usbmux）。
-            add_executable(wired_probe tools/wired_probe.cpp tools/wired_selftest.cpp)
-            target_link_libraries(wired_probe PRIVATE allplay_posix)
-            target_compile_options(wired_probe PRIVATE -Wall -Wextra)
-            message(STATUS "有线探针 wired_probe: 启用")
-        else()
-            message(STATUS "USB 探针 usb_probe / 有线探针 wired_probe: 跳过（缺 libusb-1.0-dev）")
-        endif()
+        add_executable(wired_probe tools/wired_probe.cpp tools/wired_selftest.cpp)
+        target_link_libraries(wired_probe PRIVATE allplay_posix)
+        target_compile_options(wired_probe PRIVATE -Wall -Wextra)
+        message(STATUS "有线探针 wired_probe: 启用")
+    else()
+        message(STATUS "USB 探针 usb_probe / 有线探针 wired_probe: 跳过（缺 libusb-1.0-dev）")
     endif()
 
     # 桌面开发宿主（SDL2，可选：缺 SDL2/SDL2_ttf 时跳过）

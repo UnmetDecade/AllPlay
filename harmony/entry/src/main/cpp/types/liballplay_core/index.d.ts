@@ -81,6 +81,23 @@ export const airplayIdentity: (stateDir: string) => AirplayIdentity;
 export const probeCarPlay: (host: string, port: number, deviceId: string) => boolean;
 
 /**
+ * 在指定网卡上自己找手机的 CarPlay 控制服务并打一枪。
+ *
+ * 系统 `@ohos.net.mdns` 的发现/广播都没有网络参数，只能走默认网络；热点和
+ * STA/蜂窝同时开着时查询包发不到手机所在的那张网卡。这里直接在 ifaceIp
+ * （通常是热点地址 192.168.43.1）上发 mDNS PTR 查询，解析到 SRV+A 之后
+ * 调 `GET /ctrl-int/1/connect`。后台线程，最多找 120 秒。
+ *
+ * @param ifaceIp 要绑的网卡地址（热点 AP 的 IPv4）
+ * @param deviceId AirPlay deviceid（冒号会自动去掉）
+ * @returns 监听是否启动（ifaceIp 为空时 false）
+ */
+export const startCarPlayCtrlWatch: (ifaceIp: string, deviceId: string) => boolean;
+
+/** 停掉 `startCarPlayCtrlWatch` 起的线程。 */
+export const stopCarPlayCtrlWatch: () => void;
+
+/**
  * 本机热点（AP）网卡的 IPv4；没开热点返回空串。
  * 鸿蒙的 connection.getAllNetsSync() 不列 AP 网卡，只能走内核 getifaddrs 要。
  */

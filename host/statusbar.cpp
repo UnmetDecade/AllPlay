@@ -16,12 +16,16 @@ const FontFile kMonoCandidates[] = {
     {"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0},
     {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0},
     {"/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", 0},
+    {"/System/Library/Fonts/SFNSMono.ttf", 0},                        // macOS
+    {"/System/Library/Fonts/Menlo.ttc", 0},
 };
 
 const FontFile kSansCandidates[] = {
     {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 0},
     {"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", 0},
     {"/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 0},
+    {"/System/Library/Fonts/SFNS.ttf", 0},                             // macOS
+    {"/System/Library/Fonts/Helvetica.ttc", 0},
 };
 
 // 中文界面：优先带全 CJK 字形的字体（它们也含拉丁字母，不必再拼 DejaVu）

@@ -14,10 +14,16 @@
 // **媒体面不在这里。** 切进 CarPlay 配置后，内核的 cdc_ncm 会自己绑上 CDC-NCM 功能、
 // 建出一块真网卡（实测：`cdc_ncm 1-3:6.3 usb0: register 'cdc_ncm' ...`），AirPlay
 // 直接 bind 到那块网卡的 IPv6 链路本地地址即可 —— 不必自己写 NTB16/以太网/IPv6。
+// macOS 同理，只是建网卡的是系统的 AppleUSBNCMData（见本文件末尾的 Darwin 一段）。
 // 本文件只碰 USBMUX 那一个接口，其余接口保持原样让内核去认领。
 #pragma once
 
 #include "port/stream.h"
+#include "usb/mux.h"
+
+#if defined(__APPLE__)
+#include "posix/posix.h"   // WiredNcmLink
+#endif
 
 #include <cstdint>
 #include <memory>
@@ -53,5 +59,22 @@ struct WiredUsbInfo {
 std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
                                                     WiredUsbInfo* info,
                                                     std::string* err);
+
+#if defined(__APPLE__)
+// ---------------------------------------------------------------------------
+// macOS：不碰 USB，借系统 usbmuxd + AppleUSBNCMData
+// ---------------------------------------------------------------------------
+// macOS 上这条路**没有** openWiredCarPlay：系统本来就有 usbmuxd 在管 USB，而且
+// 不允许用户态抢接口，所以控制面改为跟 daemon 要隧道（见 usbmuxd_mac.cpp 文件头）。
+
+/// 用系统 usbmuxd（/var/run/usbmuxd）当控制面的 mux。成功时回填 info（serial 是
+/// usbmuxd 的带横杠 UDID；usbMuxInterface 从 IORegistry 读，读不到按 1）。
+/// 前提：这台 Mac 已经在 Finder 里被 iPhone 信任过。
+std::unique_ptr<core::usb::IMux> openSystemUsbMuxd(WiredUsbInfo* info, std::string* err);
+
+/// macOS 的媒体面：按序列号在 IORegistry 里找 AppleUSBNCMData 挂出来的 enX，
+/// 取它的 IPv6 链路本地地址。不切配置、不钉地址 —— 都是 Apple 自己做的。
+bool prepareWiredNcmDarwin(const std::string& phoneSerial, WiredNcmLink* out, std::string* err);
+#endif
 
 }  // namespace allplay::posix

@@ -49,13 +49,20 @@ Plist makePairRecord(const WiredPairIdentity& id)
 
 }  // namespace
 
-WiredControl::WiredControl(IByteStream& pipe) : pipe_(pipe) {}
+WiredControl::WiredControl(IByteStream& pipe) : pipe_(&pipe) {}
+WiredControl::WiredControl(std::unique_ptr<IMux> mux) : mux_(std::move(mux)) {}
 
 WiredControl::~WiredControl() = default;  // 成员按逆序析构：先服务流，最后才是 mux
 
 bool WiredControl::connect(std::string* err)
 {
-    mux_ = std::make_unique<UsbMux>(pipe_);
+    if (!mux_) {
+        if (pipe_ == nullptr) {
+            if (err != nullptr) *err = "没有可用的 mux（既没给 USB 管道，也没给现成的 mux）";
+            return false;
+        }
+        mux_ = std::make_unique<UsbMux>(*pipe_);
+    }
     if (!mux_->begin(err)) return false;
 
     // ① 这对材料以前**配对成功过** → 直接开会话，**一个 Pair 都不发**。

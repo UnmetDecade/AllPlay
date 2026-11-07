@@ -187,6 +187,7 @@ AAC-LC 无 ADTS 头（且会把 ≤12 字节的 config 小包也喂进来，要�
 | TCP / UDP | POSIX socket ✅ | POSIX socket ✅ | Socket ✅ | Winsock2 ✅ |
 | 网卡信息 | `getifaddrs` ✅ | `getifaddrs` ✅ | `NetworkInterface` ✅ | `GetAdaptersAddresses` ✅ |
 | 蓝牙 | **BlueZ**（SDP + 裸 RFCOMM，客户端模式）✅ 真机验到 `0xAA00` | IOBluetooth ⏳ 未真机验收 | `BluetoothSocket` ✅ | `AF_BTH` ⏳ 骨架 |
+| 有线（USB） | libusb 切配置 + usbmux v2 + 内核 `cdc_ncm` ✅ 真机端到端 | 系统 `usbmuxd` + `AppleUSBNCMData`（不碰 USB，无需 DriverKit）✅ 真机端到端（投屏 + 声音） | — | — |
 | mDNS | avahi ✅ | dns_sd ✅ | `NsdManager` ✅ | ⏳ 待做 |
 | 视频输出 | ffmpeg 软解 + SDL2 ✅ | ffmpeg 软解 + SDL2 ✅ | MediaCodec 硬解 ✅ | ffmpeg ⏳ 待接 |
 | 音频输出 | SDL2（AAC-LC / Opus / LPCM）✅ | SDL2 ✅ | AudioTrack ✅ | ⏳ 待接 |
@@ -197,6 +198,7 @@ AAC-LC 无 ADTS 头（且会把 ≤12 字节的 config 小包也喂进来，要�
 ```
 platform/posix/  net_posix.cpp      mdns_avahi.cpp | mdns_dns_sd.cpp
                  bt_bluez.cpp      | bt_iobluetooth.mm
+                 usb_libusb.cpp    | usbmuxd_mac.cpp
 platform/windows/ net_windows.cpp   bt_windows.cpp
 android/.../cpp/  jni_bridge.cpp
 ```

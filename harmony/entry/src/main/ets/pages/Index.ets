@@ -26,6 +26,7 @@ import { start as iap2Start, feed as iap2Feed, stop as iap2Stop,
          isRunning as iap2Running, TriggerConfig,
          startAirplayServer, stopAirplayServer, airplayServerPort, setVideoSurface, ReceiverConfig,
          airplayIdentity, AirplayIdentity, probeCarPlay, hotspotIpv4,
+         startCarPlayCtrlWatch, stopCarPlayCtrlWatch,
          sendTouch, TouchPoint } from 'liballplay_core.so';
 
 import { PlayMark, BluetoothGlyph, GearIcon } from '../components/Glyphs';
@@ -42,13 +43,6 @@ const IAP2_UUID: string = '00000000-deca-fade-deca-deafdecacafe';
 
 /// 一条日志最多留多少（防止长时间跑把内存吃光）
 const MAX_LOGS: number = 200;
-
-/// 「能装 MFi 凭证」的配置形状：TriggerConfig 与 ReceiverConfig 都有这两个可选字段，
-/// 读 rawfile 的那段逻辑两处共用。
-interface MfiCarrier {
-  mfiKey?: ArrayBuffer;
-  mfiCert?: ArrayBuffer;
-}
 
 // ---- Bonjour TXT（照 core/airplay/server.cpp 的 Receiver::start 抄）----
 // features 必须与 core/airplay/info.cpp 的 DeviceInfo::features 默认值一致：
@@ -140,6 +134,7 @@ struct Index {
     this.startProbe();
     this.startMdns();
     this.startCtrlWatch();
+    this.startNativeCtrlWatch();
   }
 
   aboutToDisappear(): void {
@@ -147,6 +142,7 @@ struct Index {
       clearInterval(this.dotTimer);
       this.dotTimer = -1;
     }
+    stopCarPlayCtrlWatch();
     this.stopCtrlWatch();
     this.stopMdns();
     this.stopProbe();
@@ -274,6 +270,24 @@ struct Index {
       const err = e as BusinessError;
       console.info('[allplay] 停止 mDNS 发现失败：' + err.code + ' ' + err.message);
     }
+  }
+
+  /// 系统 mDNS 只能走默认网络（`@ohos.net.mdns` 没有网卡参数）：热点和家里
+  /// Wi-Fi/蜂窝同时开着时，默认网络不是热点，`_carplay-ctrl` 永远发现不到。
+  /// 这里让原生层直接绑热点网卡再找一次。
+  private startNativeCtrlWatch(): void {
+    const ap: string = this.localIp;
+    if (ap.length === 0) {
+      this.log('原生 mDNS：本机没有热点地址，跳过');
+      return;
+    }
+    if (this.airplayDeviceId.length === 0) {
+      this.log('原生 mDNS：还没有 AirPlay 身份，跳过');
+      return;
+    }
+    const ok: boolean = startCarPlayCtrlWatch(ap, this.airplayDeviceId);
+    this.log('原生 mDNS：在 ' + ap + ' 上找手机的 _carplay-ctrl（' +
+             (ok ? '已启动' : '启动失败') + '）');
   }
 
   /// 0x4301 要报的本机地址：热点开着就报热点网卡的地址，否则报默认网络地址

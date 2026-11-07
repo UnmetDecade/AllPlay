@@ -415,7 +415,16 @@ void OhosAudioSink::feed(const uint8_t* payload, size_t len, uint32_t sample)
     // LPCM：不解码，直接进播放缓冲（格式在 configure 时已按 S16 估）
     if (dec_ == nullptr && codec_ == core::AudioCodec::LPCM) {
         if (renderer_ == nullptr) ensureRendererLocked(rate_, ch_, 1);
-        if (renderer_ != nullptr) pushPcm(payload, len);
+        if (renderer_ != nullptr) {
+            // AirPlay 的 LPCM 是**大端** s16（网络序），渲染器按小端播 —— 逐样本换字节。
+            // 不换的话每个样本的高低字节颠倒，听感是满耳噪音（macOS 宿主上已实测确认）。
+            scratch_.resize(len & ~size_t(1));
+            for (size_t i = 0; i + 1 < len; i += 2) {
+                scratch_[i]     = payload[i + 1];
+                scratch_[i + 1] = payload[i];
+            }
+            pushPcm(scratch_.data(), scratch_.size());
+        }
         if (n <= 3 || n % 600 == 0) {
             LOG_INFO("[aud] LPCM 包 #%lld：%zu 字节，已播 %lld", n, len, played_.load());
         }

@@ -38,6 +38,7 @@ class AllPlaySessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        ensureIdentity()   // 首启把打包进 APK 的 MFi 身份（identity.pk8 + certificate.p7b）落到 files/identity
         val app = application as AllPlayApp
         app.service = this
         native = NativeAllPlay()
@@ -60,6 +61,31 @@ class AllPlaySessionService : Service() {
             startNative()
         }
         return START_STICKY
+    }
+
+    /// 首启把打包进 APK 的 MFi 身份落到 files/identity（identity.pk8 + certificate.p7b）。
+    /// 已存在就不动，所以之后 adb push 覆盖的文件优先于 APK 内置的这份。
+    private fun ensureIdentity() {
+        val dir = java.io.File(filesDir, "identity")
+        val key = java.io.File(dir, "identity.pk8")
+        val cert = java.io.File(dir, "certificate.p7b")
+        if (key.exists() && cert.exists()) return
+        dir.mkdirs()
+        try {
+            if (!key.exists()) copyAsset("identity/identity.pk8", key)
+            if (!cert.exists()) copyAsset("identity/certificate.p7b", cert)
+            android.util.Log.i("AllPlay", "MFi 身份已从 APK 落到 files/identity")
+        } catch (e: Exception) {
+            android.util.Log.e("AllPlay", "MFi 身份落地失败，CarPlay 认证会过不了", e)
+        }
+    }
+
+    private fun copyAsset(name: String, dest: java.io.File) {
+        assets.open(name).use { input ->
+            java.io.FileOutputStream(dest).use { output ->
+                input.copyTo(output)
+            }
+        }
     }
 
     /// 屏幕方向：默认横屏（宽 > 高）；files/portrait 存在则竖屏（宽 < 高）。

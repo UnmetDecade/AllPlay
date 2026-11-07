@@ -56,6 +56,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #undef LOG_DOMAIN
@@ -679,6 +680,52 @@ static napi_value HotspotIpv4(napi_env env, napi_callback_info info)
     return out;
 }
 
+// 给手机的 _carplay-ctrl 服务打一枪（GET /ctrl-int/1/connect）。
+// 系统 mDNS 发现和自建 mDNS 发现都用这一份实现。
+static bool sendCarPlayPoke(const std::string& host, int port, const std::string& deviceId)
+{
+    if (host.empty() || port <= 0 || port >= 65536) return false;
+
+    std::string sid;
+    for (char c : deviceId) if (c != ':') sid.push_back(c);
+
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons(uint16_t(port));
+    if (inet_pton(AF_INET, host.c_str(), &sa.sin_addr) != 1) return false;
+
+    bool ok = false;
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        // 非阻塞 connect + 3s 超时：别把调用方钉在这里
+        int fl = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof sa);
+        if (rc < 0 && errno == EINPROGRESS) {
+            pollfd pfd{fd, POLLOUT, 0};
+            rc = (::poll(&pfd, 1, 3000) > 0) ? 0 : -1;
+            if (rc == 0) {
+                int soerr = 0;
+                socklen_t sl = sizeof soerr;
+                ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
+                if (soerr != 0) rc = -1;
+            }
+        }
+        if (rc == 0) {
+            const std::string hostHeader = host + ":" + std::to_string(port);
+            const std::string req = "GET /ctrl-int/1/connect HTTP/1.1\r\n"
+                                    "Host: " + hostHeader + "\r\n"
+                                    "User-Agent: AirPlay/950.7.1\r\n"
+                                    "AirPlay-Receiver-Device-ID: " + sid + "\r\n"
+                                    "Connection: close\r\n\r\n";
+            ::send(fd, req.data(), req.size(), 0);
+            ok = true;
+        }
+        ::close(fd);
+    }
+    return ok;
+}
+
 // probeCarPlay(host, port, deviceId) → bool
 // 照 Android 的 MdnsService.probeCarPlay：给手机的 _carplay-ctrl._tcp 发一枪
 //   GET /ctrl-int/1/connect
@@ -711,50 +758,330 @@ static napi_value ProbeCarPlay(napi_env env, napi_callback_info info)
         }
     }
 
-    bool ok = false;
-    if (!host.empty() && port > 0 && port < 65536) {
-        std::string sid;
-        for (char c : deviceId) if (c != ':') sid.push_back(c);
-
-        sockaddr_in sa{};
-        sa.sin_family = AF_INET;
-        sa.sin_port   = htons(uint16_t(port));
-        if (inet_pton(AF_INET, host.c_str(), &sa.sin_addr) == 1) {
-            int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-            if (fd >= 0) {
-                // 非阻塞 connect + 3s 超时：别把 ArkTS 主线程钉在这里
-                int fl = fcntl(fd, F_GETFL, 0);
-                fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-                int rc = ::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof sa);
-                if (rc < 0 && errno == EINPROGRESS) {
-                    pollfd pfd{fd, POLLOUT, 0};
-                    rc = (::poll(&pfd, 1, 3000) > 0) ? 0 : -1;
-                    if (rc == 0) {
-                        int soerr = 0;
-                        socklen_t sl = sizeof soerr;
-                        ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
-                        if (soerr != 0) rc = -1;
-                    }
-                }
-                if (rc == 0) {
-                    std::string hostHeader = host + ":" + std::to_string(port);
-                    std::string req = "GET /ctrl-int/1/connect HTTP/1.1\r\n"
-                                      "Host: " + hostHeader + "\r\n"
-                                      "User-Agent: AirPlay/950.7.1\r\n"
-                                      "AirPlay-Receiver-Device-ID: " + sid + "\r\n"
-                                      "Connection: close\r\n\r\n";
-                    ::send(fd, req.data(), req.size(), 0);
-                    ok = true;
-                }
-                ::close(fd);
-            }
-        }
-    }
+    const bool ok = sendCarPlayPoke(host, port, deviceId);
     OH_LOG_INFO(LOG_APP, "carplay probe %{public}s:%{public}d -> %{public}s",
                 host.c_str(), int(port), ok ? "已发" : "失败");
     napi_value out = nullptr;
     napi_get_boolean(env, ok, &out);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// 自己实现的 mDNS 浏览（绑热点网卡）
+// ---------------------------------------------------------------------------
+// 为什么不用 @ohos.net.mdns：它的 createDiscoveryService / addLocalService 都
+// 没有网络/网卡参数（SDK 的 @ohos.net.mdns.d.ts 里确认过），只能跟着系统默认
+// 网络走。热点 + STA + 蜂窝同时存在时，默认网络不是热点，查询包发不到手机所在
+// 的那张网卡上，`_carplay-ctrl` 就永远发现不了 —— 真机症状是 0x4301 发完手机
+// 一声不吭、RTSP 端口 0 连接。这里直接在热点网卡上发 PTR 查询、解析应答，
+// 发现服务后照旧打一枪 /ctrl-int/1/connect。
+//
+// 报文按 RFC 6762 手搓：只处理 PTR(12) / SRV(33) / A(1)，够用。
+// ---------------------------------------------------------------------------
+static std::atomic<bool> g_ctrlWatchStop{false};
+static std::thread g_ctrlWatchThread;
+
+// 把 "a.b.local" 编码成 DNS 名字（长度前缀 + 结尾 0）
+static size_t encodeDnsName(uint8_t* buf, const std::string& name)
+{
+    size_t n = 0;
+    size_t start = 0;
+    while (start < name.size()) {
+        size_t dot = name.find('.', start);
+        if (dot == std::string::npos) dot = name.size();
+        const size_t len = dot - start;
+        if (len == 0) { start = dot + 1; continue; }
+        if (len > 63) return 0;
+        buf[n++] = uint8_t(len);
+        std::memcpy(buf + n, name.data() + start, len);
+        n += len;
+        start = dot + 1;
+    }
+    buf[n++] = 0;
+    return n;
+}
+
+// 跳过一个（可能带压缩指针的）DNS 名字，返回消耗的字节数
+static int skipDnsName(const uint8_t* p, const uint8_t* end)
+{
+    int n = 0;
+    while (p + n < end) {
+        const uint8_t c = p[n];
+        if (c == 0) return n + 1;
+        if ((c & 0xC0) == 0xC0) return n + 2;
+        n += 1 + int(c);
+    }
+    return -1;
+}
+
+// 解出一个（可能带压缩指针的）DNS 名字
+static bool decodeDnsName(const uint8_t* p, size_t len, size_t off, std::string& out, size_t* next)
+{
+    out.clear();
+    int jumps = 0;
+    size_t cur = off;
+    while (cur < len && jumps < 8) {
+        const uint8_t c = p[cur];
+        if (c == 0) {
+            if (jumps == 0 && next) *next = cur + 1;
+            return true;
+        }
+        if ((c & 0xC0) == 0xC0) {
+            if (cur + 1 >= len) return false;
+            const size_t ptr = size_t(((c & 0x3F) << 8) | p[cur + 1]);
+            if (jumps == 0 && next) *next = cur + 2;
+            if (ptr >= len) return false;
+            cur = ptr;
+            jumps++;
+            continue;
+        }
+        if (cur + 1 + c > len) return false;
+        if (!out.empty()) out.push_back('.');
+        out.append(reinterpret_cast<const char*>(p + cur + 1), c);
+        cur += 1 + c;
+    }
+    return false;
+}
+
+// 从一条应答里抠出 SRV 端口和 A 地址；两样都见过才算解析成功
+struct MdnsAnswer {
+    bool hasSrv = false;
+    bool hasA = false;
+    int port = 0;
+    std::string host;
+    std::vector<std::string> ptr;   // 报文里出现的 PTR 目标（服务实例名）
+    std::vector<int> types;         // 出现过的记录类型，排查用
+};
+
+static bool parseMdnsResponse(const uint8_t* p, size_t len, MdnsAnswer& out)
+{
+    if (len < 12) return false;
+    const uint16_t qd = uint16_t((p[4] << 8) | p[5]);
+    const uint16_t an = uint16_t((p[6] << 8) | p[7]);
+    const uint16_t ns = uint16_t((p[8] << 8) | p[9]);
+    const uint16_t ar = uint16_t((p[10] << 8) | p[11]);
+
+    size_t off = 12;
+    for (uint16_t i = 0; i < qd; i++) {
+        const int n = skipDnsName(p + off, p + len);
+        if (n < 0 || off + size_t(n) + 4 > len) return false;
+        off += size_t(n) + 4;
+    }
+
+    const int total = int(an) + int(ns) + int(ar);
+    for (int i = 0; i < total; i++) {
+        const int n = skipDnsName(p + off, p + len);
+        if (n < 0 || off + size_t(n) + 10 > len) return false;
+        off += size_t(n);
+        const uint16_t type  = uint16_t((p[off] << 8) | p[off + 1]);
+        const uint16_t rdlen = uint16_t((p[off + 8] << 8) | p[off + 9]);
+        const size_t rdoff = off + 10;
+        if (rdoff + rdlen > len) return false;
+        out.types.push_back(type);
+        if (type == 12) {                                     // PTR：服务实例名
+            std::string name;
+            if (decodeDnsName(p, len, rdoff, name, nullptr) && !name.empty())
+                out.ptr.push_back(name);
+        } else if (type == 33 && rdlen >= 6) {                // SRV
+            const uint16_t port = uint16_t((p[rdoff + 4] << 8) | p[rdoff + 5]);
+            if (port > 0) { out.port = port; out.hasSrv = true; }
+        } else if (type == 1 && rdlen == 4) {                 // A
+            char buf[INET_ADDRSTRLEN] = {0};
+            in_addr a{};
+            std::memcpy(&a, p + rdoff, 4);
+            if (inet_ntop(AF_INET, &a, buf, sizeof buf) != nullptr) {
+                out.host.assign(buf);
+                out.hasA = true;
+            }
+        }
+        off = rdoff + rdlen;
+    }
+    return out.hasSrv && out.hasA;
+}
+
+static size_t buildMdnsQuery(uint8_t* buf, const std::string& service)
+{
+    size_t n = 0;
+    buf[n++] = 0; buf[n++] = 0;     // id
+    buf[n++] = 0; buf[n++] = 0;     // flags: 标准查询
+    buf[n++] = 0; buf[n++] = 1;     // qdcount
+    buf[n++] = 0; buf[n++] = 0;     // ancount
+    buf[n++] = 0; buf[n++] = 0;     // nscount
+    buf[n++] = 0; buf[n++] = 0;     // arcount
+    n += encodeDnsName(buf + n, service);
+    buf[n++] = 0; buf[n++] = 12;    // PTR
+    buf[n++] = 0x80; buf[n++] = 0x01;   // IN + QU（请求单播应答）
+    return n;
+}
+
+static void ctrlWatchLoop(std::string ifaceIp, std::string deviceId)
+{
+    in_addr ifaddr{};
+    if (inet_pton(AF_INET, ifaceIp.c_str(), &ifaddr) != 1) {
+        OH_LOG_INFO(LOG_APP, "[mdns] 网卡地址不合法：%{public}s", ifaceIp.c_str());
+        return;
+    }
+
+    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        OH_LOG_INFO(LOG_APP, "[mdns] socket 失败 errno=%{public}d", errno);
+        return;
+    }
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#ifdef SO_REUSEPORT
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+#endif
+
+    // 优先抢 5353（组播应答都发到这个端口）；抢不到就用临时端口 + QU 单播应答
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = htons(5353);
+    bool boundWell = ::bind(fd, reinterpret_cast<sockaddr*>(&local), sizeof local) == 0;
+    if (!boundWell) {
+        local.sin_port = 0;
+        ::bind(fd, reinterpret_cast<sockaddr*>(&local), sizeof local);
+    }
+
+    // 加入组播组（imr_interface 指定网卡，这是绑到热点上的关键）
+    ip_mreq mreq{};
+    mreq.imr_multiaddr.s_addr = inet_addr("224.0.0.251");
+    mreq.imr_interface = ifaddr;
+    const int joined = ::setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof mreq);
+    ::setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &ifaddr, sizeof ifaddr);
+    unsigned char ttl = 255;
+    ::setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl);
+    unsigned char loop = 1;
+    ::setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loop, sizeof loop);
+
+    timeval tv{};
+    tv.tv_sec = 0;
+    tv.tv_usec = 400000;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
+    OH_LOG_INFO(LOG_APP,
+                "[mdns] 自建浏览启动：网卡 %{public}s，5353=%{public}s，组播=%{public}s",
+                ifaceIp.c_str(), boundWell ? "占用成功" : "改用临时端口",
+                joined == 0 ? "已加入" : "加入失败");
+
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(5353);
+    inet_pton(AF_INET, "224.0.0.251", &dst.sin_addr);
+
+    // 除了 _carplay-ctrl，再问一遍常用的 AirPlay 服务和服务枚举，
+    // 这样日志里能直接看到手机到底广播了哪些名字。
+    const char* services[] = {
+        "_carplay-ctrl._tcp.local",
+        "_airplay._tcp.local",
+        "_raop._tcp.local",
+        "_services._dns-sd._udp.local",
+    };
+    uint8_t queries[4][256];
+    size_t qlens[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 4; i++) qlens[i] = buildMdnsQuery(queries[i], services[i]);
+
+    MdnsAnswer ans;
+    int packets = 0;
+    bool poked = false;
+    std::vector<std::string> seenPtr;
+
+    // 最多找 120 秒：手机从 0x4301 到广播服务通常是秒级，给足余量
+    for (int tick = 0; tick < 300 && !g_ctrlWatchStop.load(); ++tick) {
+        if ((tick % 5) == 0) {
+            for (int i = 0; i < 4; i++) {
+                ::sendto(fd, queries[i], qlens[i], 0,
+                         reinterpret_cast<sockaddr*>(&dst), sizeof dst);
+            }
+        }
+
+        uint8_t buf[2048];
+        sockaddr_in from{};
+        socklen_t fl = sizeof from;
+        const ssize_t rn = ::recvfrom(fd, buf, sizeof buf, 0,
+                                      reinterpret_cast<sockaddr*>(&from), &fl);
+        if (rn <= 0) continue;
+
+        // 收到自己的查询回声就跳过（四条查询里长度对上一条即可）
+        if (from.sin_addr.s_addr == ifaddr.s_addr) {
+            bool echo = false;
+            for (int i = 0; i < 4; i++) {
+                if (rn == ssize_t(qlens[i])) { echo = true; break; }
+            }
+            if (echo) continue;
+        }
+
+        packets++;
+        MdnsAnswer one;
+        if (parseMdnsResponse(buf, size_t(rn), one)) {
+            if (one.hasSrv) { ans.port = one.port; ans.hasSrv = true; }
+            if (one.hasA)   { ans.host = one.host; ans.hasA = true; }
+        }
+        if (ans.hasSrv && ans.hasA && !poked) {
+            char ips[INET_ADDRSTRLEN] = {0};
+            inet_ntop(AF_INET, &from.sin_addr, ips, sizeof ips);
+            OH_LOG_INFO(LOG_APP,
+                        "[mdns] 发现手机控制服务 %{public}s:%{public}d（来自 %{public}s，共 %{public}d 包）",
+                        ans.host.c_str(), ans.port, ips, packets);
+            const bool ok = sendCarPlayPoke(ans.host, ans.port, deviceId);
+            OH_LOG_INFO(LOG_APP, "[mdns] /ctrl-int/1/connect -> %{public}s",
+                        ok ? "已发" : "失败");
+            poked = true;
+        }
+    }
+
+    OH_LOG_INFO(LOG_APP, "[mdns] 自建浏览结束：收包 %{public}d 个，%{public}s",
+                packets, poked ? "已发过 connect" : "没找到 _carplay-ctrl");
+    ::close(fd);
+}
+
+// startCarPlayCtrlWatch(ifaceIp, deviceId) → bool
+// 在指定网卡上自己找 _carplay-ctrl 并打一枪。ifaceIp 传空则直接返回 false。
+static napi_value StartCarPlayCtrlWatch(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value args[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+
+    auto getString = [&](size_t idx) {
+        std::string s;
+        if (idx < argc && typeOfIs(env, args[idx], napi_string)) {
+            size_t len = 0;
+            if (napi_get_value_string_utf8(env, args[idx], nullptr, 0, &len) == napi_ok) {
+                s.resize(len);
+                if (napi_get_value_string_utf8(env, args[idx], &s[0], len + 1, &len) == napi_ok)
+                    s.resize(len);
+            }
+        }
+        return s;
+    };
+
+    const std::string ifaceIp = getString(0);
+    const std::string deviceId = getString(1);
+
+    bool ok = false;
+    if (!ifaceIp.empty()) {
+        g_ctrlWatchStop.store(true);
+        if (g_ctrlWatchThread.joinable()) g_ctrlWatchThread.join();
+        g_ctrlWatchStop.store(false);
+        g_ctrlWatchThread = std::thread(ctrlWatchLoop, ifaceIp, deviceId);
+        ok = true;
+    }
+
+    napi_value out = nullptr;
+    napi_get_boolean(env, ok, &out);
+    return out;
+}
+
+static napi_value StopCarPlayCtrlWatch(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    g_ctrlWatchStop.store(true);
+    if (g_ctrlWatchThread.joinable()) g_ctrlWatchThread.join();
+    g_ctrlWatchStop.store(false);
+    return nullptr;
 }
 
 // airplayIdentity(stateDir) → { deviceId, pk, pi }
@@ -1216,6 +1543,8 @@ static napi_value Init(napi_env env, napi_value exports)
         {"stopAirplayProbe", nullptr, StopAirplayProbe, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"airplayIdentity", nullptr, AirplayIdentity, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"probeCarPlay", nullptr, ProbeCarPlay, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"startCarPlayCtrlWatch", nullptr, StartCarPlayCtrlWatch, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stopCarPlayCtrlWatch", nullptr, StopCarPlayCtrlWatch, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"hotspotIpv4", nullptr, HotspotIpv4, nullptr, nullptr, nullptr, napi_default, nullptr},
 #ifdef ALLPLAY_HAVE_AIRPLAY
         {"startAirplayServer", nullptr, StartAirplayServer, nullptr, nullptr, nullptr, napi_default, nullptr},

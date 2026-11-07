@@ -20,6 +20,7 @@
 #pragma once
 
 #include "port/stream.h"
+#include "usb/mux.h"
 #include "usb/pair_record.h"
 
 #include <memory>
@@ -32,8 +33,13 @@ class UsbMux;
 class WiredControl {
 public:
     /// pipe = platform 层给的 USB bulk 管道（见 platform/posix/usb_libusb.cpp）。
-    /// **必须比本对象活得久**。
+    /// **必须比本对象活得久**。mux 由本对象自己造（UsbMux），这也是 Linux 那条路。
     explicit WiredControl(IByteStream& pipe);
+
+    /// 直接用现成的 mux（macOS：系统 usbmuxd 的隧道，见 platform/posix/usbmuxd_mac.cpp）。
+    /// 这条路上没有"我们的 USB 管道"，mux 归本对象所有。
+    explicit WiredControl(std::unique_ptr<IMux> mux);
+
     ~WiredControl();
 
     WiredControl(const WiredControl&) = delete;
@@ -64,8 +70,8 @@ private:
     /// 把会话那几条流按**析构顺序**收掉（TLS 那两条引用着各自的 raw，不能反着来）。
     void resetSessionStreams();
 
-    IByteStream&                 pipe_;
-    std::unique_ptr<UsbMux>      mux_;
+    IByteStream*                 pipe_ = nullptr;
+    std::unique_ptr<IMux>        mux_;
     std::unique_ptr<IByteStream> pairCh_;      ///< 第 1 条，配完即弃
     std::unique_ptr<IByteStream> sessionRaw_;  ///< 第 2 条（TLS 之前的底，TLS 对象要引用它）
     std::unique_ptr<IByteStream> sessionCh_;   ///< 第 2 条对外用的那个（可能是 TLS）

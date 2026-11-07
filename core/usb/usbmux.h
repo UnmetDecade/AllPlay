@@ -25,6 +25,7 @@
 #pragma once
 
 #include "port/stream.h"
+#include "usb/mux.h"
 
 #include <condition_variable>
 #include <cstdint>
@@ -40,7 +41,7 @@ namespace core::usb {
 class UsbMuxChannel;
 
 /// 一条物理 USBMUX 管道上的 v2 会话。**不拥有**管道（管道由调用方持有，且必须比它活得久）。
-class UsbMux {
+class UsbMux : public IMux {
 public:
     explicit UsbMux(IByteStream& pipe);
     ~UsbMux();
@@ -50,13 +51,14 @@ public:
 
     /// 版本协商 + setup。任何 connectTcp 之前必须先调一次。
     /// 失败返回 false，err 里是给人看的原因。
-    bool begin(std::string* err);
+    bool begin(std::string* err) override;
 
     /// 开一条到手机 port 的迷你 TCP（典型：62078 = lockdown）。
     /// 成功返回该连接的字节流（归调用方所有）；失败返回 nullptr。
     ///
     /// ⚠️ 返回的流**必须比本对象先析构** —— 它内部会回调本对象发 ACK。
-    std::unique_ptr<IByteStream> connectTcp(uint16_t port, int timeoutMs, std::string* err);
+    std::unique_ptr<IByteStream> connectTcp(uint16_t port, int timeoutMs,
+                                            std::string* err) override;
 
 private:
     friend class UsbMuxChannel;

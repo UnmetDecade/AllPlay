@@ -45,11 +45,15 @@ CarPlay 本该是 iPhone 和车机之间的私有链路。AllPlay 实现的是**
 | **Android** | MediaCodec 硬解 → Surface | AudioTrack | `BluetoothSocket`（JNI） | — | ✅ 端到端跑通 |
 | **HarmonyOS** | AVCodec NDK 硬解 → XComponent surface | OH AudioCodec 解码 → OHAudio 渲染（AAC-LC） | ArkTS `socket.sppConnect` | — | ✅ **真机端到端**（蓝牙触发 → 投屏全屏 → 触摸 → 出声，Mate 60） |
 | **Linux / Ubuntu** | ffmpeg 软解 → SDL2 纹理 | SDL2（AAC-LC / Opus / LPCM） | BlueZ：SDP + 裸 RFCOMM（客户端模式） | libusb + 内核 `cdc_ncm` | ✅ **真假两路都端到端跑通** |
-| **macOS** | 同 Linux（**共用同一份宿主代码**） | 同 Linux | IOBluetooth | —（macOS 无 `cdc_ncm`，未做） | ✅ **无线真机端到端**（蓝牙触发 → 投屏 → 触摸，掉线自动重连） |
+| **macOS** | 同 Linux（**共用同一份宿主代码**） | 同 Linux | IOBluetooth | 系统 `usbmuxd` + `AppleUSBNCMData`（不碰 USB，不需要 DriverKit） | ✅ **无线/有线都真机端到端**（有线：iPhone 直插 Mac，投屏 + 声音；无线：蓝牙触发 → 投屏 → 触摸，掉线自动重连） |
 | **Windows** | ffmpeg（待接） | — | `AF_BTH`（待接入） | — | ⏳ 骨架 |
 
-有线的媒体面**不自己写**：切进 CarPlay 配置后，内核的 `cdc_ncm` 会自己建出一块真网卡，
-AirPlay 直接绑到那块网卡上就行，NTB16 / 以太网 / IPv6 全是内核的事。
+有线的媒体面**不自己写**：Linux 上切进 CarPlay 配置后，内核的 `cdc_ncm` 会自己建出一块
+真网卡；macOS 上系统本来就用 `AppleUSBNCMData` 把 NCM 功能挂成了 `enX`。两条路都只需
+AirPlay 绑到那块网卡上就行，NTB16 / 以太网 / IPv6 都不归我们管。
+
+macOS 的控制面也不碰 USB：借系统 `usbmuxd`（`/var/run/usbmuxd`，就是 Finder 用的那条
+隧道）连 lockdown 与 carkit 服务。前提是这台 Mac 已经在 Finder 里被手机信任过。
 
 - **没有主次平台。** 各家都只实现 `core/port` 的接口，互相不共享平台代码；
   桌面两平台共用 `host/`，只是因为它们恰好都用 SDL2。
@@ -324,7 +328,8 @@ core/          协议核心（平台无关，唯一三方依赖 OpenSSL；无任
   usb/           有线（USB）控制面：usbmux v2 + 迷你 TCP + lockdown 配对/会话 + TLS
   crypto/ bplist/ iap2/ airplay/ mfi/   协议实现
 platform/
-  posix/         Linux + macOS 适配（socket / avahi·dns_sd / bluez·IOBluetooth / libusb）
+  posix/         Linux + macOS 适配（socket / avahi·dns_sd / bluez·IOBluetooth /
+                 libusb·usbmuxd+AppleUSBNCMData）
   windows/       Winsock2 / AF_BTH
 android/         Android 工程（Gradle：Kotlin + NDK C++ core + JNI → 系统 API）
 harmony/         HarmonyOS 工程（ArkTS + hvigor：core 经 NAPI 进 HAP，AVCodec 硬解 → XComponent）

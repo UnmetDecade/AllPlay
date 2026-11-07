@@ -85,7 +85,7 @@ const WiredBringUp& WiredTask::result() const { return impl_->bringUp; }
 
 std::string WiredTask::error() const { return impl_->getError(); }
 
-#ifdef ALLPLAY_HAVE_LIBUSB
+#if defined(ALLPLAY_HAVE_LIBUSB) || defined(__APPLE__)
 
 // ---------------------------------------------------------------------------
 // ① USB 控制面 + 媒体面准备
@@ -98,14 +98,29 @@ void WiredTask::runBringUp(std::shared_ptr<Impl> impl, WiredTaskOptions o, Wired
         impl->phase.store(int(WiredPhase::Failed));
     };
 
-    // ---- ① 切进 CarPlay 配置，拿到 USBMUX 管道 ----
+    // ---- ① 传输层 ----
+    // Linux：切 USB 配置、claim USBMUX 口，自己跑 usbmux v2。
+    // macOS：不碰 USB，借系统 usbmuxd 的隧道（AppleUSBNCMData 会自己把网卡建好）。
+    allplay::posix::WiredUsbInfo info;
+    std::string                  err;
+    std::unique_ptr<core::IByteStream> pipe;   // Linux 才有；macOS 留空
+
+#ifdef __APPLE__
+    (void)o.productId;   // macOS 不枚举 USB，限定产品号没有意义
+    std::unique_ptr<core::usb::IMux> sysMux = allplay::posix::openSystemUsbMuxd(&info, &err);
+    if (!sysMux) {
+        fail("接上系统 usbmuxd 失败：" + err);
+        return;
+    }
+    auto control = std::make_unique<core::usb::WiredControl>(std::move(sysMux));
+    emit(log, "系统 usbmuxd 已接手（%s）—— 不切配置，控制面走 Apple 自己的隧道",
+         info.serial.c_str());
+#else
     allplay::posix::WiredUsbOptions uopt;
     if (o.productId > 0) uopt.productId = o.productId;
     uopt.switchWaitMs = o.switchWaitMs;
 
-    allplay::posix::WiredUsbInfo info;
-    std::string err;
-    auto pipe = allplay::posix::openWiredCarPlay(uopt, &info, &err);
+    pipe = allplay::posix::openWiredCarPlay(uopt, &info, &err);
     if (!pipe) {
         fail("打开 USB 失败：" + err);
         return;
@@ -113,10 +128,12 @@ void WiredTask::runBringUp(std::shared_ptr<Impl> impl, WiredTaskOptions o, Wired
     emit(log, "USB 已进 CarPlay 配置（%s，bus %u addr %u，配置 %d）", info.serial.c_str(),
          unsigned(info.bus), unsigned(info.address), info.configValue);
 
+    auto control = std::make_unique<core::usb::WiredControl>(*pipe);
+#endif
+
     // ---- ② 控制面：lockdown 配对 → 会话 → 原地 TLS → carkit 服务 ----
     // 这一段的失败原因常常是"手机锁屏了"（只报 1 个配置）或"配对框没人点"，
     // 都不是代码问题 —— 所以原样把 err 透出去，别自己编一句笼统的。
-    auto control = std::make_unique<core::usb::WiredControl>(*pipe);
     // 配对材料按手机序列号存、复用 —— 不存的话每跑一轮都换一套 HostID 和证书，
     // 手机每次都当陌生人，**每次都弹"要信任此电脑吗？"**。info.serial 是 USB
     // 描述符里的序列号，读到 DevicePublicKey 之前就有，正好能当这个键。
@@ -167,21 +184,28 @@ void WiredTask::runBringUp(std::shared_ptr<Impl> impl, WiredTaskOptions o, Wired
     link->sendSubscriptions();
     emit(log, "已报电源 %u mA 与 5 条订阅", unsigned(wcfg.availableCurrentMilliAmps));
 
-    // ---- ⑦ 媒体面：内核 cdc_ncm 建出来的那张网卡 ----
-    // 我们只把地址钉上去，NTB16/以太网/IPv6 全是内核的事。
+    // ---- ⑦ 媒体面：iPhone 那侧 NCM 功能挂出来的网卡 ----
+    // Linux 上是内核 cdc_ncm 建的，我们只把地址钉上去；macOS 上是 AppleUSBNCMData
+    // 建的，地址也是系统给的（按序列号在 IORegistry 里找出来）。两条路都只用到
+    // "网卡名 + IPv6 链路本地"，NTB16/以太网/IPv6 本身不归我们管。
     allplay::posix::WiredNcmLink ncm;
-    if (!allplay::posix::prepareWiredNcm(int(info.bus), int(info.address), o.ncmLinkLocal, &ncm,
-                                         &err)) {
+#ifdef __APPLE__
+    const bool ncmOk = allplay::posix::prepareWiredNcmDarwin(info.serial, &ncm, &err);
+#else
+    const bool ncmOk = allplay::posix::prepareWiredNcm(int(info.bus), int(info.address),
+                                                       o.ncmLinkLocal, &ncm, &err);
+#endif
+    if (!ncmOk) {
         fail("有线媒体面起不来：" + err);
         return;
     }
-    if (ncm.ipv6.empty()) {   // prepareWiredNcm 保证非空，这里只是别让 front() 踩空
+    if (ncm.ipv6.empty()) {   // 两边都保证非空，这里只是别让 front() 踩空
         fail("NCM 网卡 " + ncm.ifname + " 上一个 IPv6 链路本地都没有");
         return;
     }
 
     impl->bringUp.ifname    = ncm.ifname;
-    impl->bringUp.bindAddr  = ncm.ipv6.front();   // 钉的那个被 prepareWiredNcm 排到了第一
+    impl->bringUp.bindAddr  = ncm.ipv6.front();   // 指定的那个都排在第一个
     impl->bringUp.mac       = ncm.mac;
     impl->bringUp.serial    = info.serial;
     impl->bringUp.unmanaged = ncm.unmanaged;
@@ -264,18 +288,18 @@ void WiredTask::runPump(std::shared_ptr<Impl> impl, PumpParams pp, WiredLogFn lo
     impl->phase.store(int(WiredPhase::Done));
 }
 
-#else  // !ALLPLAY_HAVE_LIBUSB
+#else  // 既没有 libusb 也不是 macOS
 
-// 这个构建没带 libusb：接口都在，但一调就明确报错，宿主不用为此写条件编译。
+// 这个构建没带有线传输层：接口都在，但一调就明确报错，宿主不用为此写条件编译。
 void WiredTask::runBringUp(std::shared_ptr<Impl> impl, WiredTaskOptions, WiredLogFn)
 {
-    impl->setError("这个构建没带 libusb（装 libusb-1.0-dev 后重新 cmake）");
+    impl->setError("这个构建没带有线传输层（Linux 装 libusb-1.0-dev 后重新 cmake）");
     impl->phase.store(int(WiredPhase::Failed));
 }
 
 void WiredTask::runPump(std::shared_ptr<Impl>, PumpParams, WiredLogFn) {}
 
-#endif  // ALLPLAY_HAVE_LIBUSB
+#endif  // ALLPLAY_HAVE_LIBUSB / __APPLE__
 
 // ---------------------------------------------------------------------------
 // 对外接口（两半都在这儿，条件编译只在上面）

@@ -268,11 +268,16 @@ void SdlAudioSink::feed(const uint8_t* payload, size_t len, uint32_t sample)
     if (stop_ || !cfg_.valid) return;
 
     if (cfg_.codec == core::AudioCodec::LPCM) {
-        // 裸 PCM：不解码，直接进环形缓冲。
-        // ⚠️ 按小端 s16 原样收 —— 假手机这一轮只推视频，这条路没被端到端验证过；
-        //    真机若听出"噪声一片"，先怀疑这里的主机字节序假设（AirPlay 的 LPCM
-        //    惯用大端），届时在这里加一次 byte swap 即可。
-        pushLocked(reinterpret_cast<const int16_t*>(payload), len / sizeof(int16_t));
+        // 裸 PCM：AirPlay 的 LPCM 是**大端** s16（网络序），SDL 要的是主机序。
+        // 真机实测：不换字节、直接按小端喂进 SDL，出来是满耳噪音（每个样本的高低
+        // 字节颠倒，波形成了类噪声）。这里每个 16 位样本换一下字节；奇数尾巴丢掉。
+        const size_t n = len / sizeof(int16_t);
+        if (n == 0) return;
+        pcmSwap_.resize(n);
+        const uint8_t* p = payload;
+        for (size_t i = 0; i < n; ++i)
+            pcmSwap_[i] = int16_t((uint16_t(p[2 * i]) << 8) | uint16_t(p[2 * i + 1]));
+        pushLocked(pcmSwap_.data(), n);
         decoded_.fetch_add(1);
         return;
     }

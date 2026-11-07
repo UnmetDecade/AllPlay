@@ -60,7 +60,17 @@ class AudioSink {
 
     fun feed(payload: ByteArray, sample: Int) {
         if (lpcm) {
-            track?.write(payload, 0, payload.size)
+            // AirPlay 的 LPCM 是**大端** s16（网络序），AudioTrack 按小端播 —— 逐样本换字节。
+            // 不换的话每个样本的高低字节颠倒，听感是满耳噪音（macOS 宿主上已实测确认）。
+            val n = payload.size and 1.inv()
+            var i = 0
+            while (i < n) {
+                val b = payload[i]
+                payload[i] = payload[i + 1]
+                payload[i + 1] = b
+                i += 2
+            }
+            track?.write(payload, 0, n)
             return
         }
         // 小包（config 包）在抢 input buffer 之前就跳过，否则会 claim buffer 又不 queue 导致泄漏

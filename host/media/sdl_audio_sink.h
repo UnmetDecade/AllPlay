@@ -20,7 +20,7 @@
 //   · AAC_LC —— 裸帧，**没有 ADTS 头**，得自己按协商值造 2 字节 ASC 当 extradata；
 //               还会混进 ≤12 字节的配置小包，要忽略（当帧喂会让解码器一直报错）。
 //   · OPUS   —— 裸包，extradata 是最小 19 字节 OpusHead。
-//   · LPCM   —— 不解码，裸 s16 直接进环形缓冲。
+//   · LPCM   —— 不解码，**大端 s16（网络序）转成主机序**后进环形缓冲。
 //
 // 不引 swresample：解码器吐的是平面 float（FLTP），"平面 float → 交织 s16" 自己写
 // 三十行就够了，顺带绕开 swresample 那套在 4.4 与 5.1+ 之间签名不同的 channel-layout
@@ -110,6 +110,7 @@ private:
     AVFrame*                   frame_ = nullptr;
     std::vector<int16_t>       ring_;
     std::vector<int16_t>       scratch_;               ///< 解码帧 → 交织 s16 的落脚点
+    std::vector<int16_t>       pcmSwap_;               ///< LPCM 大端 → 主机序的落脚点
     size_t                     head_ = 0, size_ = 0;   ///< 环形缓冲读位置 / 已存样本数
     std::atomic<uint64_t>      decoded_{0};
     std::atomic<uint64_t>      dropped_{0};
