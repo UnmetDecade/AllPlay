@@ -169,6 +169,7 @@ flowchart LR
 bash scripts/bootstrap.sh      # 装依赖：SDL2 / SDL2_ttf / ffmpeg / avahi（Linux 另需 bluez + dbus-1 + libusb-1.0）
 bash scripts/build.sh          # 产物在 build/
 ./build/m3_test                # 自测：全绿说明协议核心没问题
+./build/aa_wire_test           # Android Auto wire 层自测（AAP 分帧 + protobuf，不需要手机）
 ```
 
 > **`scripts/*.sh` 在仓库里没有执行位**，所以要写 `bash scripts/xxx.sh`，直接 `./scripts/build.sh` 会 permission denied。

@@ -218,3 +218,24 @@ android/.../cpp/  jni_bridge.cpp
    别照着"服务端等手机连"的思路写。
 6. **宿主**：把上面几件装配成 `PlatformServices` + `ReceiverConfig`，起主循环。
 7. **验收**：`tools/fake_phone` 跑端到端（不需要 iPhone），再拿真机验蓝牙那一段。
+
+## 八、多协议演进（草案）
+
+CarPlay 目前直接写在 `core/airplay` / `core/iap2` 等目录里。要让同一套 `core` 再接
+Android Auto / CarLife / HiCar，路线是**协议后端化**：宿主只依赖
+`core::projection::IProjectionBackend`，CarPlay 是第一个后端，其余按同一接口接入。
+接口草案与迁移方案见 [projection-backend.md](projection-backend.md)。
+
+当前状态（2026-11-08）：
+
+| 后端 | 代码 | 状态 |
+|---|---|---|
+| CarPlay | `core/projection/carplay/`（`backend_carplay` 包住原 airplay/iap2/mfi/usb/bt） | 模块已就位，宿主尚未切换 |
+| Android Auto（有线） | `core/projection/androidauto/` + `platform/posix/aa_usb_libusb.cpp` | 编译通过，待真机 |
+| CarLife | `core/projection/carlife/` | 占位（接口齐全，未实现） |
+| HiCar | `core/projection/hicar/` | 占位（接口齐全，未实现） |
+
+AA 的有线链路是 AOAP（51/52/53）→ AAP VERSION → TLS 1.2（记录装在 0x0003）→
+服务发现 → 通道 / 音视频 / 输入。protobuf 只实现了 wire 子集（`proto.h`），
+TLS 用系统 OpenSSL，不引 protobuf / Boost / AASDK 代码。
+

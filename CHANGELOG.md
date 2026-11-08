@@ -7,6 +7,41 @@
 
 ---
 
+## [v1.1] — 多协议后端骨架 · 2026-11-08
+
+把 `core/` 拆成"协议后端"结构：CarPlay 成为第一个后端，Android Auto 有线模块落地，
+CarLife / HiCar 先占接口。宿主行为不变（仍走原路径），桌面构建与现有自测全绿。
+
+### 新增
+
+- **协议后端接口**（`core/projection/backend.h`）：`IProjectionBackend` /
+  `IProjectionSession` / `IProjectionSink` / `BackendRegistry`。宿主只认协议中立的
+  目标、输入事件与媒体配置，不再直接碰 iAP2 / RTSP；迁移方案见
+  `docs/projection-backend.md`。
+- **CarPlay 后端**（`core/projection/carplay/backend_carplay.*`）：无线（bt_trigger +
+  Receiver）与有线（usbmux / WiredControl / iAP2）两种会话都包进同一接口；平台能力经
+  `WiredPorts` 注入，core 里没有平台头。
+- **Android Auto 有线**（`core/projection/androidauto/`）：AOAP 51/52/53 → AAP VERSION →
+  TLS 1.2（记录装在 0x0003）→ 服务发现 → 通道 / AV SETUP / 媒体流。自带 protobuf wire
+  子集与 Annex-B → avcC 合成，PCM 小端转大端后交给宿主；实现 AV_MEDIA_ACK 流控。
+  `platform/posix/aa_usb_libusb.cpp` 提供 Linux/macOS 共用的 libusb 传输层。
+- **CarLife / HiCar 占位后端**：接口齐全，`probe()` 返回空、`connect()` 报未实现。
+- **自测** `tools/aa_wire_test.cpp`：AAP 分帧/拼帧、6 字节长度字段、半帧、protobuf 编解码。
+
+### 变更
+
+- `core/airplay` / `core/iap2` / `core/mfi` / `core/usb` / `core/bt` 整体迁到
+  `core/projection/carplay/`（纯 `git mv` + include 路径兼容），协议代码零改动。
+- 鸿蒙与 Android 的构建文件跟着新路径更新。
+
+### 已知限制
+
+- 宿主仍走原来的 `Receiver` / `WiredTask` / `BtTask`，尚未切到 `BackendRegistry`；
+  Android Auto 也还没有 UI 入口。
+- Android Auto 只完成协议与传输层实现，**未上真机验证**；无线 AA、CarLife、HiCar 未实现。
+
+---
+
 ## [v1.0] — 真机稳定性 · 2026-11-06
 
 iPhone SE2 / 16 连续上手用下来修的一批问题。

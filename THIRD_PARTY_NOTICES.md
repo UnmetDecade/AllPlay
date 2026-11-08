@@ -19,6 +19,10 @@
 ### 协议研究参考
 
 - **LIVI**、**Showcase**：AirPlay / iAP2 / CarPlay 协议研究（DiPlay 亦在其署名中致谢）。
+- **AASDK**（https://github.com/f1xpl/aasdk，GPL-3.0）与 **OpenAuto**：
+  Android Auto 有线链路的协议事实来源（AOAP、AAP 分帧、TLS 1.2、protobuf 字段号）。
+  `core/projection/androidauto/` 是照公开协议事实**独立编写**的，没有拷贝 AASDK 源码，
+  也不依赖 Boost / protobuf / AASDK 的任何运行时组件；许可仍与 AASDK 兼容（GPL-3.0）。
 
 本项目是**独立实现**：不包含 Apple 的任何代码、文档或二进制。协议事实来自公开的上游实现
 与公开资料，整理在 [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md)。
@@ -36,6 +40,7 @@
 | Linux 适配 | avahi-client | LGPL-2.1+ | mDNS 广播 `_airplay._tcp` |
 | Linux 适配 | bluez（libbluetooth） | LGPL-2.1+ | SDP 查询 + 裸 RFCOMM |
 | Linux 适配 | dbus-1 | AFL-2.1 / GPL-2.0+ | 枚举已配对设备、读取当前 SSID |
+| Linux / macOS 适配 | libusb-1.0 | LGPL-2.1+ | Android Auto 的 AOAP 控制请求与 bulk 端点 |
 | macOS 适配 | IOBluetooth / CoreWLAN / dns_sd | 系统框架 | 蓝牙、Wi-Fi、mDNS |
 | Android | MediaCodec / AudioTrack / BluetoothSocket / NsdManager | 系统 API | 解码、播放、蓝牙、mDNS |
 

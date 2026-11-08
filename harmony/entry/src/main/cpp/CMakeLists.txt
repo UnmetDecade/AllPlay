@@ -26,31 +26,37 @@ set(OHOS_OPENSSL_ROOT "${ALLPLAY_ROOT}/tmp/ohos-ssl/install-aarch64" CACHE PATH
 if(EXISTS "${OHOS_OPENSSL_ROOT}/lib/libcrypto.a")
     message(STATUS "MFi：使用 ${OHOS_OPENSSL_ROOT}/lib/libcrypto.a")
     add_library(allplay_mfi STATIC
-        ${ALLPLAY_ROOT}/core/mfi/mfi_identity.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/mfi/mfi_identity.cpp
         # AirPlay 配对层的本机身份（Ed25519 + pairing id）——
         # 0x4301 里的 publicKey/deviceIdentifier 就是它，没有它 iOS 不认这台"接收端"。
         ${ALLPLAY_ROOT}/core/platform/device_identity.cpp)
     target_include_directories(allplay_mfi PUBLIC
         ${ALLPLAY_ROOT}/core
+        # CarPlay 协议代码内部仍写 "airplay/…"、"iap2/…"、"mfi/…"
+        ${ALLPLAY_ROOT}/core/projection/carplay
         ${OHOS_OPENSSL_ROOT}/include)
     target_link_libraries(allplay_mfi PUBLIC ${OHOS_OPENSSL_ROOT}/lib/libcrypto.a)
 else()
     message(STATUS "MFi：没有 ${OHOS_OPENSSL_ROOT}/lib/libcrypto.a，用空实现（签名不可用）")
-    add_library(allplay_mfi STATIC ${ALLPLAY_ROOT}/core/mfi/mfi_identity_stub.cpp)
-    target_include_directories(allplay_mfi PUBLIC ${ALLPLAY_ROOT}/core)
+    add_library(allplay_mfi STATIC ${ALLPLAY_ROOT}/core/projection/carplay/mfi/mfi_identity_stub.cpp)
+    target_include_directories(allplay_mfi PUBLIC
+        ${ALLPLAY_ROOT}/core
+        ${ALLPLAY_ROOT}/core/projection/carplay)
     target_compile_definitions(allplay_mfi PUBLIC ALLPLAY_MFI_STUB=1)
 endif()
 
 # ---- core 子集（平台无关）----
 add_library(allplay_proto STATIC
     ${ALLPLAY_ROOT}/core/common/log.cpp
-    ${ALLPLAY_ROOT}/core/iap2/wire.cpp
-    ${ALLPLAY_ROOT}/core/iap2/link.cpp
-    ${ALLPLAY_ROOT}/core/iap2/hid.cpp
-    ${ALLPLAY_ROOT}/core/iap2/wireless_client.cpp
+    ${ALLPLAY_ROOT}/core/projection/carplay/iap2/wire.cpp
+    ${ALLPLAY_ROOT}/core/projection/carplay/iap2/link.cpp
+    ${ALLPLAY_ROOT}/core/projection/carplay/iap2/hid.cpp
+    ${ALLPLAY_ROOT}/core/projection/carplay/iap2/wireless_client.cpp
     ${ALLPLAY_ROOT}/core/port/control.cpp
 )
-target_include_directories(allplay_proto PUBLIC ${ALLPLAY_ROOT}/core)
+target_include_directories(allplay_proto PUBLIC
+    ${ALLPLAY_ROOT}/core
+    ${ALLPLAY_ROOT}/core/projection/carplay)
 # wireless_client.h 里带着 IMfiIdentity 指针 —— 头文件要么拉 openssl/evp.h，
 # 要么要 ALLPLAY_MFI_STUB，两者都由 allplay_mfi 的 PUBLIC 属性给出。
 target_link_libraries(allplay_proto PUBLIC allplay_mfi)
@@ -61,14 +67,14 @@ target_compile_options(allplay_proto PRIVATE -Wall -Wextra)
 # 全靠它，没有 OpenSSL 这部分就是空的。
 if(EXISTS "${OHOS_OPENSSL_ROOT}/lib/libcrypto.a")
     add_library(allplay_airplay STATIC
-        ${ALLPLAY_ROOT}/core/airplay/server.cpp
-        ${ALLPLAY_ROOT}/core/airplay/rtsp.cpp
-        ${ALLPLAY_ROOT}/core/airplay/session.cpp
-        ${ALLPLAY_ROOT}/core/airplay/video_stream.cpp
-        ${ALLPLAY_ROOT}/core/airplay/audio_stream.cpp
-        ${ALLPLAY_ROOT}/core/airplay/event_channel.cpp
-        ${ALLPLAY_ROOT}/core/airplay/info.cpp
-        ${ALLPLAY_ROOT}/core/airplay/control_cipher.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/server.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/rtsp.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/session.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/video_stream.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/audio_stream.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/event_channel.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/info.cpp
+        ${ALLPLAY_ROOT}/core/projection/carplay/airplay/control_cipher.cpp
         ${ALLPLAY_ROOT}/core/bplist/bplist.cpp
         ${ALLPLAY_ROOT}/core/crypto/aes_ctr.cpp
         ${ALLPLAY_ROOT}/core/crypto/chacha20poly1305.cpp
@@ -85,6 +91,7 @@ if(EXISTS "${OHOS_OPENSSL_ROOT}/lib/libcrypto.a")
     )
     target_include_directories(allplay_airplay PUBLIC
         ${ALLPLAY_ROOT}/core
+        ${ALLPLAY_ROOT}/core/projection/carplay
         ${ALLPLAY_ROOT}/platform
         ${OHOS_OPENSSL_ROOT}/include)
     target_link_libraries(allplay_airplay PUBLIC

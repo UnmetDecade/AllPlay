@@ -41,6 +41,11 @@ add_executable(fake_phone tools/fake_phone.cpp)
 target_link_libraries(fake_phone PRIVATE allplay_core)
 target_compile_options(fake_phone PRIVATE -Wall -Wextra)
 
+# Android Auto wire 层自测：AAP 分帧/拼帧 + protobuf 子集（不需要手机）。
+add_executable(aa_wire_test tools/aa_wire_test.cpp)
+target_link_libraries(aa_wire_test PRIVATE allplay_core)
+target_compile_options(aa_wire_test PRIVATE -Wall -Wextra)
+
 # ---------------------------------------------------------------------------
 # 平台适配 + 桌面宿主：仅 Unix（Windows 的 Winsock2 适配层待做）
 # ---------------------------------------------------------------------------
@@ -59,6 +64,9 @@ if(NOT WIN32)
         # 有线（USB）CarPlay：macOS 不碰 USB —— 控制面借系统 usbmuxd 的隧道，媒体面用
         # AppleUSBNCMData 自己建好的 en 网卡（见 platform/posix/usbmuxd_mac.cpp 文件头）。
         set(POSIX_USB_SRC platform/posix/usbmuxd_mac.cpp)
+        # Android Auto 的 USB 传输层：macOS 必须自己碰 USB（libusb / IOKit），
+        # 系统 usbmuxd 只管 iPhone。
+        pkg_check_modules(LIBUSB IMPORTED_TARGET libusb-1.0)
         message(STATUS "蓝牙传输: IOBluetooth (macOS)")
         message(STATUS "有线传输: 系统 usbmuxd + AppleUSBNCMData (macOS，不需要 DriverKit)")
     else()
@@ -84,11 +92,20 @@ if(NOT WIN32)
         endif()
     endif()
 
+    set(POSIX_AA_USB_SRC "")
+    if(LIBUSB_FOUND)
+        set(POSIX_AA_USB_SRC platform/posix/aa_usb_libusb.cpp)
+        message(STATUS "Android Auto USB: libusb ${LIBUSB_VERSION}")
+    else()
+        message(STATUS "Android Auto USB: 跳过（缺 libusb-1.0）")
+    endif()
+
     add_library(allplay_posix STATIC
         platform/posix/net_posix.cpp
         ${POSIX_MDNS_SRC}
         ${POSIX_BT_SRC}
         ${POSIX_USB_SRC}
+        ${POSIX_AA_USB_SRC}
     )
     target_include_directories(allplay_posix PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/core
@@ -102,6 +119,11 @@ if(NOT WIN32)
             # 给上层（host）一个"这台机器编得进有线链路"的开关
             target_compile_definitions(allplay_posix PUBLIC ALLPLAY_HAVE_LIBUSB=1)
         endif()
+    endif()
+    # Android Auto 的 USB（Linux + macOS 都要）：libusb 由 pkg-config 提供。
+    if(LIBUSB_FOUND)
+        target_link_libraries(allplay_posix PUBLIC PkgConfig::LIBUSB)
+        target_compile_definitions(allplay_posix PUBLIC ALLPLAY_HAVE_AA_USB=1)
     endif()
     target_compile_options(allplay_posix PRIVATE -Wall -Wextra)
 

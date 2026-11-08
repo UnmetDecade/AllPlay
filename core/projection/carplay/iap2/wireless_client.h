@@ -61,7 +61,7 @@ struct WirelessTriggerConfig {
     std::string mfiDir;       ///< identity/（identity.pk8 + certificate.p7b）
     /// 外部注入的身份（不拥有；须活得比 run() 长）。给"身份不在文件系统里"的
     /// 平台用：鸿蒙从 HAP rawfile 读字节、将来硬件 MFi 芯片也是走这条路。
-    mfi::IMfiIdentity* mfiIdentity = nullptr;
+    const mfi::IMfiIdentity* mfiIdentity = nullptr;
 
     /// 外部取消旗标（可空）。0x4301 发出后 run() 会长期保持链路，直到手机断开；
     /// 宿主在 AirPlay 会话结束后置位它，好让这次触发收工、重新排下一次。
@@ -126,7 +126,7 @@ private:
     LinkEngine            link_;
     CsmFramer             framer_;
     std::unique_ptr<mfi::IMfiIdentity> ownedMfi_;   ///< 从 mfiDir 加载时才有
-    mfi::IMfiIdentity*                 mfi_ = nullptr;   ///< 指向 ownedMfi_ 或外部注入
+    const mfi::IMfiIdentity*           mfi_ = nullptr;   ///< 指向 ownedMfi_ 或外部注入
     Progress              progress_;
     StageCb               stageCb_;
 
