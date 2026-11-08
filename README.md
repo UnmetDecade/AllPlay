@@ -6,6 +6,10 @@
 **协议核心只写一遍。** 每个平台只实现自己的"屏幕 / 喇叭 / 蓝牙 / 网络"，彼此平级 ——
 没有主次平台，也不共享平台代码。
 
+**协议核心正在长成多协议后端。** v1.1 起 `core/projection/` 用 `IProjectionBackend`
+统一接入不同投屏协议：CarPlay 是第一个后端，Android Auto 有线的协议与 USB 传输层已落地
+（待真机），CarLife / HiCar 预留接口。见 [`docs/projection-backend.md`](docs/projection-backend.md)。
+
 `GPL-3.0` · `Android ✅` · `HarmonyOS ✅` · `Linux ✅` · `macOS ✅` · `Windows ⏳`
 
 ![AllPlay 在 macOS 上的启动页：等 iPhone 连接](docs/images/allplay-launcher-mac.png)
@@ -38,6 +42,14 @@ CarPlay 本该是 iPhone 和车机之间的私有链路。AllPlay 实现的是**
 > **⚠️ 两条路的最后一道关都需要 Apple MFi 配件身份**（`identity/`）。
 > 那是 Apple 签发的凭证，**不在本仓库里**，需自行准备。详见[当前状态](#当前状态)。
 
+**Android Auto（有线，开发中）**：`core/projection/androidauto/` 已实现 AOAP（51/52/53）
+→ AAP VERSION → TLS 1.2 → 服务发现 → 通道 / 音视频 / 触摸，平台侧由
+`platform/posix/aa_usb_libusb.cpp` 提供 Linux/macOS 共用的 libusb 传输层。
+**尚未接宿主 UI、未上真机验证。**
+
+**CarLife / HiCar**：`core/projection/{carlife,hicar}/` 是占位后端 —— 接口齐全，
+`probe()` 返回空、`connect()` 明确报未实现。
+
 ## 平台支持
 
 | 平台 | 视频上屏 | 音频 | 无线触发 | 有线（USB） | 状态 |
@@ -55,6 +67,10 @@ AirPlay 绑到那块网卡上就行，NTB16 / 以太网 / IPv6 都不归我们�
 macOS 的控制面也不碰 USB：借系统 `usbmuxd`（`/var/run/usbmuxd`，就是 Finder 用的那条
 隧道）连 lockdown 与 carkit 服务。前提是这台 Mac 已经在 Finder 里被手机信任过。
 
+**Android Auto（有线）**目前只在 Linux / macOS 桌面侧有传输层实现（libusb，
+`platform/posix/aa_usb_libusb.cpp`）；协议层本身平台无关，Android / HarmonyOS 宿主
+还缺各自的 USB 传输与 UI 入口（见[当前状态](#当前状态)）。
+
 - **没有主次平台。** 各家都只实现 `core/port` 的接口，互相不共享平台代码；
   桌面两平台共用 `host/`，只是因为它们恰好都用 SDL2。
 - **验收方式统一。** 不管哪个平台，`tools/fake_phone` 都能扮演 iPhone 跑完整条链路 ——
@@ -68,6 +84,9 @@ macOS 的控制面也不碰 USB：借系统 `usbmuxd`（`/var/run/usbmuxd`，就
 host/          宿主层（组合根）—— 装配下面三层，管窗口/主循环/输入
 platform/      适配层 —— 用系统 API 实现 core/port 的接口（POSIX / BlueZ / IOBluetooth / Win32 / JNI）
 core/port/     接口层 —— 纯抽象，无实现（ITcpStream / IBluetooth / IVideoOutput / MediaKeyQueue …）
+core/projection/ 协议后端层 —— IProjectionBackend / IProjectionSession / IProjectionSink；
+               CarPlay 在 carplay/（原 airplay / iap2 / mfi / usb / bt），
+               Android Auto 在 androidauto/，CarLife / HiCar 占位
 core/          协议核心 —— 纯 C++，不含任何平台头，唯一三方依赖是 OpenSSL
 ```
 
@@ -111,12 +130,13 @@ flowchart TB
 
     subgraph CORE["协议核心（core，平台无关，唯一三方依赖 = OpenSSL）"]
         direction LR
-        AIRPLAY["airplay<br/>rtsp · server · session<br/>video_stream · audio_stream<br/>event_channel · control_cipher · info"]
-        IAP2["iap2<br/>wire · link · wireless_client"]
-        MFI["mfi<br/>mfi_identity"]
+        AIRPLAY["projection/carplay/airplay<br/>rtsp · server · session<br/>video_stream · audio_stream<br/>event_channel · control_cipher · info"]
+        IAP2["projection/carplay/iap2<br/>wire · link · wireless_client"]
+        MFI["projection/carplay/mfi<br/>mfi_identity"]
         CRYPTO["crypto<br/>hkdf · chacha20poly1305 · srp6a<br/>x25519 · ed25519 · tlv8 · aes_ctr"]
         BPLIST["bplist"]
-        BTTRIG["bt<br/>bt_trigger"]
+        BTTRIG["projection/carplay/bt<br/>bt_trigger"]
+        AA["projection/androidauto<br/>aap · proto · tls · backend<br/>（协议完成，待真机）"]
         IDENTITY["platform<br/>device_identity · pairing_store"]
         COMMON["common<br/>log"]
     end
@@ -166,7 +186,9 @@ flowchart LR
 ### 桌面（Linux / Ubuntu 或 macOS）
 
 ```bash
-bash scripts/bootstrap.sh      # 装依赖：SDL2 / SDL2_ttf / ffmpeg / avahi（Linux 另需 bluez + dbus-1 + libusb-1.0）
+bash scripts/bootstrap.sh      # 装依赖：SDL2 / SDL2_ttf / ffmpeg / avahi
+                               # （Linux：另加 bluez + dbus-1 + libusb-1.0；
+                               #   macOS：Android Auto 有线要 `brew install libusb`）
 bash scripts/build.sh          # 产物在 build/
 ./build/m3_test                # 自测：全绿说明协议核心没问题
 ./build/aa_wire_test           # Android Auto wire 层自测（AAP 分帧 + protobuf，不需要手机）
@@ -297,6 +319,8 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 | M4 | 有线（USB）CarPlay：libusb 切配置 + usbmux/lockdown/TLS + 内核 `cdc_ncm` 媒体面 | ✅ **真 iPhone 有线端到端跑通（2026-10-13），宿主 `--wired`** |
 | M5 | 状态栏信息 + 健壮性（重连 / 关键帧恢复 / watchdog） | 部分（关键帧恢复已接） |
 | M6 | UI 状态页 / 叠加（原生） | |
+| M7 | 协议后端化：`IProjectionBackend` + 注册表 + CarPlay 模块（v1.1） | ✅ 编译与回归通过；宿主尚未切到注册表 |
+| M8 | Android Auto 有线：AOAP → AAP → TLS 1.2 → 音视频/输入（v1.1） | 🟡 协议 + libusb 传输层完成，**待真机**；宿主未接 UI |
 
 > **两条路都通了。** 无线：2026-10-12 蓝牙触发 → mDNS 发现 → RTSP 协商 → 屏幕流上屏 → 触摸可点
 > （见 [`CHANGELOG.md`](CHANGELOG.md) v0.3）。有线：2026-10-13 插线即通，控制面自己写、
@@ -313,6 +337,7 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 | `./build/core_selftest` | M1：RTSP + `/info` + mDNS 广播 | 否 |
 | `./build/iap2_test identity` | M2：iAP2 线格式 + 链路层 + **MFi 签名** | 否，但**需要 `identity/`** |
 | `./build/m3_test` | M3：SRP 参考向量 + 假手机全流程 + 屏幕流 | 否 |
+| `./build/aa_wire_test` | Android Auto wire：AAP 分帧/拼帧 + protobuf 子集 | 否 |
 | `./build/video_probe --h264 x.h264` | 解码 + letterbox 上屏冒烟 | 否 |
 | `./build/wired_probe --selftest` | 有线：lockdown plist / 证书 / TLS 回环（**不用插手机、不用 sudo**） | 否 |
 | `./build/allplay_host` + `./build/fake_phone` | 端到端 | 否 |
@@ -324,13 +349,14 @@ hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 
 ```
 core/          协议核心（平台无关，唯一三方依赖 OpenSSL；无任何平台头）
+  projection/    协议后端（backend.h / registry + carplay / androidauto / carlife / hicar）；
+                 CarPlay 的 airplay·iap2·mfi·usb·bt 原样收进 projection/carplay/
   port/          抽象接口：IByteStream / ITcpListener·ITcpStream / IBluetooth /
                  IMdnsAdvertiser / INetworkInfo / IVideoOutput + PlatformServices 组合根注入
-  usb/           有线（USB）控制面：usbmux v2 + 迷你 TCP + lockdown 配对/会话 + TLS
-  crypto/ bplist/ iap2/ airplay/ mfi/   协议实现
+  crypto/ bplist/ 通用协议设施（加密原语 / 二进制 plist）
 platform/
   posix/         Linux + macOS 适配（socket / avahi·dns_sd / bluez·IOBluetooth /
-                 libusb·usbmuxd+AppleUSBNCMData）
+                 libusb（CarPlay 有线 + Android Auto）·usbmuxd+AppleUSBNCMData）
   windows/       Winsock2 / AF_BTH
 android/         Android 工程（Gradle：Kotlin + NDK C++ core + JNI → 系统 API）
 harmony/         HarmonyOS 工程（ArkTS + hvigor：core 经 NAPI 进 HAP，AVCodec 硬解 → XComponent）
@@ -338,8 +364,8 @@ host/            桌面宿主（SDL2 / ffmpeg）
   bt_task          无线触发任务（--bt：主动把手机叫起来）
   wired_task       有线接入任务（--wired：USB 控制面两段式，见该文件顶部）
   media/           ffmpeg 软解 + SDL 视频/音频 sink
-tools/           自测与验收工具（core_selftest / iap2_test / m3_test / fake_phone /
-                 video_probe / usb_probe / wired_probe）
+tools/           自测与验收工具（core_selftest / iap2_test / m3_test / aa_wire_test /
+                 fake_phone / video_probe / usb_probe / wired_probe）
 docs/            架构说明 · 协议笔记 · 截图（images/）
 scripts/         bootstrap / build / deploy / 检查脚本
 ```
@@ -356,8 +382,9 @@ scripts/         bootstrap / build / deploy / 检查脚本
 |---|---|---|
 | `core/` | OpenSSL（唯一三方依赖） | Apache-2.0 |
 | 桌面宿主 | SDL2 + SDL2_ttf、ffmpeg（libavcodec / libavutil / libswscale） | zlib / LGPL-2.1+ |
-| Linux 适配 | avahi-client、bluez（libbluetooth）、dbus-1、libusb-1.0（缺则跳过有线） | LGPL-2.1+ |
+| Linux 适配 | avahi-client、bluez（libbluetooth）、dbus-1、libusb-1.0（有线 CarPlay / Android Auto，缺则跳过） | LGPL-2.1+ |
 | macOS 适配 | IOBluetooth / CoreWLAN / dns_sd（系统框架） | 系统 |
+| macOS 适配 | libusb-1.0（Android Auto 有线，缺则跳过） | LGPL-2.1+ |
 | Android | SDK / NDK（BluetoothSocket、MediaCodec、AudioTrack、NsdManager） | 系统 |
 
 **有意不用**的两个：`libswresample`（见 `host/media/ffmpeg_compat.h` 顶部说明）、
@@ -365,9 +392,10 @@ scripts/         bootstrap / build / deploy / 检查脚本
 
 ## 许可与致谢
 
-本项目以 **GPL-3.0** 发布，是 **DiPlay** / **xcertplay**（同为 GPL-3.0）无线 CarPlay 接收端的
-**C++ 重新实现**。许可全文见 [`LICENSE`](LICENSE)，上游署名与三方组件许可见
-[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+本项目以 **GPL-3.0** 发布，是 **DiPlay** / **xcertplay**（同为 GPL-3.0）CarPlay 接收端的
+**C++ 重新实现**。v1.1 起扩展为多协议后端架构；Android Auto 的协议事实参考
+**AASDK / OpenAuto**（GPL-3.0），是独立编写、未拷贝其源码。许可全文见 [`LICENSE`](LICENSE)，
+上游署名与三方组件许可见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 ## 排障
 
