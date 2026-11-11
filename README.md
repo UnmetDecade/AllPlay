@@ -1,5 +1,7 @@
 # AllPlay
 
+<div align="right"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></div>
+
 **A CarPlay receiver (wireless + wired), cross-platform.** One platform-agnostic C++
 implementation of the protocol that puts an iPhone's CarPlay on any screen — video on
 display, audio playing, touch sent back.
