@@ -1,122 +1,135 @@
 # AllPlay
 
-**CarPlay 接收端（无线 + 有线），跨平台。** 一份平台无关的 C++ 协议实现，把 iPhone 的 CarPlay 投到
-任意一块屏幕上 —— 视频上屏、音频播放、触摸回传。
+**A CarPlay receiver (wireless + wired), cross-platform.** One platform-agnostic C++
+implementation of the protocol that puts an iPhone's CarPlay on any screen — video on
+display, audio playing, touch sent back.
 
-**协议核心只写一遍。** 每个平台只实现自己的"屏幕 / 喇叭 / 蓝牙 / 网络"，彼此平级 ——
-没有主次平台，也不共享平台代码。
+**The protocol core is written once.** Each platform only implements its own "screen /
+speaker / Bluetooth / network"; they are peers — no primary platform, and no shared
+platform code.
 
-**协议核心正在长成多协议后端。** v1.1 起 `core/projection/` 用 `IProjectionBackend`
-统一接入不同投屏协议：CarPlay 是第一个后端，Android Auto 有线的协议与 USB 传输层已落地
-（待真机），CarLife / HiCar 预留接口。见 [`docs/projection-backend.md`](docs/projection-backend.md)。
+**The protocol core is growing into a multi-protocol backend.** Since v1.1,
+`core/projection/` uses `IProjectionBackend` to plug in different screen-mirroring
+protocols: CarPlay is the first backend, wired Android Auto has its protocol and USB
+transport layer in place (awaiting hardware), and CarLife / HiCar have their interfaces
+reserved. See [`docs/projection-backend.md`](docs/projection-backend.md).
 
 `GPL-3.0` · `Android ✅` · `HarmonyOS ✅` · `Linux ✅` · `macOS ✅` · `Windows ⏳`
 
-![AllPlay 在 macOS 上的启动页：等 iPhone 连接](docs/images/allplay-launcher-mac.png)
+![The AllPlay launcher on macOS, waiting for an iPhone to connect](docs/images/allplay-launcher-mac.png)
 
 ---
 
-## 这是什么
+## What is this
 
-CarPlay 本该是 iPhone 和车机之间的私有链路。AllPlay 实现的是**车机那一侧**，两条路都实现了：
+CarPlay is supposed to be a private link between an iPhone and a car head unit. AllPlay
+implements **the head-unit side**, both ways:
 
-**无线**（蓝牙叫醒 → Wi-Fi 投屏）
+**Wireless** (Bluetooth wakes the phone → mirroring over Wi-Fi)
 
-| 步骤 | 做什么 |
+| Step | What happens |
 |---|---|
-| ① 蓝牙触发 | 连上 iPhone，走 iAP2 把它"叫醒"，并把 Wi-Fi 的 SSID / 密码 / 本机 IP 与端口告诉它 |
-| ② 发现 | iPhone 连上同一局域网，经 mDNS（`_airplay._tcp`）发现本机 |
-| ③ 协商 | RTSP 控制通道完成配对与流协商：屏幕流 / 音频流 / 事件通道 |
-| ④ 投屏 | H.264 屏幕流解码上屏、音频流解码播放、触摸经事件通道回传 |
+| ① Bluetooth trigger | Connect to the iPhone, "wake it up" over iAP2, and tell it the Wi-Fi SSID / passphrase / our IP and port |
+| ② Discovery | The iPhone joins the same LAN and finds us over mDNS (`_airplay._tcp`) |
+| ③ Negotiation | The RTSP control channel performs pairing and stream negotiation: video / audio / event channel |
+| ④ Mirroring | H.264 screen stream decoded and displayed, audio stream decoded and played, touch sent back over the event channel |
 
-**有线**（插上数据线就行，不用蓝牙、不用同网段）
+**Wired** (just plug in a cable — no Bluetooth, no shared subnet needed)
 
-| 步骤 | 做什么 |
+| Step | What happens |
 |---|---|
-| ① 认设备 | 把 iPhone 从普通 USB 配置切进 **CarPlay 配置**，打开它的 USBMUX 口 |
-| ② 控制面 | usbmux v2 → lockdown 配对 → 原地升 TLS → 起 `com.apple.carkit.service` |
-| ③ 谈链路 | 在这条服务流上跑 iAP2：**主机主动发 marker + SYN**（等手机先开口 = 一片死寂）→ 识别 → MFi → 电源与订阅 |
-| ④ 递地址 | 收到手机的 `0x4300`，回 `0x4301`，把我们**钉在 USB 网卡上的 IPv6 链路本地地址**和端口告诉它 |
-| ⑤ 投屏 | 手机照这个地址连过来，之后和无线那条**完全共用**同一套 RTSP / 加密 / 屏幕流代码 |
+| ① Identify the device | Switch the iPhone out of its normal USB configuration into the **CarPlay configuration**, opening its USBMUX interface |
+| ② Control plane | usbmux v2 → lockdown pairing → upgrade in place to TLS → start `com.apple.carkit.service` |
+| ③ Negotiate the link | iAP2 over that service stream: **the host sends the marker + SYN first** (waiting for the phone to speak first gets you silence) → identify → MFi → power and subscriptions |
+| ④ Hand over the address | On the phone's `0x4300`, reply `0x4301` with our **IPv6 link-local address pinned to the USB NIC** and port |
+| ⑤ Mirroring | The phone connects to that address; from here it **shares the entire** RTSP / encryption / screen-stream code with the wireless path |
 
-> **⚠️ 两条路的最后一道关都需要 Apple MFi 配件身份**（`identity/`）。
-> 那是 Apple 签发的凭证，**不在本仓库里**，需自行准备。详见[当前状态](#当前状态)。
+> **⚠️ The last gate on both paths needs an Apple MFi accessory identity** (`identity/`).
+> That is a credential signed by Apple, **not part of this repository** — bring your own.
+> Details under [Current status](#current-status).
 
-**Android Auto（有线，开发中）**：`core/projection/androidauto/` 已实现 AOAP（51/52/53）
-→ AAP VERSION → TLS 1.2 → 服务发现 → 通道 / 音视频 / 触摸，平台侧由
-`platform/posix/aa_usb_libusb.cpp` 提供 Linux/macOS 共用的 libusb 传输层。
-**尚未接宿主 UI、未上真机验证。**
+**Android Auto (wired, in progress)**: `core/projection/androidauto/` already implements
+AOAP (51/52/53) → AAP VERSION → TLS 1.2 → service discovery → channels / audio-video /
+touch, with `platform/posix/aa_usb_libusb.cpp` providing the libusb transport shared by
+Linux and macOS. **Not yet wired into the host UI, not yet validated on hardware.**
 
-**CarLife / HiCar**：`core/projection/{carlife,hicar}/` 是占位后端 —— 接口齐全，
-`probe()` 返回空、`connect()` 明确报未实现。
+**CarLife / HiCar**: `core/projection/{carlife,hicar}/` are placeholder backends — full
+interface, `probe()` returns empty, `connect()` reports not-implemented.
 
-## 平台支持
+## Platform support
 
-| 平台 | 视频上屏 | 音频 | 无线触发 | 有线（USB） | 状态 |
+| Platform | Video | Audio | Wireless trigger | Wired (USB) | Status |
 |---|---|---|---|---|---|
-| **Android** | MediaCodec 硬解 → Surface | AudioTrack | `BluetoothSocket`（JNI） | — | ✅ 端到端跑通 |
-| **HarmonyOS** | AVCodec NDK 硬解 → XComponent surface | OH AudioCodec 解码 → OHAudio 渲染（AAC-LC） | ArkTS `socket.sppConnect` | — | ✅ **真机端到端**（蓝牙触发 → 投屏全屏 → 触摸 → 出声，Mate 60） |
-| **Linux / Ubuntu** | ffmpeg 软解 → SDL2 纹理 | SDL2（AAC-LC / Opus / LPCM） | BlueZ：SDP + 裸 RFCOMM（客户端模式） | libusb + 内核 `cdc_ncm` | ✅ **真假两路都端到端跑通** |
-| **macOS** | 同 Linux（**共用同一份宿主代码**） | 同 Linux | IOBluetooth | 系统 `usbmuxd` + `AppleUSBNCMData`（不碰 USB，不需要 DriverKit） | ✅ **无线/有线都真机端到端**（有线：iPhone 直插 Mac，投屏 + 声音；无线：蓝牙触发 → 投屏 → 触摸，掉线自动重连） |
-| **Windows** | ffmpeg（待接） | — | `AF_BTH`（待接入） | — | ⏳ 骨架 |
+| **Android** | MediaCodec hardware decode → Surface | AudioTrack | `BluetoothSocket` (JNI) | — | ✅ End to end |
+| **HarmonyOS** | AVCodec NDK hardware decode → XComponent surface | OH AudioCodec decode → OHAudio render (AAC-LC) | ArkTS `socket.sppConnect` | — | ✅ **On-device end to end** (Bluetooth trigger → fullscreen mirroring → touch → audio, Mate 60) |
+| **Linux / Ubuntu** | ffmpeg software decode → SDL2 texture | SDL2 (AAC-LC / Opus / LPCM) | BlueZ: SDP + raw RFCOMM (client mode) | libusb + kernel `cdc_ncm` | ✅ **Both paths end to end with a real iPhone** |
+| **macOS** | Same as Linux (**shared host code**) | Same as Linux | IOBluetooth | System `usbmuxd` + `AppleUSBNCMData` (never touches USB, no DriverKit) | ✅ **Wireless and wired both end to end on a real iPhone** (wired: iPhone plugged straight into the Mac, video + sound; wireless: Bluetooth trigger → mirroring → touch, auto-reconnect on drop) |
+| **Windows** | ffmpeg (to be wired up) | — | `AF_BTH` (to be wired up) | — | ⏳ Skeleton |
 
-有线的媒体面**不自己写**：Linux 上切进 CarPlay 配置后，内核的 `cdc_ncm` 会自己建出一块
-真网卡；macOS 上系统本来就用 `AppleUSBNCMData` 把 NCM 功能挂成了 `enX`。两条路都只需
-AirPlay 绑到那块网卡上就行，NTB16 / 以太网 / IPv6 都不归我们管。
+The wired **media plane is not ours to write**: on Linux, once the CarPlay configuration is
+entered, the kernel's `cdc_ncm` brings up a real network interface by itself; on macOS the
+system already hangs the NCM function off `AppleUSBNCMData` as `enX`. Both paths only need
+AirPlay bound to that interface — NTB16 / Ethernet / IPv6 are none of our business.
 
-macOS 的控制面也不碰 USB：借系统 `usbmuxd`（`/var/run/usbmuxd`，就是 Finder 用的那条
-隧道）连 lockdown 与 carkit 服务。前提是这台 Mac 已经在 Finder 里被手机信任过。
+The macOS control plane doesn't touch USB either: it borrows the system `usbmuxd`
+(`/var/run/usbmuxd`, the very tunnel Finder uses) to reach lockdown and the carkit service.
+The prerequisite is that this Mac has already been trusted by the phone in Finder.
 
-**Android Auto（有线）**目前只在 Linux / macOS 桌面侧有传输层实现（libusb，
-`platform/posix/aa_usb_libusb.cpp`）；协议层本身平台无关，Android / HarmonyOS 宿主
-还缺各自的 USB 传输与 UI 入口（见[当前状态](#当前状态)）。
+**Android Auto (wired)** currently has a transport implementation only on the Linux / macOS
+desktop side (libusb, `platform/posix/aa_usb_libusb.cpp`); the protocol layer itself is
+platform-agnostic, and the Android / HarmonyOS hosts still lack their own USB transport and
+UI entry point (see [Current status](#current-status)).
 
-- **没有主次平台。** 各家都只实现 `core/port` 的接口，互相不共享平台代码；
-  桌面两平台共用 `host/`，只是因为它们恰好都用 SDL2。
-- **验收方式统一。** 不管哪个平台，`tools/fake_phone` 都能扮演 iPhone 跑完整条链路 ——
-  不需要真机，也不需要另一台设备。
+- **No primary platform.** Each one only implements the `core/port` interfaces and shares no
+  platform code with the others; the two desktop platforms share `host/` only because they
+  happen to both use SDL2.
+- **One acceptance method for all.** On every platform, `tools/fake_phone` can play the
+  iPhone and run the whole chain — no real device, no second machine.
 
-## 架构
+## Architecture
 
-四层，**依赖单向朝内**：
+Four layers, **dependencies point inward only**:
 
 ```
-host/          宿主层（组合根）—— 装配下面三层，管窗口/主循环/输入
-platform/      适配层 —— 用系统 API 实现 core/port 的接口（POSIX / BlueZ / IOBluetooth / Win32 / JNI）
-core/port/     接口层 —— 纯抽象，无实现（ITcpStream / IBluetooth / IVideoOutput / MediaKeyQueue …）
-core/projection/ 协议后端层 —— IProjectionBackend / IProjectionSession / IProjectionSink；
-               CarPlay 在 carplay/（原 airplay / iap2 / mfi / usb / bt），
-               Android Auto 在 androidauto/，CarLife / HiCar 占位
-core/          协议核心 —— 纯 C++，不含任何平台头，唯一三方依赖是 OpenSSL
+host/          Host layer (composition root) — assembles the three below, owns window/main loop/input
+platform/      Adapter layer — implements core/port with system APIs (POSIX / BlueZ / IOBluetooth / Win32 / JNI)
+core/port/     Interface layer — pure abstraction, no implementation (ITcpStream / IBluetooth / IVideoOutput / MediaKeyQueue …)
+core/projection/ Protocol backend layer — IProjectionBackend / IProjectionSession / IProjectionSink;
+               CarPlay under carplay/ (formerly airplay / iap2 / mfi / usb / bt),
+               Android Auto under androidauto/, CarLife / HiCar as placeholders
+core/          Protocol core — pure C++, no platform headers, only third-party dependency is OpenSSL
 ```
 
-**只有 `core/` 是"这个项目本身"**：RTSP、iAP2、加密原语、屏幕流、事件通道全在这里，
-可以脱离任何平台单独编译和自测。平台差异一律通过 `core/port/*.h` 注入。
+**Only `core/` is "the project itself"**: RTSP, iAP2, crypto primitives, screen stream,
+event channel all live here, and it compiles and self-tests on its own without any platform.
+Platform differences are injected exclusively through `core/port/*.h`.
 
-反方向的输入（**方控 / 媒体键**）也走同一套分层：`core/port/control.h` 只定义"按了什么键"
-和线程安全的 `MediaKeyQueue`，上层把物理按键按进队列，`iap2` 侧（无线 `WirelessTrigger`、
-有线 `WiredLink`）负责编码成 HID 报表发回手机。**按键从哪来（界面、系统媒体键、硬件 GPIO）
-由各平台自己实现**，`core` 不碰。
+Input in the other direction (**steering-wheel / media keys**) follows the same layering:
+`core/port/control.h` defines only "which key was pressed" and a thread-safe
+`MediaKeyQueue`; the upper layer pushes physical keys into the queue and the `iap2` side
+(wireless `WirelessTrigger`, wired `WiredLink`) encodes them into HID reports back to the
+phone. **Where the keys come from (UI, system media keys, hardware GPIO) is up to each
+platform**, and `core` never touches it.
 
 <details>
-<summary>分层架构图（点击展开）</summary>
+<summary>Layered architecture diagram (click to expand)</summary>
 
 ```mermaid
 flowchart TB
-    subgraph HOST["宿主层（组合根 / Composition Root）"]
+    subgraph HOST["Host layer (composition root)"]
         direction LR
         ANDROID["Android App<br/>MainActivity · AllPlaySessionService<br/>MediaCodecSink · AudioSink<br/>BluetoothService · MdnsService · HotspotManager"]
-        DESKTOP["桌面 Host<br/>macOS/Linux: SDL2<br/>Windows: Win32 窗口"]
+        DESKTOP["Desktop Host<br/>macOS/Linux: SDL2<br/>Windows: Win32 window"]
     end
 
-    subgraph ADAPTER["平台适配层（实现 core::port 接口）"]
+    subgraph ADAPTER["Platform adapter layer (implements core::port)"]
         direction LR
         POSIX["platform/posix<br/>net_posix · mdns(avahi/dns_sd)<br/>bt(IOBluetooth/BlueZ)"]
         WIN["platform/windows<br/>net_windows(Winsock2)<br/>bt_windows(AF_BTH)<br/>mdns"]
         JNI["android JNI<br/>jni_bridge.cpp"]
     end
 
-    subgraph PORT["接口层（core/port，平台无关）"]
+    subgraph PORT["Interface layer (core/port, platform-agnostic)"]
         direction LR
         TCP["ITcpListener / ITcpStream"]
         UDP["IUdpSocket"]
@@ -128,7 +141,7 @@ flowchart TB
         PS["PlatformServices"]
     end
 
-    subgraph CORE["协议核心（core，平台无关，唯一三方依赖 = OpenSSL）"]
+    subgraph CORE["Protocol core (core, platform-agnostic, only third-party dep = OpenSSL)"]
         direction LR
         AIRPLAY["projection/carplay/airplay<br/>rtsp · server · session<br/>video_stream · audio_stream<br/>event_channel · control_cipher · info"]
         IAP2["projection/carplay/iap2<br/>wire · link · wireless_client"]
@@ -136,278 +149,313 @@ flowchart TB
         CRYPTO["crypto<br/>hkdf · chacha20poly1305 · srp6a<br/>x25519 · ed25519 · tlv8 · aes_ctr"]
         BPLIST["bplist"]
         BTTRIG["projection/carplay/bt<br/>bt_trigger"]
-        AA["projection/androidauto<br/>aap · proto · tls · backend<br/>（协议完成，待真机）"]
+        AA["projection/androidauto<br/>aap · proto · tls · backend<br/>(protocol done, awaiting hardware)"]
         IDENTITY["platform<br/>device_identity · pairing_store"]
         COMMON["common<br/>log"]
     end
 
-    HOST -->|注入实现| ADAPTER
-    ADAPTER -->|实现| PORT
-    CORE -->|依赖| PORT
-    HOST -->|装配 PlatformServices| CORE
+    HOST -->|injects implementations| ADAPTER
+    ADAPTER -->|implements| PORT
+    CORE -->|depends on| PORT
+    HOST -->|assembles PlatformServices| CORE
 ```
 
 </details>
 
 <details>
-<summary>无线 CarPlay 数据流（点击展开）</summary>
+<summary>Wireless CarPlay data flow (click to expand)</summary>
 
 ```mermaid
 flowchart LR
-    IPHONE["iPhone<br/>(CarPlay 源端)"]
+    IPHONE["iPhone<br/>(CarPlay source)"]
 
-    subgraph RECEIVER["AllPlay 接收端"]
-        BT_TRIG["蓝牙 iAP2 触发<br/>RFCOMM → 0x4301"]
-        RTSP["RTSP 控制通道 :7000<br/>pair-setup / pair-verify<br/>auth-setup / SETUP / RECORD"]
-        SCREEN["屏幕流 110/111<br/>TCP · H.264 · AVCC→AnnexB"]
-        AUDIO["音频流 100/101/102<br/>UDP RTP · AAC/Opus/LPCM"]
-        EVENT["事件通道 eventPort<br/>触摸/命令 · ControlCipher 加密"]
-        MDNS_B["mDNS 广播<br/>_airplay._tcp"]
+    subgraph RECEIVER["AllPlay receiver"]
+        BT_TRIG["Bluetooth iAP2 trigger<br/>RFCOMM → 0x4301"]
+        RTSP["RTSP control channel :7000<br/>pair-setup / pair-verify<br/>auth-setup / SETUP / RECORD"]
+        SCREEN["Screen stream 110/111<br/>TCP · H.264 · AVCC→AnnexB"]
+        AUDIO["Audio stream 100/101/102<br/>UDP RTP · AAC/Opus/LPCM"]
+        EVENT["Event channel eventPort<br/>touch/commands · ControlCipher"]
+        MDNS_B["mDNS advertisement<br/>_airplay._tcp"]
     end
 
-    IPHONE -->|"① 蓝牙连入，发 iAP2"| BT_TRIG
-    BT_TRIG -->|"② 0x4301 引导（SSID/密码/IP/端口）"| IPHONE
-    IPHONE -->|"③ 连 Wi-Fi 后经 mDNS 发现"| MDNS_B
-    IPHONE -->|"④ RTSP 协商"| RTSP
-    RTSP -->|"⑤ 建立数据流"| SCREEN
-    RTSP -->|"⑤ 建立音频流"| AUDIO
-    RTSP -->|"⑤ 建立事件通道"| EVENT
-    SCREEN -->|"H.264 帧 → IVideoOutput 解码上屏"| SCREEN
-    EVENT -->|"触摸 → hidSendReport → 回 iPhone"| IPHONE
+    IPHONE -->|"① connects over Bluetooth, speaks iAP2"| BT_TRIG
+    BT_TRIG -->|"② 0x4301 bootstrap (SSID/passphrase/IP/port)"| IPHONE
+    IPHONE -->|"③ joins Wi-Fi, discovers via mDNS"| MDNS_B
+    IPHONE -->|"④ RTSP negotiation"| RTSP
+    RTSP -->|"⑤ sets up data streams"| SCREEN
+    RTSP -->|"⑤ sets up audio stream"| AUDIO
+    RTSP -->|"⑤ sets up event channel"| EVENT
+    SCREEN -->|"H.264 frames → IVideoOutput decode & display"| SCREEN
+    EVENT -->|"touch → hidSendReport → back to iPhone"| IPHONE
 ```
 
 </details>
 
-逐模块职责与平台适配矩阵见 [`docs/architecture.md`](docs/architecture.md)；
-协议细节（报文格式、握手流程）整理在 [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md)。
+Per-module responsibilities and the platform adapter matrix are in
+[`docs/architecture.md`](docs/architecture.md); protocol details (message formats,
+handshake flow) are collected in [`docs/PROTOCOL-NOTES.md`](docs/PROTOCOL-NOTES.md).
 
-## 快速开始
+## Quick start
 
-### 桌面（Linux / Ubuntu 或 macOS）
+### Desktop (Linux / Ubuntu or macOS)
 
 ```bash
-bash scripts/bootstrap.sh      # 装依赖：SDL2 / SDL2_ttf / ffmpeg / avahi
-                               # （Linux：另加 bluez + dbus-1 + libusb-1.0；
-                               #   macOS：Android Auto 有线要 `brew install libusb`）
-bash scripts/build.sh          # 产物在 build/
-./build/m3_test                # 自测：全绿说明协议核心没问题
-./build/aa_wire_test           # Android Auto wire 层自测（AAP 分帧 + protobuf，不需要手机）
+bash scripts/bootstrap.sh      # dependencies: SDL2 / SDL2_ttf / ffmpeg / avahi
+                               # (Linux: plus bluez + dbus-1 + libusb-1.0;
+                               #  macOS: `brew install libusb` for wired Android Auto)
+bash scripts/build.sh          # artifacts land in build/
+./build/m3_test                # self-test: all green means the protocol core is fine
+./build/aa_wire_test           # Android Auto wire-layer self-test (AAP framing + protobuf, no phone needed)
 ```
 
-> **`scripts/*.sh` 在仓库里没有执行位**，所以要写 `bash scripts/xxx.sh`，直接 `./scripts/build.sh` 会 permission denied。
+> **The `scripts/*.sh` files have no execute bit in the repo**, so run them as
+> `bash scripts/xxx.sh`; `./scripts/build.sh` fails with permission denied.
 
-启动宿主。三种用法：
+Starting the host. Three ways:
 
 ```bash
-# ① 等手机来连（传统接收端）
+# ① Wait for a phone to connect (classic receiver)
 ./build/allplay_host --name "AllPlay"
 
-# ② 主动把手机叫来（蓝牙 iAP2 触发 → 再接住它投过来的画面）
+# ② Go wake the phone up (Bluetooth iAP2 trigger → then catch the mirroring it sends over)
 ./build/allplay_host --statusbar \
-  --bt --bt-device iPhone --ssid "<你的 Wi-Fi 名>" --wifi-pass "<密码>"
+  --bt --bt-device iPhone --ssid "<your Wi-Fi SSID>" --wifi-pass "<passphrase>"
 
-# ③ 有线（插着数据线，不用蓝牙、不用同网段）—— 见下面"前置条件"
+# ③ Wired (cable plugged in, no Bluetooth, no shared subnet) — see prerequisites below
 ./build/allplay_host --wired --identity identity
 ```
 
-- `--bt` / `--wired` 系列开关**一律 opt-in**，不加就跟纯接收端的行为完全一致；两者互斥。
-- 用 `--bt-addr AA:BB:CC:DD:EE:FF` 按蓝牙地址直连，比按名字匹配可靠。
-- 触发失败会按 3 秒间隔整链重试（`--bt-retry`，默认 10 次）；运行时按 `B` 可再触发一次。
-  有线准备失败时按 `W` 重来一次（解锁手机、点掉"信任"弹窗之后不用重启程序）。
-- **同网段若还有别的 CarPlay 接收端**（自带 MFi 的车机等），iPhone 有自动回连行为，
-  可能连到它那边去 —— 测本机时建议先把那台断电。
+- The `--bt` / `--wired` switches are **strictly opt-in**; without them the behaviour is
+  exactly that of a plain receiver, and the two are mutually exclusive.
+- `--bt-addr AA:BB:CC:DD:EE:FF` connects by Bluetooth address, which is more reliable than
+  matching by name.
+- A failed trigger retries the whole chain every 3 seconds (`--bt-retry`, 10 attempts by
+  default); press `B` at runtime to trigger again. If wired setup fails, press `W` to start
+  over (no need to restart the program after unlocking the phone and dismissing the "Trust"
+  dialog).
+- **If another CarPlay receiver is on the same subnet** (a factory head unit with its own
+  MFi, say), the iPhone may auto-reconnect to it — power that unit down while testing this one.
 
-#### 有线的前置条件（Linux，**缺一不可**）
+#### Wired prerequisites (Linux, **all three required**)
 
 ```bash
-# ① 我们自己要独占 USBMUX 口，系统那套 usbmuxd 得让开
+# ① We need exclusive access to the USBMUX interface; the system usbmuxd must step aside
 sudo systemctl stop usbmuxd && sudo systemctl mask usbmuxd
-# ② 不然 gvfs 会抢着去挂载 iPhone 的照片
+# ② Otherwise gvfs races us to mount the iPhone's photos
 pkill -f gvfsd-gphoto2
-# ③ 挡掉内核的 apple_mfi_fastcharge —— 它会把设备认走
+# ③ Block the kernel's apple_mfi_fastcharge — it claims the device
 echo "blacklist apple_mfi_fastcharge" | sudo tee /etc/modprobe.d/blacklist-apple-mfi.conf
 ```
 
-**整个程序要 `sudo` 跑**（`/dev/bus/usb/*` 是 root 独占）。注意 `sudo` 会重置环境：
+**The whole program must run as `sudo`** (`/dev/bus/usb/*` is root-only). Note that `sudo`
+resets the environment:
 
 ```bash
 sudo env ALLPLAY_LOG=info ALLPLAY_STATE_DIR="$HOME/.local/state/allplay" \
   ./build/allplay_host --wired --identity identity
 ```
 
-`ALLPLAY_STATE_DIR` 必须显式给 —— 不然 `HOME` 变成 `/root`，本机身份会另起一份，
-手机每次都要重新配对。
+`ALLPLAY_STATE_DIR` must be given explicitly — otherwise `HOME` becomes `/root`, the local
+identity starts from scratch, and the phone has to be paired again every time.
 
-两个"看起来像故障、其实不是"的现象：**手机锁屏时只报 1 个 USB 配置**（iOS 的行为，
-不是线的问题，解锁就好）；**首次连接手机会弹"信任此电脑"**，没人点的话约 40 秒后它会把
-USB 整个重置掉，日志里看到的是设备消失而不是超时。
+Two things that look like faults but aren't: **a locked phone reports only one USB
+configuration** (iOS behaviour, not a cable problem — just unlock it); and **on first
+connection the phone shows a "Trust This Computer" prompt**, and if nobody taps it, it
+resets the whole USB link after about 40 seconds — the log shows the device disappearing,
+not a timeout.
 
-跑起来之后就是这样（真 iPhone，插线，宿主 `--wired`）：
+Once running, it looks like this (real iPhone, cable plugged in, host in `--wired` mode):
 
-![真 iPhone 的有线 CarPlay 界面渲染在 Ubuntu 上](docs/images/carplay-wired.jpg)
+![Wired CarPlay UI from a real iPhone rendered on Ubuntu](docs/images/carplay-wired.jpg)
 
-**触摸也通**，而且走的是和无线**完全相同**的那条事件通道（`POST /command` + 加密 HID），
-一行都没改 —— 下面这张是注入一次点击打在"外观"那一行上，手机跟着进了该页：
+**Touch works too**, and it travels the **exact same** event channel as the wireless path
+(`POST /command` + encrypted HID) with not a single line changed — this shot is one click
+injected onto the "Appearance" row, and the phone followed us into that page:
 
-![注入触摸后 CarPlay 跟着进了"外观"页](docs/images/carplay-wired-touch.jpg)
+![After injecting a touch, CarPlay navigated into the Appearance page](docs/images/carplay-wired-touch.jpg)
 
-> 音频在有线上没验过：那一次会话里手机没有建音频流（CarPlay 只在真的出声时才建）。
-> 代码路径与无线共用，但**没上真机点过就不算数**。
+> Audio was not verified over wired: in that session the phone never created an audio
+> stream (CarPlay only creates one when sound is actually playing). The code path is shared
+> with wireless, but **anything not exercised on real hardware doesn't count**.
 
-### 端到端验收（**不需要 iPhone**）
+### End-to-end acceptance (**no iPhone needed**)
 
-用 `tools/fake_phone` 扮演 iPhone，真 socket + 真加密跑完整条 RTSP 与屏幕流：
+`tools/fake_phone` plays the iPhone and runs the entire RTSP and screen-stream path with
+real sockets and real encryption:
 
 ```bash
-# 先造一段测试流
+# First, produce a test stream
 ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=60 -t 10 -c:v libx264 \
   -preset veryfast -pix_fmt yuv420p -g 60 -bf 0 -bsf:v h264_mp4toannexb -f h264 out.h264
 
-# 终端 1：宿主（--port 7100 避开下面那个坑）
+# Terminal 1: the host (--port 7100 avoids the pitfall below)
 SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy ./build/allplay_host \
   --no-avahi --port 7100 --dump /tmp/x.ppm
 
-# 终端 2：假 iPhone
+# Terminal 2: the fake iPhone
 ./build/fake_phone --h264 out.h264 --port 7100 --fps 60
 ```
 
-**验收看四个数**：`fake_phone` 打印的触摸坐标对得上注入值；音频推流帧数对得上宿主解码帧数；
-`--dump` 出的 PPM 转 PNG 是彩条且**红是红**（红蓝互换 = YUV 平面序写错了）；`m3_test` 仍全绿。
+**Four numbers to check**: the touch coordinates printed by `fake_phone` match the injected
+values; the audio frames pushed match the host's decoded frames; the `--dump`ed PPM converted
+to PNG is colour bars and **red really is red** (red/blue swapped means the YUV plane order is
+wrong); and `m3_test` is still all green.
 
 ### Android
 
 ```bash
-cd android && ./gradlew :app:assembleDebug      # 需要 Android SDK + NDK + 为 arm64-v8a/armeabi-v7a 交叉编译的 OpenSSL
+cd android && ./gradlew :app:assembleDebug      # needs Android SDK + NDK + OpenSSL cross-compiled for arm64-v8a/armeabi-v7a
 ```
 
-`minSdk 19`（Android 4.4+）、`targetSdk 34`、ABI 出 `arm64-v8a` + `armeabi-v7a`（32 位盒子用后者）。
-NDK 需用 **r25c**（r26 起不支持 API 19）；OpenSSL 按 ABI 分目录（`openssl-arm64` / `openssl-arm`）。
-交叉编译说明见 `android/app/src/main/cpp/CMakeLists.txt` 顶部。
+`minSdk 19` (Android 4.4+), `targetSdk 34`, ABIs `arm64-v8a` + `armeabi-v7a` (the latter for
+32-bit boxes). The NDK must be **r25c** (r26 dropped API 19 support); OpenSSL goes in
+per-ABI directories (`openssl-arm64` / `openssl-arm`). Cross-compilation notes are at the top
+of `android/app/src/main/cpp/CMakeLists.txt`.
 
-### HarmonyOS（鸿蒙）
+### HarmonyOS
 
 ```bash
-scripts/build-ohos-openssl.sh                   # ① 交叉编译 OpenSSL（产物在 tmp/ohos-ssl/，不入库）
-scripts/sync-harmony-identity.sh                # ② 把 identity/ 拷进 HAP 的 rawfile（已在 .gitignore）
+scripts/build-ohos-openssl.sh                   # ① cross-compile OpenSSL (output in tmp/ohos-ssl/, not committed)
+scripts/sync-harmony-identity.sh                # ② copy identity/ into the HAP's rawfile (already gitignored)
 cd harmony && hvigorw assembleHap --mode module -p product=default
 hdc install -r entry/build/default/outputs/default/entry-default-signed.hap
 ```
 
-- 需要 **DevEco Studio**（HarmonyOS SDK + NDK），`harmony/build-profile.example.json5` 是签名配置的模板
-  —— 复制成 `harmony/build-profile.json5` 填自己的证书，真实配置不入库。
-- 协议全在 `core/`，经 NAPI 编进 `liballplay_core.so`；蓝牙 SPP、mDNS 广播、屏幕尺寸走 ArkTS 系统 API。
-- **视频**：`OH_VideoDecoder_CreateByMime` 硬解（NDK AVCodec），直接 `RenderOutputBuffer` 到
-  `XComponent` 的 surface。avcC 会转成 AnnexB 的 SPS/PPS 在每个 IDR 前 in-band 补一份
-  （`OH_MD_KEY_CODEC_CONFIG` 这条路在真机上没进解码器）。
-- **全屏**：按屏幕长宽比协商显示分辨率（如 1920×868），iPhone 会按这个尺寸重排 CarPlay 界面，
-  横屏后 1:1 铺满；启动页仍是竖屏。
-- **触摸**：XComponent `onTouch` → 归一化坐标 → `core` 的事件通道 → HID `touchReport`（双触点）。
-- **音频**（`harmony_audio.cpp`）：`OH_AudioCodec` 同步模式解码 → `OHAudio` 渲染。
-  手机给的是**裸 AAC 帧**（type=102、`0x800000`、48kHz 立体声），每帧前面自己补 7 字节 ADTS 头，
-  并把 `OH_MD_KEY_AAC_IS_ADTS` 置 1 —— 走带外 ASC 那条路在这台机的解码器上解不出东西。
-  播放侧是 700ms 的环形池 + 250ms 续播水位，Wi-Fi 抖动和水流都靠它吸收。
-  流式播放时界面上的"取消"会被画面盖住。
+- Requires **DevEco Studio** (HarmonyOS SDK + NDK); `harmony/build-profile.example.json5` is
+  the signing-config template — copy it to `harmony/build-profile.json5`, fill in your own
+  certificate; the real config is not committed.
+- The protocol all lives in `core/`, compiled into `liballplay_core.so` through NAPI;
+  Bluetooth SPP, mDNS advertisement and screen size go through ArkTS system APIs.
+- **Video**: `OH_VideoDecoder_CreateByMime` hardware decode (NDK AVCodec), rendering straight
+  to the `XComponent` surface via `RenderOutputBuffer`. avcC is converted to AnnexB, with the
+  SPS/PPS re-sent in-band before every IDR (the `OH_MD_KEY_CODEC_CONFIG` route never reached
+  the decoder on real hardware).
+- **Fullscreen**: the display resolution is negotiated from the screen aspect ratio (e.g.
+  1920×868) and the iPhone reflows the CarPlay UI for that size; after rotating to landscape it
+  fills 1:1. The launcher stays portrait.
+- **Touch**: XComponent `onTouch` → normalized coordinates → `core`'s event channel → HID
+  `touchReport` (two contacts).
+- **Audio** (`harmony_audio.cpp`): `OH_AudioCodec` in sync mode → `OHAudio` renderer. The phone
+  sends **raw AAC frames** (type=102, `0x800000`, 48 kHz stereo); we prepend a 7-byte ADTS
+  header to each and set `OH_MD_KEY_AAC_IS_ADTS` to 1 — the out-of-band ASC route decodes
+  nothing on this device's decoder. On the playback side a 1.5 s ring buffer with a 700 ms
+  resume watermark absorbs Wi-Fi jitter and the phone's bursty delivery. While streaming, the
+  on-screen "Cancel" button is covered by the video.
 
-## 当前状态
+## Current status
 
-| 里程碑 | 内容 | 状态 |
+| Milestone | Scope | Status |
 |---|---|---|
-| M0 | 骨架：CMake + SDL 窗口/状态栏 + 脚本 | ✅ |
-| M1 | core：RTSP + `/info`(bplist) + mDNS 广播 `_airplay._tcp` | ✅ |
-| M2 | 蓝牙触发：iAP2 协议栈（识别 / MFi / 订阅 / 0x5703 / 0x4301） | ✅ 软件完成；**Linux BlueZ 接通真机 iPhone，整链走到 `0x4301 CarPlayStartSession`** |
-| M3 | 会话 + 视频：pair-setup/verify、auth-setup、SETUP、ControlCipher、屏幕流 | ✅ 安卓端到端（含 Android 4.4 盒子）；✅ 桌面 ffmpeg 解码上屏；✅ **真 iPhone 在 Ubuntu 桌面上跑通（2026-10-12）** |
-| M4 | 有线（USB）CarPlay：libusb 切配置 + usbmux/lockdown/TLS + 内核 `cdc_ncm` 媒体面 | ✅ **真 iPhone 有线端到端跑通（2026-10-13），宿主 `--wired`** |
-| M5 | 状态栏信息 + 健壮性（重连 / 关键帧恢复 / watchdog） | 部分（关键帧恢复已接） |
-| M6 | UI 状态页 / 叠加（原生） | |
-| M7 | 协议后端化：`IProjectionBackend` + 注册表 + CarPlay 模块（v1.1） | ✅ 编译与回归通过；宿主尚未切到注册表 |
-| M8 | Android Auto 有线：AOAP → AAP → TLS 1.2 → 音视频/输入（v1.1） | 🟡 协议 + libusb 传输层完成，**待真机**；宿主未接 UI |
+| M0 | Skeleton: CMake + SDL window/status bar + scripts | ✅ |
+| M1 | core: RTSP + `/info` (bplist) + mDNS advertisement `_airplay._tcp` | ✅ |
+| M2 | Bluetooth trigger: iAP2 stack (identify / MFi / subscriptions / 0x5703 / 0x4301) | ✅ Software complete; **Linux BlueZ reaches a real iPhone all the way to `0x4301 CarPlayStartSession`** |
+| M3 | Session + video: pair-setup/verify, auth-setup, SETUP, ControlCipher, screen stream | ✅ Android end to end (including an Android 4.4 box); ✅ desktop ffmpeg decode & display; ✅ **real iPhone running on an Ubuntu desktop (2026-10-12)** |
+| M4 | Wired (USB) CarPlay: libusb config switch + usbmux/lockdown/TLS + kernel `cdc_ncm` media plane | ✅ **Real iPhone wired end to end (2026-10-13), host `--wired`** |
+| M5 | Status bar info + robustness (reconnect / keyframe recovery / watchdog) | Partial (keyframe recovery wired up) |
+| M6 | UI status page / overlay (native) | |
+| M7 | Protocol backend-ization: `IProjectionBackend` + registry + CarPlay module (v1.1) | ✅ Builds and passes regression; the host is not switched to the registry yet |
+| M8 | Wired Android Auto: AOAP → AAP → TLS 1.2 → audio-video/input (v1.1) | 🟡 Protocol + libusb transport done, **awaiting hardware**; host UI not wired up |
 
-> **两条路都通了。** 无线：2026-10-12 蓝牙触发 → mDNS 发现 → RTSP 协商 → 屏幕流上屏 → 触摸可点
-> （见 [`CHANGELOG.md`](CHANGELOG.md) v0.3）。有线：2026-10-13 插线即通，控制面自己写、
-> 媒体面交给内核，200 秒连续收流不掉线（见 v0.4）。
-> 剩下的阻塞在**凭证**上：iAP2 的 `0xAA00 请求证书` 要求 Apple MFi 计划签发的配件身份
-> （`identity/`）。开发期用自备身份即可走通全链路做验证，但**纯软件身份不是产品路径**。
+> **Both paths work.** Wireless: 2026-10-12, Bluetooth trigger → mDNS discovery → RTSP
+> negotiation → screen stream on display → touch responds (see [`CHANGELOG.md`](CHANGELOG.md)
+> v0.3). Wired: 2026-10-13, plug in and it works, with the control plane written by us and the
+> media plane left to the kernel, 200 seconds of continuous streaming without a drop (see v0.4).
+> What remains is blocked on the **credential**: iAP2's `0xAA00 request certificate` requires an
+> accessory identity issued under the Apple MFi program (`identity/`). A self-supplied identity
+> is enough to walk the whole chain during development, but **a pure-software identity is not a
+> shipping path**.
 
-版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。
+Version history is in [`CHANGELOG.md`](CHANGELOG.md).
 
-### 自测
+### Self-tests
 
-| 命令 | 覆盖 | 需要硬件 |
+| Command | Coverage | Needs hardware |
 |---|---|---|
-| `./build/core_selftest` | M1：RTSP + `/info` + mDNS 广播 | 否 |
-| `./build/iap2_test identity` | M2：iAP2 线格式 + 链路层 + **MFi 签名** | 否，但**需要 `identity/`** |
-| `./build/m3_test` | M3：SRP 参考向量 + 假手机全流程 + 屏幕流 | 否 |
-| `./build/aa_wire_test` | Android Auto wire：AAP 分帧/拼帧 + protobuf 子集 | 否 |
-| `./build/video_probe --h264 x.h264` | 解码 + letterbox 上屏冒烟 | 否 |
-| `./build/wired_probe --selftest` | 有线：lockdown plist / 证书 / TLS 回环（**不用插手机、不用 sudo**） | 否 |
-| `./build/allplay_host` + `./build/fake_phone` | 端到端 | 否 |
-| `./build/wired_probe --link --mfi-dir identity` | 有线控制面（要真 iPhone + sudo + 上面那三件前置） | 是 |
+| `./build/core_selftest` | M1: RTSP + `/info` + mDNS advertisement | No |
+| `./build/iap2_test identity` | M2: iAP2 wire format + link layer + **MFi signing** | No, but **requires `identity/`** |
+| `./build/m3_test` | M3: SRP reference vectors + full fake-phone flow + screen stream | No |
+| `./build/aa_wire_test` | Android Auto wire: AAP framing/deframing + protobuf subset | No |
+| `./build/video_probe --h264 x.h264` | Decode + letterbox display smoke test | No |
+| `./build/wired_probe --selftest` | Wired: lockdown plist / certificates / TLS loopback (**no phone, no sudo**) | No |
+| `./build/allplay_host` + `./build/fake_phone` | End to end | No |
+| `./build/wired_probe --link --mfi-dir identity` | Wired control plane (needs a real iPhone + sudo + the three prerequisites above) | Yes |
 
-不带参数跑 `--help` 都能看到各自的完整选项。
+Run any of them with `--help` for the full set of options.
 
-## 仓库结构
+## Repository layout
 
 ```
-core/          协议核心（平台无关，唯一三方依赖 OpenSSL；无任何平台头）
-  projection/    协议后端（backend.h / registry + carplay / androidauto / carlife / hicar）；
-                 CarPlay 的 airplay·iap2·mfi·usb·bt 原样收进 projection/carplay/
-  port/          抽象接口：IByteStream / ITcpListener·ITcpStream / IBluetooth /
-                 IMdnsAdvertiser / INetworkInfo / IVideoOutput + PlatformServices 组合根注入
-  crypto/ bplist/ 通用协议设施（加密原语 / 二进制 plist）
+core/          Protocol core (platform-agnostic; only third-party dep OpenSSL; no platform headers)
+  projection/    Protocol backends (backend.h / registry + carplay / androidauto / carlife / hicar);
+                 CarPlay's airplay·iap2·mfi·usb·bt now live under projection/carplay/
+  port/          Abstract interfaces: IByteStream / ITcpListener·ITcpStream / IBluetooth /
+                 IMdnsAdvertiser / INetworkInfo / IVideoOutput + PlatformServices composition root
+  crypto/ bplist/ Shared protocol infrastructure (crypto primitives / binary plist)
 platform/
-  posix/         Linux + macOS 适配（socket / avahi·dns_sd / bluez·IOBluetooth /
-                 libusb（CarPlay 有线 + Android Auto）·usbmuxd+AppleUSBNCMData）
+  posix/         Linux + macOS adapters (socket / avahi·dns_sd / bluez·IOBluetooth /
+                 libusb (wired CarPlay + Android Auto) ·usbmuxd+AppleUSBNCMData)
   windows/       Winsock2 / AF_BTH
-android/         Android 工程（Gradle：Kotlin + NDK C++ core + JNI → 系统 API）
-harmony/         HarmonyOS 工程（ArkTS + hvigor：core 经 NAPI 进 HAP，AVCodec 硬解 → XComponent）
-host/            桌面宿主（SDL2 / ffmpeg）
-  bt_task          无线触发任务（--bt：主动把手机叫起来）
-  wired_task       有线接入任务（--wired：USB 控制面两段式，见该文件顶部）
-  media/           ffmpeg 软解 + SDL 视频/音频 sink
-tools/           自测与验收工具（core_selftest / iap2_test / m3_test / aa_wire_test /
-                 fake_phone / video_probe / usb_probe / wired_probe）
-docs/            架构说明 · 协议笔记 · 截图（images/）
-scripts/         bootstrap / build / deploy / 检查脚本
+android/         Android project (Gradle: Kotlin + NDK C++ core + JNI → system APIs)
+harmony/         HarmonyOS project (ArkTS + hvigor: core through NAPI into the HAP, AVCodec → XComponent)
+host/            Desktop host (SDL2 / ffmpeg)
+  bt_task          Wireless trigger task (--bt: actively wake the phone)
+  wired_task       Wired attach task (--wired: two-stage USB control plane, see top of that file)
+  media/           ffmpeg software decode + SDL video/audio sinks
+tools/           Self-test and acceptance tools (core_selftest / iap2_test / m3_test / aa_wire_test /
+                 fake_phone / video_probe / usb_probe / wired_probe)
+docs/            Architecture notes · protocol notes · screenshots (images/)
+scripts/         bootstrap / build / deploy / check scripts
 ```
 
-**`identity/` 不在仓库里**（见 `.gitignore`）。它是 Apple 签发的 MFi 配件凭证，属敏感文件：
-不要拷去别处、不要进任何仓库；`scripts/deploy.sh` 同步到目标机时会带上它（目标机运行必需），
-但同步别的东西时记得 `--exclude 'identity'`。
+**`identity/` is not in the repository** (see `.gitignore`). It is the Apple-signed MFi
+accessory credential and is sensitive: don't copy it elsewhere, don't put it in any repository;
+`scripts/deploy.sh` does carry it when syncing to a target machine (needed to run there), but
+remember `--exclude 'identity'` when syncing anything else.
 
-## 依赖
+## Dependencies
 
-原则是**只用系统库**，不引入需要自行构建的第三方。
+The principle is **system libraries only** — no third-party code you have to build yourself.
 
-| 组件 | 依赖 | 许可 |
+| Component | Dependencies | License |
 |---|---|---|
-| `core/` | OpenSSL（唯一三方依赖） | Apache-2.0 |
-| 桌面宿主 | SDL2 + SDL2_ttf、ffmpeg（libavcodec / libavutil / libswscale） | zlib / LGPL-2.1+ |
-| Linux 适配 | avahi-client、bluez（libbluetooth）、dbus-1、libusb-1.0（有线 CarPlay / Android Auto，缺则跳过） | LGPL-2.1+ |
-| macOS 适配 | IOBluetooth / CoreWLAN / dns_sd（系统框架） | 系统 |
-| macOS 适配 | libusb-1.0（Android Auto 有线，缺则跳过） | LGPL-2.1+ |
-| Android | SDK / NDK（BluetoothSocket、MediaCodec、AudioTrack、NsdManager） | 系统 |
+| `core/` | OpenSSL (only third-party dependency) | Apache-2.0 |
+| Desktop host | SDL2 + SDL2_ttf, ffmpeg (libavcodec / libavutil / libswscale) | zlib / LGPL-2.1+ |
+| Linux adapters | avahi-client, bluez (libbluetooth), dbus-1, libusb-1.0 (wired CarPlay / Android Auto; skipped if absent) | LGPL-2.1+ |
+| macOS adapters | IOBluetooth / CoreWLAN / dns_sd (system frameworks) | System |
+| macOS adapters | libusb-1.0 (wired Android Auto; skipped if absent) | LGPL-2.1+ |
+| Android | SDK / NDK (BluetoothSocket, MediaCodec, AudioTrack, NsdManager) | System |
 
-**有意不用**的两个：`libswresample`（见 `host/media/ffmpeg_compat.h` 顶部说明）、
-`fdk-aac`（音频一律走 ffmpeg 自带解码器）。`libavformat` 本项目用不到。
+Two deliberate omissions: `libswresample` (see the note at the top of
+`host/media/ffmpeg_compat.h`) and `fdk-aac` (audio always goes through ffmpeg's built-in
+decoders). `libavformat` isn't needed here.
 
-## 许可与致谢
+## License and acknowledgements
 
-本项目以 **GPL-3.0** 发布，是 **DiPlay** / **xcertplay**（同为 GPL-3.0）CarPlay 接收端的
-**C++ 重新实现**。v1.1 起扩展为多协议后端架构；Android Auto 的协议事实参考
-**AASDK / OpenAuto**（GPL-3.0），是独立编写、未拷贝其源码。许可全文见 [`LICENSE`](LICENSE)，
-上游署名与三方组件许可见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+Released under **GPL-3.0**. This is a **C++ reimplementation** of the CarPlay receivers
+**DiPlay** / **xcertplay** (also GPL-3.0). Since v1.1 it has grown into a multi-protocol
+backend architecture; the Android Auto protocol facts reference **AASDK / OpenAuto**
+(GPL-3.0) and were written independently, without copying their source. The full license text
+is in [`LICENSE`](LICENSE); upstream attribution and third-party licenses are in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
-## 排障
+## Troubleshooting
 
-- **窗口起不来 / 字体缺失**（桌面）：`bash scripts/bootstrap.sh` 会装 `fonts-dejavu-core`。
-- **宿主编译正常但一直黑屏**：先用 `./build/video_probe --h264 x.h264` 二分 ——
-  有画面说明是协议侧的问题，没画面是解码侧的问题。
-- **`:7000` 起不来**：macOS 的 `ControlCenter`（隔空播放接收器）常年占着 7000，
-  宿主会静默改用 7001，而假手机默认连 7000 → **两边都显式 `--port 7100`**。
-- **手机压根不来连**（日志里一行 RTSP 都没有 —— 注意区别于"连上又断"）：先查 mDNS 的 TXT 记录
-  是不是真的键值 —— `avahi-browse -t -r -p _airplay._tcp | grep -i allplay`，应看到
-  `deviceid=` / `features=` / `flags=0x4` / `srcvers=` / `pi=`。iPhone 靠这些字段认接收端，
-  缺了就不连。对照：同网段的 Mac 广播的是 `flags=0x204`，CarPlay 接收端才是 `flags=0x4`。
-- **看状态栏**：宿主加 `--statusbar`，左下状态点 = 状态（灰=空闲、黄=等配对、绿=视频流、红=错误），
-  右侧 = 分辨率 / fps / 帧数 / 音频欠载次数。**静态页面下 fps 掉到 0 是正常的** ——
-  AirPlay 屏幕流是画面变了才发帧，不是卡死。
+- **The window won't open / fonts are missing** (desktop): `bash scripts/bootstrap.sh`
+  installs `fonts-dejavu-core`.
+- **The host builds fine but shows a black screen**: bisect with
+  `./build/video_probe --h264 x.h264` first — a picture means the protocol side, no picture
+  means the decode side.
+- **`:7000` won't bind**: macOS's `ControlCenter` (the AirPlay receiver) holds port 7000
+  permanently; the host silently falls back to 7001 while `fake_phone` defaults to 7000 →
+  **give both an explicit `--port 7100`**.
+- **The phone never connects at all** (not a single RTSP line in the log — note this is
+  different from "connects then drops"): first check whether the mDNS TXT records are real
+  key/value pairs — `avahi-browse -t -r -p _airplay._tcp | grep -i allplay` should show
+  `deviceid=` / `features=` / `flags=0x4` / `srcvers=` / `pi=`. The iPhone identifies receivers
+  by these fields and won't connect without them. For comparison: a Mac on the same subnet
+  advertises `flags=0x204`; a CarPlay receiver advertises `flags=0x4`.
+- **Watch the status bar**: run the host with `--statusbar`; the dot at the bottom left is the
+  state (grey = idle, yellow = waiting for pairing, green = video streaming, red = error) and
+  the right side shows resolution / fps / frames / audio underruns. **fps dropping to 0 on a
+  static page is normal** — the AirPlay screen stream only sends frames when the picture
+  changes; it is not a hang.
