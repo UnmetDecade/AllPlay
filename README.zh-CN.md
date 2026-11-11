@@ -1,6 +1,6 @@
 # AllPlay
 
-<div align="right"><a href="README.md">English</a> · <b>简体中文</b></div>
+<div align="left"><a href="README.md">English</a> · <b>简体中文</b></div>
 
 **CarPlay 接收端（无线 + 有线），跨平台。** 一份平台无关的 C++ 协议实现，把 iPhone 的 CarPlay 投到
 任意一块屏幕上 —— 视频上屏、音频播放、触摸回传。
