@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # GitHub Actions used by .github/workflows/*.yml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # The Android module is intentionally not listed: it has no Gradle wrapper
+  # (the project builds from Android Studio with a pinned NDK and a
+  # cross-compiled OpenSSL), and Dependabot cannot update Gradle dependencies
+  # without one. Bump android/ manually together with a local NDK build.

@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AllPlay — C++ 实现的 CarPlay 接收端</title>
+<meta name="description" content="AllPlay 是车机侧的 CarPlay 接收端，使用 C++17 实现 AirPlay RTSP、iAP2、USB lockdown/TLS、媒体解码与触摸回传。">
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --surface: #ffffff;
+    --text: #16181d;
+    --muted: #5b6270;
+    --border: #e3e6ec;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --code-bg: #0f172a;
+    --code-text: #e2e8f0;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px rgba(16, 24, 40, .06);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0d12;
+    --surface: #141821;
+    --text: #e8eaf0;
+    --muted: #9aa3b2;
+    --border: #262c38;
+    --accent: #7aa2ff;
+    --accent-soft: #1b2742;
+    --code-bg: #05070c;
+    --code-text: #d6dcea;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 12px 32px rgba(0, 0, 0, .35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0d12;
+      --surface: #141821;
+      --text: #e8eaf0;
+      --muted: #9aa3b2;
+      --border: #262c38;
+      --accent: #7aa2ff;
+      --accent-soft: #1b2742;
+      --code-bg: #05070c;
+      --code-text: #d6dcea;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 12px 32px rgba(0, 0, 0, .35);
+    }
+  }
+  * { box-sizing: border-box; }
+  img { max-width: 100%; height: auto; }
+  .hero > * { min-width: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.75 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { width: min(1100px, 100% - 32px); margin: 0 auto; }
+  header.site {
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .nav { display: flex; align-items: center; gap: 20px; min-height: 60px; }
+  .brand { font-weight: 700; font-size: 18px; color: var(--text); letter-spacing: .2px; }
+  .nav .links { display: flex; gap: 18px; margin-left: auto; align-items: center; font-size: 14px; }
+  .nav .links a { color: var(--muted); }
+  .nav .links a:hover { color: var(--accent); text-decoration: none; }
+  .theme-toggle {
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    border-radius: 999px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  .theme-toggle:hover { border-color: var(--accent); }
+  main { padding: 0 0 72px; }
+  .hero { padding: 64px 0 40px; display: grid; grid-template-columns: 1.05fr .95fr; gap: 40px; align-items: center; }
+  .eyebrow { color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .08em; }
+  h1 { font-size: clamp(32px, 5vw, 52px); line-height: 1.2; margin: 12px 0 16px; letter-spacing: -.01em; }
+  .lede { font-size: 18px; color: var(--muted); margin: 0 0 22px; max-width: 56ch; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px;
+    border-radius: 10px; font-weight: 600; font-size: 15px; border: 1px solid transparent;
+  }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { text-decoration: none; filter: brightness(1.06); }
+  .btn.ghost { border-color: var(--border); color: var(--text); background: var(--surface); }
+  .btn.ghost:hover { text-decoration: none; border-color: var(--accent); }
+  .hero-shot { margin: 0; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); background: var(--surface); }
+  .hero-shot img { display: block; width: 100%; height: auto; }
+  .hero-shot figcaption { padding: 10px 14px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--border); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 8px 0 40px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .stat strong { display: block; font-size: 22px; letter-spacing: -.01em; }
+  .stat span { color: var(--muted); font-size: 13px; }
+  section { padding: 36px 0; }
+  h2 { font-size: 26px; margin: 0 0 10px; letter-spacing: -.01em; }
+  .section-lede { color: var(--muted); margin: 0 0 24px; max-width: 70ch; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; box-shadow: var(--shadow); }
+  .card h3 { margin: 0 0 8px; font-size: 16px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .tag { display: inline-block; font-size: 11.5px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 9px; margin-bottom: 10px; }
+  .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 8px; }
+  .step { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; font-size: 13.5px; }
+  .step b { display: block; margin-bottom: 4px; font-size: 14px; }
+  .step span { color: var(--muted); }
+  pre { background: var(--code-bg); color: var(--code-text); padding: 18px; border-radius: 12px; overflow-x: auto; max-width: 100%; font-size: 13.5px; line-height: 1.55; }
+  .cols > *, .grid > *, .stats > *, .pipeline > * { min-width: 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .note { border-left: 3px solid var(--accent); background: var(--surface); border-radius: 8px; padding: 14px 16px; color: var(--muted); font-size: 14px; }
+  .link-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 24px; padding: 0; margin: 0; list-style: none; }
+  .link-list a { display: block; padding: 10px 0; border-bottom: 1px solid var(--border); color: var(--text); font-weight: 500; }
+  .link-list a:hover { color: var(--accent); text-decoration: none; }
+  .link-list small { display: block; color: var(--muted); font-weight: 400; margin-top: 2px; }
+  footer { border-top: 1px solid var(--border); padding: 26px 0 40px; color: var(--muted); font-size: 13.5px; }
+  footer .wrap { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+  @media (max-width: 860px) {
+    .hero { grid-template-columns: 1fr; padding-top: 36px; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .grid { grid-template-columns: 1fr; }
+    .pipeline { grid-template-columns: 1fr 1fr; }
+    .cols { grid-template-columns: 1fr; }
+    .link-list { grid-template-columns: 1fr; }
+    .nav .links a.hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="site">
+  <div class="wrap nav">
+    <span class="brand">AllPlay</span>
+    <nav class="links" aria-label="主导航">
+      <a class="hide-sm" href="#capabilities">能力</a>
+      <a class="hide-sm" href="#stack">协议栈</a>
+      <a class="hide-sm" href="#start">快速开始</a>
+      <a href="https://github.com/UnmetDecade/AllPlay">GitHub</a>
+      <a href="index.html" hreflang="en" lang="en">English</a>
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="切换明暗主题">主题</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <div class="eyebrow">C++17 · 协议实现</div>
+      <h1>把车机变成<br>CarPlay 接收端。</h1>
+      <p class="lede">
+        AllPlay 端到端实现手机侧的协议栈——AirPlay RTSP、iAP2、MFi-SAP、USB lockdown/TLS
+        和 Android Auto AAP——本地解码 H.264 与 AAC-LC，并把触摸作为 HID 报告回传。
+        不含任何 Apple 二进制或 Apple 代码。
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/UnmetDecade/AllPlay">查看源码</a>
+        <a class="btn ghost" href="architecture.zh-CN.md">阅读架构文档</a>
+      </div>
+    </div>
+    <figure class="hero-shot">
+      <img src="images/allplay-launcher-mac.png" alt="macOS 上的 AllPlay 启动器，等待手机连接" width="1600" height="900">
+      <figcaption>桌面主机，等待无线 CarPlay 手机接入。</figcaption>
+    </figure>
+  </section>
+
+  <div class="stats">
+    <div class="stat"><strong>4</strong><span>协议后端</span></div>
+    <div class="stat"><strong>5</strong><span>平台目标</span></div>
+    <div class="stat"><strong>13.7k</strong><span>与平台无关核心的代码行数</span></div>
+    <div class="stat"><strong>0</strong><span>Apple 二进制或代码</span></div>
+  </div>
+
+  <section id="capabilities">
+    <h2>今天已跑通的</h2>
+    <p class="section-lede">如实标注：硬件验证、协议完整、仅有接口，三者严格区分。</p>
+    <div class="grid">
+      <div class="card">
+        <span class="tag">硬件验证</span>
+        <h3>无线 CarPlay</h3>
+        <p>蓝牙 iAP2 触发 → mDNS 发现 → RTSP 协商 → 加密 H.264/AAC 流 → 触摸与媒体按键。</p>
+      </div>
+      <div class="card">
+        <span class="tag">硬件验证</span>
+        <h3>有线 CarPlay</h3>
+        <p>USB 配置切换 → usbmux v2 → lockdown → 原地 TLS → <code>com.apple.carkit.service</code> → iAP2 → 内核 NCM 媒体面。</p>
+      </div>
+      <div class="card">
+        <span class="tag">协议完整</span>
+        <h3>有线 Android Auto</h3>
+        <p>AOAP 51/52/53 → AAP VERSION → TLS 1.2 → 服务发现 → 控制、视频、音频、输入通道。尚待真机验证。</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="stack">
+    <h2>有意分层</h2>
+    <p class="section-lede"><code>core/</code> 不含任何平台头文件，只有一个第三方依赖（OpenSSL）。每个平台都是它的适配层。</p>
+    <div class="pipeline">
+      <div class="step"><b>传输</b><span>USB · RFCOMM · TCP · mDNS</span></div>
+      <div class="step"><b>会话</b><span>iAP2 · MFi-SAP · lockdown · TLS</span></div>
+      <div class="step"><b>流媒体</b><span>RTSP · RTP · AES-CTR · ChaCha20</span></div>
+      <div class="step"><b>媒体</b><span>H.264 · AAC-LC · Opus · LPCM</span></div>
+      <div class="step"><b>主机</b><span>SDL2 · Android · HarmonyOS</span></div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="cols">
+      <div>
+        <h2>构建与测试</h2>
+        <p class="section-lede">Linux 需要平台头文件；仅核心构建只需要 OpenSSL 和 C++17 编译器。</p>
+        <pre><code>sudo apt-get install -y cmake g++ pkg-config libssl-dev \
+  libavahi-client-dev libbluetooth-dev libdbus-1-dev \
+  libusb-1.0-0-dev libsdl2-dev libsdl2-ttf-dev \
+  libavcodec-dev libavutil-dev libswscale-dev
+scripts/build.sh
+./build/iap2_test &amp;&amp; ./build/m3_test &amp;&amp; ./build/aa_wire_test</code></pre>
+      </div>
+      <div>
+        <h2>凭据前提</h2>
+        <p class="section-lede">两条 CarPlay 路径的最后一道门都是 Apple 签发的 MFi 身份。</p>
+        <div class="note">
+          <code>identity/</code>（EC P-256 私钥 + Apple 证书）不在本仓库中，也不受 GPL 覆盖。
+          请自备；自签名身份可以在开发阶段走通链路，但不是产品路径。AllPlay 不是 Apple 产品，
+          也未获得 MFi 授权。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>设计文档</h2>
+    <p class="section-lede">长期文档与代码放在一起，并与代码保持同步。</p>
+    <ul class="link-list">
+      <li><a href="architecture.zh-CN.md">架构<small>分层、线程模型与组合根</small></a></li>
+      <li><a href="PROTOCOL-NOTES.zh-CN.md">协议笔记<small>线上事实及其来源</small></a></li>
+      <li><a href="projection-backend.zh-CN.md">投影后端<small>CarPlay、Android Auto、CarLife、HiCar 如何接入</small></a></li>
+      <li><a href="https://github.com/UnmetDecade/AllPlay/blob/main/README.zh-CN.md">README<small>能力矩阵与完整构建矩阵</small></a></li>
+      <li><a href="https://github.com/UnmetDecade/AllPlay/blob/main/CONTRIBUTING.zh-CN.md">贡献指南<small>构建、测试与评审要求</small></a></li>
+      <li><a href="https://github.com/UnmetDecade/AllPlay/blob/main/SECURITY.zh-CN.md">安全策略<small>私密上报与范围</small></a></li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>GPL-3.0 · 独立实现，与 Apple 无关</span>
+    <span><a href="https://github.com/UnmetDecade/AllPlay">github.com/UnmetDecade/AllPlay</a></span>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var button = document.getElementById("theme-toggle");
+    if (!button) return;
+    var stored = null;
+    try { stored = localStorage.getItem("allplay_theme"); } catch (e) {}
+    if (stored === "dark" || stored === "light") root.setAttribute("data-theme", stored);
+    button.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("allplay_theme", next); } catch (e) {}
+    });
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Platform-independent core: protocol parsers, crypto wrappers, self-tests.
+  # The job name is the required status check registered in the main ruleset.
+  core:
+    name: core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ make libssl-dev pkg-config gcovr
+      - name: Configure with coverage
+        run: |
+          cmake -S . -B build-coverage \
+            -DALLPLAY_CORE_ONLY=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS=--coverage \
+            -DCMAKE_CXX_FLAGS=--coverage \
+            -DCMAKE_EXE_LINKER_FLAGS=--coverage
+      - name: Build
+        run: cmake --build build-coverage -j"$(nproc)"
+      - name: Run protocol self-tests
+        run: |
+          sh scripts/make-test-identity.sh build-coverage/test-identity
+          ./build-coverage/iap2_test build-coverage/test-identity
+          ./build-coverage/m3_test
+          ./build-coverage/aa_wire_test
+      - name: Coverage report
+        run: |
+          gcovr --root . --filter 'core/' --json coverage.json --print-summary
+          python3 scripts/check-coverage.py coverage.json
+
+  # Full Linux desktop build: platform adapters + SDL2/ffmpeg host + probes.
+  host:
+    name: host
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake g++ make pkg-config libssl-dev \
+            libavahi-client-dev libbluetooth-dev libdbus-1-dev libusb-1.0-0-dev \
+            libsdl2-dev libsdl2-ttf-dev \
+            libavcodec-dev libavutil-dev libswscale-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Run self-tests
+        run: |
+          sh scripts/make-test-identity.sh build/test-identity
+          ./build/iap2_test build/test-identity
+          ./build/m3_test
+          ./build/aa_wire_test
+
+  # Repository hygiene: shell syntax, bilingual doc pairs, landing-page anchors
+  # and relative links.
+  docs:
+    name: docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          for f in scripts/*.sh; do
+            bash -n "$f"
+          done
+      - name: Documentation and landing pages
+        run: python3 scripts/check-docs.py
+
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [core, host, docs]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build source archive
+        run: |
+          mkdir -p dist
+          git archive --format=tar.gz \
+            --prefix="AllPlay-${GITHUB_REF_NAME}/" \
+            -o "dist/AllPlay-${GITHUB_REF_NAME}-source.tar.gz" HEAD
+          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS)
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes

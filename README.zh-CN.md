@@ -2,6 +2,9 @@
 
 <div align="left"><a href="README.md">English</a> · <b>简体中文</b></div>
 
+[![CI](https://github.com/UnmetDecade/AllPlay/actions/workflows/ci.yml/badge.svg)](https://github.com/UnmetDecade/AllPlay/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/UnmetDecade/AllPlay/actions/workflows/codeql.yml/badge.svg)](https://github.com/UnmetDecade/AllPlay/actions/workflows/codeql.yml)
+[![Docs](https://img.shields.io/badge/docs-landing%20page-blue)](https://unmetdecade.github.io/AllPlay/index.zh-CN.html)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
 ![Language](https://img.shields.io/badge/C%2B%2B-17-blue)
 ![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20HarmonyOS%20%7C%20Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
@@ -567,3 +570,16 @@ C++ 重实现；Android Auto 协议事实参考 **AASDK / OpenAuto**（GPL-3.0�
 完整许可见 [`LICENSE`](LICENSE)；上游归属与三方许可见
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)；版本历史见
 [`CHANGELOG.md`](CHANGELOG.md)。
+
+## 12. 项目与社区
+
+- [贡献指南](CONTRIBUTING.zh-CN.md) —— 构建矩阵、测试命令与 PR 要求。Android 宿主在本地构建；
+  CI 覆盖共享核心与 Linux 桌面宿主。
+- [行为准则](CODE_OF_CONDUCT.zh-CN.md) —— Contributor Covenant 2.1。
+- [安全策略](SECURITY.zh-CN.md) —— 仅走私密安全公告；不要开公开 issue。
+- [项目主页](https://unmetdecade.github.io/AllPlay/index.zh-CN.html) —— 同样内容的一页版，
+  从 `docs/` 发布。
+
+每个 PR 都会跑 CI：`core`（含覆盖率）、`host`、`docs`。推送 `v*` tag 会触发 `release`
+job，把源码归档和 `SHA256SUMS` 附到 GitHub Release。`main` 由规则集保护——改动通过 PR 合入，
+必需检查必须全绿。

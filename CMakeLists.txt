@@ -9,6 +9,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(AllPlay LANGUAGES C CXX)
 
+# CI and CodeQL only need the platform-independent core and its self-tests; this
+# keeps the build free of avahi/BlueZ/SDL2/ffmpeg system dependencies.
+option(ALLPLAY_CORE_ONLY "Build only the core library and protocol self-tests" OFF)
+
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,6 +49,11 @@ target_compile_options(fake_phone PRIVATE -Wall -Wextra)
 add_executable(aa_wire_test tools/aa_wire_test.cpp)
 target_link_libraries(aa_wire_test PRIVATE allplay_core)
 target_compile_options(aa_wire_test PRIVATE -Wall -Wextra)
+
+if(ALLPLAY_CORE_ONLY)
+    message(STATUS "ALLPLAY_CORE_ONLY=ON: core and protocol self-tests only")
+    return()
+endif()
 
 # ---------------------------------------------------------------------------
 # Platform adaptation + desktop host: Unix only (the Windows Winsock2 adaptation layer is TODO)
