@@ -11,6 +11,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## Unreleased
+
+### Added
+
+- **Repository standards**: CI (`core` with coverage, `host`, `docs`, and a tag-only
+  `release` job), CodeQL for C/C++, Dependabot, issue forms, a pull-request template,
+  `CONTRIBUTING`, `CODE_OF_CONDUCT`, `SECURITY`, `.editorconfig`, and bilingual GitHub
+  Pages landing pages under `docs/`.
+- **`ALLPLAY_CORE_ONLY`** CMake option: configures and builds the platform-independent
+  core and its protocol self-tests without avahi/BlueZ/SDL2/ffmpeg, which is what the CI
+  `core` job and the CodeQL analysis use.
+- **`scripts/check-docs.py`**: verifies bilingual document pairs, landing-page structure
+  (no nested anchors, no links outside the published `docs/` tree), and relative
+  Markdown links.
+- **`scripts/check-coverage.py`**: enforces a global core coverage floor plus per-file
+  floors for the crypto and wire-format modules.
+
+### Open
+
+- **Productized MFi identity**: the `0xAA00 RequestCertificate` gate requires an accessory
+  identity issued by the Apple MFi program (`identity/`, not checked in). During
+  development, a self-provided identity can take the full path — that is how v0.3's
+  real-device verification was done — but **a pure software identity is not a product
+  path**; shipping as an accessory still requires the MFi program.
+- **Desktop audio**: in the real-device round, the iPhone only requested the screen stream
+  and `type=130`, **without requesting any audio stream**, so the desktop audio path has
+  only ever been verified by the fake phone; real-device behavior remains to be observed.
+
+---
+
 ## [v1.1] — Multi-protocol backend skeleton · 2026-11-08
 
 Split `core/` into a "protocol backend" structure: CarPlay becomes the first backend, the
@@ -597,15 +627,15 @@ Android.
 - `m3_test` (SRP against Python reference vectors + full fake-phone flow + mock screen
   stream)
 
----
-
-## Unreleased
-
-- **Productized MFi identity**: the `0xAA00 RequestCertificate` gate requires an accessory
-  identity issued by the Apple MFi program (`identity/`, not checked in). During
-  development, a self-provided identity can take the full path — that is how v0.3's
-  real-device verification was done — but **a pure software identity is not a product
-  path**; shipping as an accessory still requires the MFi program.
-- **Desktop audio**: in the real-device round, the iPhone only requested the screen stream
-  and `type=130`, **without requesting any audio stream**, so the desktop audio path has
-  only ever been verified by the fake phone; real-device behavior remains to be observed.
+[Unreleased]: https://github.com/UnmetDecade/AllPlay/compare/v1.1...HEAD
+[v1.1]: https://github.com/UnmetDecade/AllPlay/releases/tag/v1.1
+[v1.0]: https://github.com/UnmetDecade/AllPlay/releases/tag/v1.0
+[v0.9]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.9
+[v0.8]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.8
+[v0.7]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.7
+[v0.6]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.6
+[v0.5]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.5
+[v0.4]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.4
+[v0.3]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.3
+[v0.2]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.2
+[v0.1]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.1

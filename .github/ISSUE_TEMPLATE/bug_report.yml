@@ -1,0 +1,76 @@
+name: Bug report
+description: Something crashes, hangs, or behaves differently from the documented behavior.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste credentials, pairing records, or anything from `identity/`.
+        Security vulnerabilities go through [private advisories](https://github.com/UnmetDecade/AllPlay/security/advisories/new), not this form.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - core (protocol / crypto)
+        - platform/posix
+        - host (desktop)
+        - android
+        - build / CI
+        - docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: "v1.1 / 1a2b3c4"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Host platform
+      placeholder: "macOS 15.1 (arm64), Ubuntu 24.04, Android 13 / API 19 box, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Build with ...
+        2. Connect ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the relevant log lines (redact device identifiers if needed).
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Additional diagnostics
+      description: Sanitizer output, `cmake` configuration summary, backtrace, packet capture summary.
+    validations:
+      required: false
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: I did not include credentials, pairing records, or MFi identity material.
+          required: true
+        - label: This is not a security vulnerability (those go through private advisories).
+          required: true

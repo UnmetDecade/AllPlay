@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AllPlay — CarPlay receiver in C++</title>
+<meta name="description" content="AllPlay is a head-unit-side CarPlay receiver written in C++17: AirPlay RTSP, iAP2, USB lockdown/TLS, media decode, and touch back to the phone.">
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --surface: #ffffff;
+    --text: #16181d;
+    --muted: #5b6270;
+    --border: #e3e6ec;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --code-bg: #0f172a;
+    --code-text: #e2e8f0;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 8px 24px rgba(16, 24, 40, .06);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0d12;
+    --surface: #141821;
+    --text: #e8eaf0;
+    --muted: #9aa3b2;
+    --border: #262c38;
+    --accent: #7aa2ff;
+    --accent-soft: #1b2742;
+    --code-bg: #05070c;
+    --code-text: #d6dcea;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 12px 32px rgba(0, 0, 0, .35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0d12;
+      --surface: #141821;
+      --text: #e8eaf0;
+      --muted: #9aa3b2;
+      --border: #262c38;
+      --accent: #7aa2ff;
+      --accent-soft: #1b2742;
+      --code-bg: #05070c;
+      --code-text: #d6dcea;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 12px 32px rgba(0, 0, 0, .35);
+    }
+  }
+  * { box-sizing: border-box; }
+  img { max-width: 100%; height: auto; }
+  .hero > * { min-width: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { width: min(1100px, 100% - 32px); margin: 0 auto; }
+  header.site {
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .nav { display: flex; align-items: center; gap: 20px; min-height: 60px; }
+  .brand { font-weight: 700; font-size: 18px; color: var(--text); letter-spacing: .2px; }
+  .nav .links { display: flex; gap: 18px; margin-left: auto; align-items: center; font-size: 14px; }
+  .nav .links a { color: var(--muted); }
+  .nav .links a:hover { color: var(--accent); text-decoration: none; }
+  .theme-toggle {
+    border: 1px solid var(--border); background: var(--surface); color: var(--text);
+    border-radius: 999px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  .theme-toggle:hover { border-color: var(--accent); }
+  main { padding: 0 0 72px; }
+  .hero { padding: 64px 0 40px; display: grid; grid-template-columns: 1.05fr .95fr; gap: 40px; align-items: center; }
+  .eyebrow { color: var(--accent); font-weight: 600; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
+  h1 { font-size: clamp(32px, 5vw, 52px); line-height: 1.1; margin: 12px 0 16px; letter-spacing: -.02em; }
+  .lede { font-size: 18px; color: var(--muted); margin: 0 0 22px; max-width: 56ch; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px;
+    border-radius: 10px; font-weight: 600; font-size: 15px; border: 1px solid transparent;
+  }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { text-decoration: none; filter: brightness(1.06); }
+  .btn.ghost { border-color: var(--border); color: var(--text); background: var(--surface); }
+  .btn.ghost:hover { text-decoration: none; border-color: var(--accent); }
+  .hero-shot { margin: 0; border: 1px solid var(--border); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); background: var(--surface); }
+  .hero-shot img { display: block; width: 100%; height: auto; }
+  .hero-shot figcaption { padding: 10px 14px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--border); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 8px 0 40px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .stat strong { display: block; font-size: 22px; letter-spacing: -.01em; }
+  .stat span { color: var(--muted); font-size: 13px; }
+  section { padding: 36px 0; }
+  h2 { font-size: 26px; margin: 0 0 10px; letter-spacing: -.01em; }
+  .section-lede { color: var(--muted); margin: 0 0 24px; max-width: 70ch; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; box-shadow: var(--shadow); }
+  .card h3 { margin: 0 0 8px; font-size: 16px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .tag { display: inline-block; font-size: 11.5px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 2px 9px; margin-bottom: 10px; }
+  .pipeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 8px; }
+  .step { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; font-size: 13.5px; }
+  .step b { display: block; margin-bottom: 4px; font-size: 14px; }
+  .step span { color: var(--muted); }
+  pre { background: var(--code-bg); color: var(--code-text); padding: 18px; border-radius: 12px; overflow-x: auto; max-width: 100%; font-size: 13.5px; line-height: 1.55; }
+  .cols > *, .grid > *, .stats > *, .pipeline > * { min-width: 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .note { border-left: 3px solid var(--accent); background: var(--surface); border-radius: 8px; padding: 14px 16px; color: var(--muted); font-size: 14px; }
+  .link-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px 24px; padding: 0; margin: 0; list-style: none; }
+  .link-list a { display: block; padding: 10px 0; border-bottom: 1px solid var(--border); color: var(--text); font-weight: 500; }
+  .link-list a:hover { color: var(--accent); text-decoration: none; }
+  .link-list small { display: block; color: var(--muted); font-weight: 400; margin-top: 2px; }
+  footer { border-top: 1px solid var(--border); padding: 26px 0 40px; color: var(--muted); font-size: 13.5px; }
+  footer .wrap { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+  @media (max-width: 860px) {
+    .hero { grid-template-columns: 1fr; padding-top: 36px; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .grid { grid-template-columns: 1fr; }
+    .pipeline { grid-template-columns: 1fr 1fr; }
+    .cols { grid-template-columns: 1fr; }
+    .link-list { grid-template-columns: 1fr; }
+    .nav .links a.hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="site">
+  <div class="wrap nav">
+    <span class="brand">AllPlay</span>
+    <nav class="links" aria-label="Main">
+      <a class="hide-sm" href="#capabilities">Capabilities</a>
+      <a class="hide-sm" href="#stack">Protocol stack</a>
+      <a class="hide-sm" href="#start">Quick start</a>
+      <a href="https://github.com/UnmetDecade/AllPlay">GitHub</a>
+      <a href="index.zh-CN.html" hreflang="zh-CN" lang="zh-CN">中文</a>
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Toggle color theme">Theme</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <div class="eyebrow">C++17 · protocol implementation</div>
+      <h1>Turn a head unit into<br>a CarPlay receiver.</h1>
+      <p class="lede">
+        AllPlay implements the phone-facing stack end to end — AirPlay RTSP, iAP2,
+        MFi-SAP, USB lockdown/TLS, and Android Auto AAP — decodes H.264 and AAC-LC
+        locally, and sends touch back as HID reports. No Apple binary, no MFi code.
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/UnmetDecade/AllPlay">View source</a>
+        <a class="btn ghost" href="architecture.md">Read the architecture</a>
+      </div>
+    </div>
+    <figure class="hero-shot">
+      <img src="images/allplay-launcher-mac.png" alt="The AllPlay launcher on macOS waiting for a phone to connect" width="1600" height="900">
+      <figcaption>The desktop host, waiting for a wireless CarPlay phone.</figcaption>
+    </figure>
+  </section>
+
+  <div class="stats">
+    <div class="stat"><strong>4</strong><span>protocol backends</span></div>
+    <div class="stat"><strong>5</strong><span>platform targets</span></div>
+    <div class="stat"><strong>13.7k</strong><span>lines in the platform-free core</span></div>
+    <div class="stat"><strong>0</strong><span>Apple binaries or code</span></div>
+  </div>
+
+  <section id="capabilities">
+    <h2>What runs today</h2>
+    <p class="section-lede">Honest labels: hardware-validated, protocol-complete, and interface-only are kept separate.</p>
+    <div class="grid">
+      <div class="card">
+        <span class="tag">hardware-validated</span>
+        <h3>Wireless CarPlay</h3>
+        <p>Bluetooth iAP2 trigger → mDNS discovery → RTSP negotiation → encrypted H.264/AAC streams → touch and media keys.</p>
+      </div>
+      <div class="card">
+        <span class="tag">hardware-validated</span>
+        <h3>Wired CarPlay</h3>
+        <p>USB configuration switch → usbmux v2 → lockdown → in-place TLS → <code>com.apple.carkit.service</code> → iAP2 → kernel NCM media plane.</p>
+      </div>
+      <div class="card">
+        <span class="tag">protocol-complete</span>
+        <h3>Wired Android Auto</h3>
+        <p>AOAP 51/52/53 → AAP VERSION → TLS 1.2 → service discovery → control, video, audio, and input channels. Awaiting a real-phone run.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="stack">
+    <h2>Layered on purpose</h2>
+    <p class="section-lede"><code>core/</code> has zero platform headers and one third-party dependency (OpenSSL). Every platform is an adapter around it.</p>
+    <div class="pipeline">
+      <div class="step"><b>Transport</b><span>USB · RFCOMM · TCP · mDNS</span></div>
+      <div class="step"><b>Session</b><span>iAP2 · MFi-SAP · lockdown · TLS</span></div>
+      <div class="step"><b>Streaming</b><span>RTSP · RTP · AES-CTR · ChaCha20</span></div>
+      <div class="step"><b>Media</b><span>H.264 · AAC-LC · Opus · LPCM</span></div>
+      <div class="step"><b>Host</b><span>SDL2 · Android · HarmonyOS</span></div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="cols">
+      <div>
+        <h2>Build and test</h2>
+        <p class="section-lede">Linux needs the platform headers; the core-only build needs nothing but OpenSSL and a C++17 compiler.</p>
+        <pre><code>sudo apt-get install -y cmake g++ pkg-config libssl-dev \
+  libavahi-client-dev libbluetooth-dev libdbus-1-dev \
+  libusb-1.0-0-dev libsdl2-dev libsdl2-ttf-dev \
+  libavcodec-dev libavutil-dev libswscale-dev
+scripts/build.sh
+./build/iap2_test &amp;&amp; ./build/m3_test &amp;&amp; ./build/aa_wire_test</code></pre>
+      </div>
+      <div>
+        <h2>Credential prerequisite</h2>
+        <p class="section-lede">The last gate of both CarPlay paths is the Apple-issued MFi identity.</p>
+        <div class="note">
+          <code>identity/</code> (EC P-256 private key + Apple certificate) is not in this
+          repository and is not covered by the GPL. Supply your own; a self-signed identity
+          walks the chain during development but is not a shipping path. AllPlay is not an
+          Apple product and is not MFi-authorized.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Design documents</h2>
+    <p class="section-lede">Long-form documents live next to the code and stay in sync with it.</p>
+    <ul class="link-list">
+      <li><a href="architecture.md">Architecture<small>Layers, threading, and the composition root</small></a></li>
+      <li><a href="PROTOCOL-NOTES.md">Protocol notes<small>Wire-level facts and where they came from</small></a></li>
+      <li><a href="projection-backend.md">Projection backend<small>How CarPlay, Android Auto, CarLife, and HiCar plug in</small></a></li>
+      <li><a href="https://github.com/UnmetDecade/AllPlay/blob/main/README.md">README<small>Capability matrix and full build matrix</small></a></li>
+      <li><a href="https://github.com/UnmetDecade/AllPlay/blob/main/CONTRIBUTING.md">Contributing<small>Build, test, and review expectations</small></a></li>
+      <li><a href="https://github.com/UnmetDecade/AllPlay/blob/main/SECURITY.md">Security policy<small>Private reporting and scope</small></a></li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>GPL-3.0 · independent implementation, not affiliated with Apple</span>
+    <span><a href="https://github.com/UnmetDecade/AllPlay">github.com/UnmetDecade/AllPlay</a></span>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var button = document.getElementById("theme-toggle");
+    if (!button) return;
+    var stored = null;
+    try { stored = localStorage.getItem("allplay_theme"); } catch (e) {}
+    if (stored === "dark" || stored === "light") root.setAttribute("data-theme", stored);
+    button.addEventListener("click", function () {
+      var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem("allplay_theme", next); } catch (e) {}
+    });
+  })();
+</script>
+</body>
+</html>

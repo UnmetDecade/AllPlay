@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a protocol feature, platform port, or tooling improvement.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AllPlay is layered: `core/` is platform-independent, and every platform is an adapter.
+        Requests that put platform code in `core/` or fork the protocol stack will be declined.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Protocol / core
+        - Platform adapter (Android, Linux, macOS, Windows, HarmonyOS)
+        - Desktop host / UI
+        - Android host
+        - Build, packaging, CI
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What can you not do today, and why does it matter?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior you want. Cite a protocol reference or an observed trace where applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware availability
+      description: Can you test this on a real phone or head unit?
+      options:
+        - Yes, I can test on hardware
+        - Partially — I can test one side
+        - No — this is a protocol-only proposal
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: This request does not require Apple MFi credentials to be shared in the issue.
+          required: true

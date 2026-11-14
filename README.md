@@ -2,6 +2,9 @@
 
 <div align="left"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></div>
 
+[![CI](https://github.com/UnmetDecade/AllPlay/actions/workflows/ci.yml/badge.svg)](https://github.com/UnmetDecade/AllPlay/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/UnmetDecade/AllPlay/actions/workflows/codeql.yml/badge.svg)](https://github.com/UnmetDecade/AllPlay/actions/workflows/codeql.yml)
+[![Docs](https://img.shields.io/badge/docs-landing%20page-blue)](https://unmetdecade.github.io/AllPlay/)
 ![License](https://img.shields.io/badge/license-GPL--3.0-blue)
 ![Language](https://img.shields.io/badge/C%2B%2B-17-blue)
 ![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20HarmonyOS%20%7C%20Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
@@ -589,3 +592,17 @@ receivers **DiPlay** / **xcertplay** (GPL-3.0); Android Auto protocol facts refe
 **AASDK / OpenAuto** (GPL-3.0) but no source was copied. Full text: [`LICENSE`](LICENSE);
 attribution and third-party licenses: [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md);
 version history: [`CHANGELOG.md`](CHANGELOG.md).
+
+## 12. Project and community
+
+- [Contributing](CONTRIBUTING.md) — build matrix, test commands, PR expectations. The
+  Android host is built locally; CI covers the shared core and the Linux desktop host.
+- [Code of Conduct](CODE_OF_CONDUCT.md) — Contributor Covenant 2.1.
+- [Security policy](SECURITY.md) — private advisories only; do not open a public issue.
+- [Landing page](https://unmetdecade.github.io/AllPlay/) — the same material as a single
+  page, published from `docs/`.
+
+CI runs on every pull request: `core` (with coverage), `host`, and `docs`. Pushing a `v*`
+tag runs the `release` job, which attaches a source archive and `SHA256SUMS` to the GitHub
+release. `main` is protected by a ruleset — changes land through pull requests with the
+required checks green.

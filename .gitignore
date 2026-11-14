@@ -9,6 +9,13 @@ compile_commands.json
 *.o
 *.a
 
+# Coverage (gcov/lcov/gcovr)
+*.gcda
+*.gcno
+*.gcov
+coverage.json
+coverage/
+
 # ============================================================================
 # Sensitive files — never commit
 # ============================================================================

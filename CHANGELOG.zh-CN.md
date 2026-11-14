@@ -9,6 +9,29 @@
 
 ---
 
+## Unreleased
+
+### 新增
+
+- **仓库标准化**：CI（`core` 含覆盖率、`host`、`docs`，以及仅 tag 触发的 `release` job）、
+  C/C++ CodeQL、Dependabot、issue 表单、PR 模板、`CONTRIBUTING`、`CODE_OF_CONDUCT`、
+  `SECURITY`、`.editorconfig`，以及 `docs/` 下的中英双语 GitHub Pages 落地页。
+- **`ALLPLAY_CORE_ONLY`** CMake 选项：在没有 avahi/BlueZ/SDL2/ffmpeg 的机器上配置并构建
+  与平台无关的核心及其协议自测，CI 的 `core` job 和 CodeQL 分析都用它。
+- **`scripts/check-docs.py`**：检查中英文档配对、落地页结构（无嵌套 `<a>`、不引用
+  `docs/` 之外的文件）以及 Markdown 相对链接。
+- **`scripts/check-coverage.py`**：对核心整体覆盖率和加解密/线格式模块的单文件覆盖率分别设门槛。
+
+### 待办
+
+- **产品化的 MFi 身份**：`0xAA00 请求证书`那道关要求 Apple MFi 计划签发的配件身份
+  （`identity/`，不入库）。开发期用自备身份可以走通全链路 —— v0.3 的真机验证就是这么做的 ——
+  但**纯软件身份不是产品路径**，要作为配件出货仍得走 MFi 计划。
+- **桌面端音频**：真机那一轮 iPhone 只请求了屏幕流和 `type=130`，**没有请求任何音频流**，
+  所以桌面端的音频链路至今只有假手机验证过，真机行为待观察。
+
+---
+
 ## [v1.1] — 多协议后端骨架 · 2026-11-08
 
 把 `core/` 拆成"协议后端"结构：CarPlay 成为第一个后端，Android Auto 有线模块落地，
@@ -442,12 +465,15 @@ USB 侧拆到知道 NCM 网卡叫什么、地址钉成哪个之后才能起。�
 - `iap2_test`（iAP2 线格式 + 链路层 + MFi 签名）
 - `m3_test`（SRP 对 Python 参考向量 + 假手机全流程 + mock 屏幕流）
 
----
-
-## 未发布
-
-- **产品化的 MFi 身份**：`0xAA00 请求证书` 那道关要求 Apple MFi 计划签发的配件身份
-  （`identity/`，不入库）。开发期用自备身份可以走通全链路 —— v0.3 的真机验证就是这么做的 ——
-  但**纯软件身份不是产品路径**，要作为配件出货仍得走 MFi 计划。
-- **桌面端音频**：真机那一轮 iPhone 只请求了屏幕流和 `type=130`，**没有请求任何音频流**，
-  所以桌面端的音频链路至今只有假手机验证过，真机行为待观察。
+[Unreleased]: https://github.com/UnmetDecade/AllPlay/compare/v1.1...HEAD
+[v1.1]: https://github.com/UnmetDecade/AllPlay/releases/tag/v1.1
+[v1.0]: https://github.com/UnmetDecade/AllPlay/releases/tag/v1.0
+[v0.9]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.9
+[v0.8]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.8
+[v0.7]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.7
+[v0.6]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.6
+[v0.5]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.5
+[v0.4]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.4
+[v0.3]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.3
+[v0.2]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.2
+[v0.1]: https://github.com/UnmetDecade/AllPlay/releases/tag/v0.1
