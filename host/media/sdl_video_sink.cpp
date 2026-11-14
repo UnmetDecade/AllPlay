@@ -7,7 +7,7 @@
 namespace allplay {
 
 namespace {
-constexpr const char* kTag = "视频";
+constexpr const char* kTag = "video";
 }  // namespace
 
 void fitLetterbox(int srcW, int srcH, int dstW, int dstH, SDL_Rect* out)
@@ -40,16 +40,17 @@ SdlVideoSink::~SdlVideoSink()
 }
 
 // ---------------------------------------------------------------------------
-// core 侧（ScreenStream 线程 / RTSP 线程）
+// core side (ScreenStream thread / RTSP thread)
 // ---------------------------------------------------------------------------
 
 void SdlVideoSink::configure(core::VideoCodec codec, int width, int height,
                              const std::vector<uint8_t>& codecData)
 {
     std::lock_guard<std::mutex> lk(mu_);
-    // 这是"下一场会话的第一帧配置"吗？（dropFrame() 之后第一次 configure）
-    // 是的话，上一场解出来还没上屏的帧、以及解码器里挂着的参考链都得清掉 ——
-    // 否则它们会在新会话刚进 Streaming 时被画出来，用户看到的就是"上一场画面的几帧"。
+    // Is this "the next session's first config frame"? (the first configure() after dropFrame())
+    // If so, frames decoded but not yet presented from the previous session, and the reference chain held in the
+    // decoder, must be cleared -- otherwise they get drawn right as the new session enters Streaming, and the
+    // user sees "a few frames of the previous session".
     const bool sessionStart = awaitingNewStream_;
     awaitingNewStream_ = false;
     if (sessionStart) {
@@ -57,42 +58,42 @@ void SdlVideoSink::configure(core::VideoCodec codec, int width, int height,
             av_frame_free(&queue_.front());
             queue_.pop_front();
         }
-        dec_.reset();          // 清参考链（extradata 保留，下面 configure 会重新比对）
+        dec_.reset();          // clear the reference chain (extradata is kept; configure below re-compares it)
         srcW_ = srcH_ = 0;
         if (tailDropped_) {
-            LOG_INFO("%s：上一场会话收尾后又来了 %llu 帧，已丢弃",
+            LOG_INFO("%s: %llu frames arrived after the previous session wrapped up, dropped",
                      kTag, static_cast<unsigned long long>(tailDropped_));
             tailDropped_ = 0;
         }
     }
-    // width/height 只是协商值，真实尺寸看码流；这里只用于日志
+    // width/height are only the negotiated values; the real size comes from the bitstream. Used for logging only here
     const auto action = dec_.configure(codec, codecData);
     if (action == FfmpegVideoDecoder::Action::Unchanged) {
-        LOG_INFO("%s：配置未变（%dx%d），跳过重建", kTag, width, height);
+        LOG_INFO("%s: config unchanged (%dx%d), skipping rebuild", kTag, width, height);
         return;
     }
     if (action == FfmpegVideoDecoder::Action::Failed) {
-        LOG_ERROR("%s：解码器配置失败，屏幕流将放闸等关键帧", kTag);
+        LOG_ERROR("%s: decoder configuration failed, screen stream will gate and wait for a keyframe", kTag);
         return;
     }
-    // 换了配置：队列里可能还躺着旧解码器的帧，别让它出现在新画面里
+    // Config changed: frames from the old decoder may still be sitting in the queue; keep them out of the new picture
     while (!queue_.empty()) {
         av_frame_free(&queue_.front());
         queue_.pop_front();
     }
     srcW_ = 0;
     srcH_ = 0;
-    LOG_INFO("%s：已按协商 %dx%d 重建解码器", kTag, width, height);
+    LOG_INFO("%s: decoder rebuilt for negotiated %dx%d", kTag, width, height);
 }
 
 bool SdlVideoSink::feedAnnexB(const uint8_t* data, size_t len)
 {
     std::lock_guard<std::mutex> lk(mu_);
-    // 上一场会话的尾巴：dropFrame() 之后、新会话配置帧之前到的帧，全部丢掉。
-    // 返回 true（当喂进去了）而不是 false —— false 会让 core 放闸等关键帧，
-    // 这个"帧"本来就不该存在，没必要惊动上层。
+    // Tail of the previous session: frames arriving after dropFrame() and before the new session's config frame are all dropped.
+    // Return true (as if fed) rather than false -- false makes core gate and wait for a keyframe,
+    // and this "frame" should not exist anyway; no need to bother the layer above.
     if (awaitingNewStream_) { ++tailDropped_; return true; }
-    if (!dec_.usable()) return false;   // 配置帧还没来 / 建不起来 → 让 core 放闸
+    if (!dec_.usable()) return false;   // config frame not here yet / could not build -> make core gate
 
     const bool ok = dec_.decode(data, len, [this](const AVFrame* f) {
         AVFrame* copy = av_frame_alloc();
@@ -103,7 +104,7 @@ bool SdlVideoSink::feedAnnexB(const uint8_t* data, size_t len)
         }
         queue_.push_back(copy);
         ++decoded_;
-        // 丢最旧的：上屏只关心"最新"，堆帧等于加延迟
+        // Drop the oldest: presentation only cares about "latest"; piling up frames just adds latency
         while (queue_.size() > queueCap_) {
             av_frame_free(&queue_.front());
             queue_.pop_front();
@@ -120,7 +121,7 @@ bool SdlVideoSink::feedAnnexB(const uint8_t* data, size_t len)
 
 void SdlVideoSink::reset()
 {
-    // 关键帧恢复：清参考链 + 丢掉还没上屏的陈旧帧
+    // Keyframe recovery: clear the reference chain + drop stale frames not yet presented
     std::lock_guard<std::mutex> lk(mu_);
     dec_.reset();
     while (!queue_.empty()) {
@@ -131,7 +132,7 @@ void SdlVideoSink::reset()
 
 void SdlVideoSink::dropFrame()
 {
-    // 只在主线程调（tex_/sws_ 是主线程独占的，见头文件里的线程约定）。
+    // Main thread only (tex_/sws_ belong to the main thread; see the threading contract in the header).
     if (tex_) {
         SDL_DestroyTexture(tex_);
         tex_ = nullptr;
@@ -144,9 +145,9 @@ void SdlVideoSink::dropFrame()
         queue_.pop_front();
         ++cleared;
     }
-    if (cleared) LOG_INFO("%s：回启动页，丢掉还没上屏的 %zu 帧", kTag, cleared);
-    srcW_ = srcH_ = 0;   // 下一场会话由 configure()/feedAnnexB() 重新填
-    awaitingNewStream_ = true;   // 直到下一场的配置帧到来，期间的帧都是上一场的尾巴
+    if (cleared) LOG_INFO("%s: back to launcher, dropping %zu frames not yet presented", kTag, cleared);
+    srcW_ = srcH_ = 0;   // refilled by configure()/feedAnnexB() for the next session
+    awaitingNewStream_ = true;   // until the next session's config frame arrives, all frames are the previous session's tail
     tailDropped_ = 0;
 }
 
@@ -164,7 +165,7 @@ void SdlVideoSink::intrinsicSize(int* w, int* h) const
 }
 
 // ---------------------------------------------------------------------------
-// 主线程
+// Main thread
 // ---------------------------------------------------------------------------
 
 const AVFrame* SdlVideoSink::toYuv420p(const AVFrame* f)
@@ -196,7 +197,7 @@ const AVFrame* SdlVideoSink::toYuv420p(const AVFrame* f)
             sws_ = nullptr;
             return nullptr;
         }
-        LOG_WARN("%s：像素格式 %d 无直达纹理通道，改走 sws → YUV420P", kTag, f->format);
+        LOG_WARN("%s: pixel format %d has no direct texture path, using sws → YUV420P", kTag, f->format);
     }
     if (av_frame_make_writable(scratchFrame_) < 0) return nullptr;
     sws_scale(sws_, f->data, f->linesize, 0, f->height,
@@ -208,9 +209,9 @@ bool SdlVideoSink::upload(SDL_Renderer* r, const AVFrame* f)
 {
     Uint32 fmt = 0;
     switch (f->format) {
-        case AV_PIX_FMT_YUV420P: fmt = SDL_PIXELFORMAT_IYUV; break;   // 平面序 Y,U,V —— 与 AVFrame 一致
+        case AV_PIX_FMT_YUV420P: fmt = SDL_PIXELFORMAT_IYUV; break;   // plane order Y,U,V -- matches AVFrame
         case AV_PIX_FMT_NV12:    fmt = SDL_PIXELFORMAT_NV12; break;
-        default: break;   // YUVJ420P（全范围）等走 sws：让 sws 顺手把 range 也归一
+        default: break;   // YUVJ420P (full range) etc. go through sws: let sws also normalize the range in passing
     }
 
     const AVFrame* src = f;
@@ -227,10 +228,10 @@ bool SdlVideoSink::upload(SDL_Renderer* r, const AVFrame* f)
         texH_ = src->height;
         texFmt_ = fmt;
         if (!tex_) {
-            LOG_ERROR("%s：建纹理失败（%dx%d）：%s", kTag, texW_, texH_, SDL_GetError());
+            LOG_ERROR("%s: failed to create texture (%dx%d): %s", kTag, texW_, texH_, SDL_GetError());
             return false;
         }
-        LOG_INFO("%s：纹理 %dx%d 已建", kTag, texW_, texH_);
+        LOG_INFO("%s: texture %dx%d created", kTag, texW_, texH_);
     }
 
     int rc;
@@ -244,7 +245,7 @@ bool SdlVideoSink::upload(SDL_Renderer* r, const AVFrame* f)
                                   src->data[2], src->linesize[2]);
     }
     if (rc != 0) {
-        LOG_WARN("%s：上传纹理失败：%s", kTag, SDL_GetError());
+        LOG_WARN("%s: texture upload failed: %s", kTag, SDL_GetError());
         return false;
     }
     return true;
@@ -256,7 +257,7 @@ bool SdlVideoSink::present(SDL_Renderer* r, const SDL_Rect& dst)
     {
         std::lock_guard<std::mutex> lk(mu_);
         if (!queue_.empty()) {
-            // 只留最新一帧上屏：解码比上屏快时，中间帧没有展示价值
+            // Keep only the latest frame for presentation: when decode outpaces presentation, intermediate frames have no display value
             while (queue_.size() > 1) {
                 av_frame_free(&queue_.front());
                 queue_.pop_front();
@@ -266,7 +267,7 @@ bool SdlVideoSink::present(SDL_Renderer* r, const SDL_Rect& dst)
         }
     }
 
-    // 有新帧才上传；没有就继续用纹理里那一帧重画（画面停住而不是消失）
+    // Upload only when there is a new frame; otherwise keep redrawing the one in the texture (the picture holds instead of vanishing)
     if (f) {
         const bool ok = upload(r, f);
         av_frame_free(&f);
@@ -274,11 +275,11 @@ bool SdlVideoSink::present(SDL_Renderer* r, const SDL_Rect& dst)
         ++presented_;
     }
 
-    if (!tex_) return false;   // 一张都没解出来过
+    if (!tex_) return false;   // no frame decoded yet
 
     const int rc = SDL_RenderCopy(r, tex_, nullptr, &dst);
     if (rc != 0) {
-        LOG_WARN("%s：SDL_RenderCopy 失败：%s", kTag, SDL_GetError());
+        LOG_WARN("%s: SDL_RenderCopy failed: %s", kTag, SDL_GetError());
         return false;
     }
     return true;

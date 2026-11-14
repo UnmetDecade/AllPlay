@@ -9,7 +9,7 @@ import android.view.View
 import android.view.animation.LinearInterpolator
 
 /**
- * 蓝牙徽标 + 水纹扩散动画：中心蓝色实心圆，外围三圈涟漪循环扩散渐隐。
+ * Bluetooth badge + water-ripple animation: a solid blue circle in the center with three ripples expanding and fading in a loop.
  */
 class RippleView(context: Context) : View(context) {
     private val centerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -42,7 +42,7 @@ class RippleView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         val cx = width / 2f
         val cy = height / 2f
-        val badgeR = minOf(width, height) * 0.25f   // 与蓝圆底(84dp)半径对齐，保证水纹从徽标边缘居中扩散
+        val badgeR = minOf(width, height) * 0.25f   // matches the blue circle base (84dp) radius so the ripples expand centered from the badge edge
         val maxR = minOf(width, height) / 2f
         for (i in 0 until 2) {
             val p = (progress + i / 2f) % 1f

@@ -1,21 +1,21 @@
 /**
  * @file   ffmpeg_compat.h
- * @brief  ffmpeg 版本差异的单点封装
+ * @brief  Single-point wrapper for ffmpeg version differences
  * @author blt
  */
 
 // ============================================================================
-// host/media/ffmpeg_compat.h —— ffmpeg 版本差异的单点封装
+// host/media/ffmpeg_compat.h -- Single-point wrapper for ffmpeg version differences
 // ============================================================================
-// 开发机（macOS/brew）是 ffmpeg 8.x（libavcodec 63），目标机（Ubuntu 22.04）
-// 是 ffmpeg 4.4（libavcodec 58）—— 两边**没有共同的新式声道 API**：
-//   · `AVChannelLayout` / `ch_layout` 是 5.1（libavcodec 59.24.100）才引入的；
-//   · 老的 `channels` / `channel_layout` 字段在 7.0 又被删掉了。
-// 所以本目录一律遵守三条：
-//   1. 版本分支**只写在这里**，别处只用下面的包装；
-//   2. 解码器完全不设声道布局（让解码器从码流自己推），只**读**帧里的声道数；
-//   3. 重采样自己写（见 sdl_audio_sink.cpp），不引 swresample —— 顺带绕开它整套
-//      channel-layout 参数在新旧版之间的签名差异。
+// The dev machine (macOS/brew) has ffmpeg 8.x (libavcodec 63), the target machine (Ubuntu 22.04)
+// has ffmpeg 4.4 (libavcodec 58) -- the two **share no modern channel API**:
+//   · `AVChannelLayout` / `ch_layout` only arrived in 5.1 (libavcodec 59.24.100);
+//   · the old `channels` / `channel_layout` fields were removed again in 7.0.
+// So this directory follows three rules:
+//   1. Version branches live **only here**; everywhere else uses the wrappers below;
+//   2. The decoder sets no channel layout at all (it infers it from the bitstream) and only **reads** the channel count from frames;
+//   3. Resampling is hand-written (see sdl_audio_sink.cpp) without swresample -- which also sidesteps the
+//      channel-layout argument signature difference between versions.
 #pragma once
 
 extern "C" {
@@ -23,7 +23,7 @@ extern "C" {
 #include <libavutil/version.h>
 }
 
-/// ch_layout 取代 channels 的分界 = libavcodec 59.24.100（ffmpeg 5.1）
+/// Boundary where ch_layout replaces channels = libavcodec 59.24.100 (ffmpeg 5.1)
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 24, 100)
 #  define ALLPLAY_AV_NEW_CHLAYOUT 1
 #else
@@ -32,7 +32,7 @@ extern "C" {
 
 namespace allplay {
 
-/// 解码帧的声道数（新旧两套 API 的取值点）
+/// Channel count of a decoded frame (the access point for both old and new APIs)
 inline int frameChannels(const AVFrame* f)
 {
 #if ALLPLAY_AV_NEW_CHLAYOUT

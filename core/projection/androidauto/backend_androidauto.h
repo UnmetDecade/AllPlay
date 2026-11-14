@@ -1,18 +1,18 @@
 /**
  * @file   backend_androidauto.h
- * @brief  Android Auto（有线）协议后端
+ * @brief  Android Auto (wired) protocol backend
  * @author blt
  */
 
 // ============================================================================
-// core/projection/androidauto/backend_androidauto.h —— Android Auto 有线后端
+// core/projection/androidauto/backend_androidauto.h - Android Auto wired backend
 // ============================================================================
-// 实现链路（参照 AASDK / OpenAuto 的公开实现）：
-//   AOAP（51/52/53）→ 重枚举 → AAP VERSION → TLS 1.2（记录走 0x0003）
-//   → AUTH_COMPLETE → SERVICE_DISCOVERY → 通道打开 / AV SETUP / 媒体流
+// Implementation path (following the public AASDK / OpenAuto implementations):
+//   AOAP (51/52/53) -> re-enumeration -> AAP VERSION -> TLS 1.2 (records go over 0x0003)
+//   -> AUTH_COMPLETE -> SERVICE_DISCOVERY -> channel open / AV SETUP / media streaming
 //
-// 平台只负责 USB：platform/posix/aa_usb_libusb.cpp 实现 AaUsbPorts。
-// 本模块不引 protobuf / Boost，wire 编码见 proto.h，TLS 见 tls.h。
+// The platform handles only USB: platform/posix/aa_usb_libusb.cpp implements AaUsbPorts.
+// This module pulls in neither protobuf nor Boost; see proto.h for wire encoding and tls.h for TLS.
 #pragma once
 
 #include "projection/backend.h"
@@ -23,10 +23,10 @@
 namespace core::projection::androidauto {
 
 struct AndroidAutoOptions {
-    std::string name         = "AllPlay";     ///< 车机显示名
+    std::string name         = "AllPlay";     ///< Display name on the head unit
     std::string manufacturer = "AllPlay";
     std::string model        = "AllPlay";
-    std::string serial       = "ALLPLAY-AA";  ///< AOAP SERIAL 字符串 / 车机序列号
+    std::string serial       = "ALLPLAY-AA";  ///< AOAP SERIAL string / head unit serial
 
     int width  = 1280;
     int height = 720;

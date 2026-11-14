@@ -1,9 +1,9 @@
 // ============================================================================
-// platform/windows/net_windows.cpp —— Winsock2 适配（TCP/UDP/网卡）
+// platform/windows/net_windows.cpp -- Winsock2 adapters (TCP/UDP/network interfaces)
 // ============================================================================
-// 对照 platform/posix/net_posix.cpp 的语义：
-//   read 用 select() 轮询超时；accept 用 select()；stop() 关 socket 唤醒阻塞。
-// 双栈：IPv6 socket 设 IPV6_V6ONLY=0，同时收 IPv4（iPhone CarPlay 常走 IPv6）。
+// Semantics mirror platform/posix/net_posix.cpp:
+//   read polls with select() for the timeout; accept uses select(); stop() closes the socket to wake blocked calls.
+// Dual stack: IPv6 sockets set IPV6_V6ONLY=0 to also accept IPv4 (iPhone CarPlay typically uses IPv6).
 #include "windows/net_windows.h"
 
 #include "common/log.h"
@@ -34,10 +34,10 @@ int waitReadable(SOCKET s, int timeoutMs)
         tv.tv_usec = (timeoutMs % 1000) * 1000;
         ptv = &tv;
     }
-    return ::select(0, &fds, nullptr, nullptr, ptv);   // >0 可读；0 超时；SOCKET_ERROR 错
+    return ::select(0, &fds, nullptr, nullptr, ptv);   // >0 readable; 0 timeout; SOCKET_ERROR error
 }
 
-// WCHAR* → UTF-8 std::string
+// WCHAR* -> UTF-8 std::string
 std::string wideToUtf8(const wchar_t* w)
 {
     if (!w) return {};
@@ -49,7 +49,7 @@ std::string wideToUtf8(const wchar_t* w)
 }
 
 // ---------------------------------------------------------------------------
-// TCP 流
+// TCP stream
 // ---------------------------------------------------------------------------
 class WinTcpStream : public core::ITcpStream {
 public:
@@ -61,11 +61,11 @@ public:
     {
         if (s_ == INVALID_SOCKET) return -1;
         const int r = waitReadable(s_, timeoutMs);
-        if (r == 0) return 0;                 // 超时
+        if (r == 0) return 0;                 // timeout
         if (r == SOCKET_ERROR) return -1;
         const int got = ::recv(s_, reinterpret_cast<char*>(buf), int(n), 0);
         if (got > 0) return got;
-        if (got == 0) return -1;              // 对端关闭
+        if (got == 0) return -1;              // peer closed
         return -1;
     }
 
@@ -91,7 +91,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// TCP 监听
+// TCP listener
 // ---------------------------------------------------------------------------
 class WinTcpListener : public core::ITcpListener {
 public:
@@ -101,7 +101,7 @@ public:
     {
         SOCKET s = ::socket(AF_INET6, SOCK_STREAM, 0);
         if (s == INVALID_SOCKET) {
-            if (err) *err = "socket 失败：" + std::to_string(WSAGetLastError());
+            if (err) *err = "socket failed: " + std::to_string(WSAGetLastError());
             return false;
         }
         int one = 1;
@@ -117,7 +117,7 @@ public:
             if (::inet_pton(AF_INET6, bindAddr.c_str(), &addr.sin6_addr) != 1 &&
                 ::inet_pton(AF_INET, bindAddr.c_str(), &addr.sin6_addr.u.Byte[12]) != 1) {
                 ::closesocket(s);
-                if (err) *err = "非法绑定地址：" + bindAddr;
+                if (err) *err = "invalid bind address: " + bindAddr;
                 return false;
             }
         }
@@ -125,7 +125,7 @@ public:
             ::listen(s, 16) == SOCKET_ERROR) {
             const int e = WSAGetLastError();
             ::closesocket(s);
-            if (err) *err = "绑定/监听失败：" + std::to_string(e);
+            if (err) *err = "bind/listen failed: " + std::to_string(e);
             return false;
         }
 
@@ -168,7 +168,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// UDP socket（音频 RTP/RTCP）
+// UDP socket (audio RTP/RTCP)
 // ---------------------------------------------------------------------------
 class WinUdpSocket : public core::IUdpSocket {
 public:
@@ -178,7 +178,7 @@ public:
     {
         SOCKET s = ::socket(AF_INET6, SOCK_DGRAM, 0);
         if (s == INVALID_SOCKET) {
-            if (err) *err = "udp socket 失败：" + std::to_string(WSAGetLastError());
+            if (err) *err = "udp socket failed: " + std::to_string(WSAGetLastError());
             return false;
         }
         int zero = 0;
@@ -190,7 +190,7 @@ public:
         if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == SOCKET_ERROR) {
             const int e = WSAGetLastError();
             ::closesocket(s);
-            if (err) *err = "udp bind 失败：" + std::to_string(e);
+            if (err) *err = "udp bind failed: " + std::to_string(e);
             return false;
         }
         s_ = s;
@@ -209,7 +209,7 @@ public:
     {
         if (s_ == INVALID_SOCKET) return -1;
         const int r = waitReadable(s_, timeoutMs);
-        if (r <= 0) return r;   // 0 超时；SOCKET_ERROR 错误
+        if (r <= 0) return r;   // 0 timeout; SOCKET_ERROR error
         peerLen_ = sizeof peer_;
         const int got = ::recvfrom(s_, reinterpret_cast<char*>(buf), int(n), 0,
                                    reinterpret_cast<sockaddr*>(&peer_), &peerLen_);
@@ -235,7 +235,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 网卡信息（GetAdaptersAddresses）
+// Network interface info (GetAdaptersAddresses)
 // ---------------------------------------------------------------------------
 class WinNetworkInfo : public core::INetworkInfo {
 public:
@@ -311,14 +311,14 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// mDNS 桩（Windows 待接 Bonjour/mDNSResponder；start 失败不致命）
+// mDNS stub (Windows still needs Bonjour/mDNSResponder wired up; a failed start is not fatal)
 // ---------------------------------------------------------------------------
 class WinMdnsStub : public core::IMdnsAdvertiser {
 public:
     bool start(const std::string&, uint16_t, const std::vector<std::string>&,
                std::string* err) override
     {
-        if (err) *err = "Windows mDNS 未实现（待接 Bonjour/mDNSResponder）";
+        if (err) *err = "Windows mDNS is not implemented (pending Bonjour/mDNSResponder integration)";
         return false;
     }
     void stop() override {}
@@ -332,7 +332,7 @@ bool initWinsock(std::string* err)
     if (g_wsa) return true;
     WSADATA d{};
     if (::WSAStartup(MAKEWORD(2, 2), &d) != 0) {
-        if (err) *err = "WSAStartup 失败：" + std::to_string(WSAGetLastError());
+        if (err) *err = "WSAStartup failed: " + std::to_string(WSAGetLastError());
         return false;
     }
     g_wsa = true;
@@ -367,7 +367,7 @@ core::PlatformServices makePlatformServices()
     s.makeTcpListener     = &makeTcpListener;
     s.makeMdnsAdvertiser  = &makeMdnsAdvertiser;
     s.makeUdpSocket       = &makeUdpSocket;
-    s.bluetooth           = nullptr;   // 蓝牙 iAP2 触发后续里程碑
+    s.bluetooth           = nullptr;   // Bluetooth iAP2 trigger is a later milestone
     return s;
 }
 

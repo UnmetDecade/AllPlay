@@ -1,9 +1,9 @@
 // ============================================================================
-// platform/windows/bt_windows.cpp —— Windows 蓝牙（Winsock AF_BTH / RFCOMM）
+// platform/windows/bt_windows.cpp -- Windows Bluetooth (Winsock AF_BTH / RFCOMM)
 // ============================================================================
-// 客户端方向：连 iPhone 的 iAP2 SPP 服务（UUID 00000000-deca-fade-deca-deafdecacafe）。
-// 枚举已配对设备用 WSALookupService*（NS_BTH）；连接用 AF_BTH 套接字 + SOCKADDR_BTH
-// （port=0 + serviceClassId=UUID，让蓝牙栈自动 SDP 查到 RFCOMM 信道）。
+// Client side: connect to the iPhone's iAP2 SPP service (UUID 00000000-deca-fade-deca-deafdecacafe).
+// Enumerate paired devices with WSALookupService* (NS_BTH); connect with an AF_BTH socket + SOCKADDR_BTH
+// (port=0 + serviceClassId=UUID, letting the Bluetooth stack resolve the RFCOMM channel via SDP).
 #include "windows/net_windows.h"
 
 #include "common/log.h"
@@ -22,7 +22,7 @@ namespace allplay::windows {
 
 namespace {
 
-// MAC 字符串 "AA:BB:CC:DD:EE:FF"（或短横线）→ 6 字节
+// MAC string "AA:BB:CC:DD:EE:FF" (or hyphenated) -> 6 bytes
 bool parseMac(const std::string& s, uint8_t mac[6])
 {
     uint8_t out[6];
@@ -58,8 +58,8 @@ ULONGLONG macToBtAddr(const uint8_t mac[6])
     return a;
 }
 
-// 128 位蓝牙 UUID "00000000-deca-fade-deca-deafdecacafe" → Windows GUID
-// （前 3 组小端反转，最后 8 字节原样）
+// 128-bit Bluetooth UUID "00000000-deca-fade-deca-deafdecacafe" -> Windows GUID
+// (first 3 fields byte-reversed to little-endian, last 8 bytes copied as-is)
 GUID uuidToGuid(const std::string& u)
 {
     uint8_t b[16] = {0};
@@ -86,7 +86,7 @@ GUID uuidToGuid(const std::string& u)
     return g;
 }
 
-// RFCOMM 流（读超时用 select，语义同 net_windows 的 TCP）
+// RFCOMM stream (read timeout via select, same semantics as TCP in net_windows)
 class BtStream : public core::IByteStream {
 public:
     explicit BtStream(SOCKET s) : s_(s) {}
@@ -105,7 +105,7 @@ public:
         if (r == SOCKET_ERROR) return -1;
         int got = ::recv(s_, reinterpret_cast<char*>(buf), int(n), 0);
         if (got > 0) return got;
-        if (got == 0) return -1;   // 对端关闭
+        if (got == 0) return -1;   // peer closed
         return -1;
     }
 
@@ -141,7 +141,7 @@ public:
 
         HANDLE h = nullptr;
         if (::WSALookupServiceBeginW(&q, LUP_CONTAINERS, &h) != 0) {
-            if (err) *err = "蓝牙枚举失败：" + std::to_string(WSAGetLastError());
+            if (err) *err = "Bluetooth enumeration failed: " + std::to_string(WSAGetLastError());
             return out;
         }
 
@@ -177,23 +177,23 @@ public:
     {
         uint8_t mac[6];
         if (!parseMac(address, mac)) {
-            if (err) *err = "非法蓝牙地址：" + address;
+            if (err) *err = "invalid Bluetooth address: " + address;
             return nullptr;
         }
         SOCKET s = ::socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
         if (s == INVALID_SOCKET) {
-            if (err) *err = "RFCOMM socket 失败：" + std::to_string(WSAGetLastError());
+            if (err) *err = "RFCOMM socket failed: " + std::to_string(WSAGetLastError());
             return nullptr;
         }
         SOCKADDR_BTH sa{};
         sa.addressFamily = AF_BTH;
         sa.btAddr = macToBtAddr(mac);
         sa.serviceClassId = uuidToGuid(uuid);
-        sa.port = 0;   // 让系统 SDP 自动查 RFCOMM 信道
+        sa.port = 0;   // let the system resolve the RFCOMM channel via SDP
         if (::connect(s, reinterpret_cast<sockaddr*>(&sa), sizeof sa) == SOCKET_ERROR) {
             int e = WSAGetLastError();
             ::closesocket(s);
-            if (err) *err = "RFCOMM 连接失败：" + std::to_string(e);
+            if (err) *err = "RFCOMM connection failed: " + std::to_string(e);
             return nullptr;
         }
         return new BtStream(s);
@@ -201,8 +201,8 @@ public:
 
     core::IByteStream* waitForPhoneConnection(int, std::string* err) override
     {
-        // 服务端方向（注册 SDP 等手机连）后续里程碑；客户端方向已够 iAP2 触发
-        if (err) *err = "Windows 服务端蓝牙（SDP 注册）未实现";
+        // Server side (SDP registration, waiting for the phone to connect) is a later milestone; the client side is enough to trigger iAP2
+        if (err) *err = "Windows server-side Bluetooth (SDP registration) is not implemented";
         return nullptr;
     }
 };

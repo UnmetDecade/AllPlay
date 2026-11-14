@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # ============================================================================
-# m1-check.sh —— M1 验收：RTSP + /info(bplist) + Bonjour 广播
+# m1-check.sh — M1 acceptance: RTSP + /info (bplist) + Bonjour advertising
 # ============================================================================
-# 在任何一台装好依赖的机器上跑（容器 / 目标机皆可）。
+# Run on any machine with dependencies installed (container / target machine both work).
 #
-# ⚠️ 为什么不用 curl 验 /info：AirPlay 的应答状态行是 `RTSP/1.0 200 OK`，
-#    curl 只认 HTTP/1.x，会静默报 "Received HTTP/0.9 when not allowed" 并把
-#    响应丢掉 —— 服务端没问题，是工具不认。这里用原始 TCP 客户端（也正好贴近
-#    手机实际行为）。
+# ⚠️ Why not use curl to check /info: AirPlay's response status line is `RTSP/1.0 200 OK`,
+#    curl only understands HTTP/1.x and silently reports "Received HTTP/0.9 when not allowed" and drops
+#    the response — the server is fine, the tool just does not accept it. Use a raw TCP client here (which also closely matches
+#    the phone's actual behavior).
 #
-# 步骤：
-#   1) 起 core_selftest（--no-avahi）→ 2) 原始 RTSP：GET /info + OPTIONS
-#   3) plist 逐字段断言 → 4) 若 avahi 活跃且有 avahi-browse：再验广播可见性
+# Steps:
+#   1) start core_selftest (--no-avahi) → 2) raw RTSP: GET /info + OPTIONS
+#   3) per-field plist assertions → 4) if avahi is active and avahi-browse exists: also verify advertisement visibility
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,23 +26,23 @@ say()  { printf '%s\n' "$*"; }
 fail() { printf '❌ %s\n' "$*"; FAIL=1; }
 ok()   { printf '✅ %s\n' "$*"; }
 
-[ -x "$BIN" ] || { say "找不到 ${BIN}（先 scripts/build.sh）"; exit 2; }
+[ -x "$BIN" ] || { say "Cannot find ${BIN} (run scripts/build.sh first)"; exit 2; }
 
 cleanup() { if [ -n "${PID:-}" ]; then kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null; fi; }
 trap cleanup EXIT
 
-say "== ① 起 core_selftest（--no-avahi，port=${PORT}）=="
+say "== ① Start core_selftest (--no-avahi, port=${PORT}) =="
 "$BIN" --port "$PORT" --no-avahi --state-dir "$STATE_DIR" >"$LOG" 2>&1 &
 PID=$!
 for i in $(seq 1 50); do
     grep -q "READY" "$LOG" && break
     sleep 0.2
 done
-grep -q "READY" "$LOG" || { say "---- 日志 ----"; cat "$LOG"; fail "core 未能就绪"; exit 1; }
+grep -q "READY" "$LOG" || { say "---- Log ----"; cat "$LOG"; fail "core did not become ready"; exit 1; }
 grep -E "^\[selftest\]" "$LOG" | sed 's/^/   /'
 DEVID=$(grep -oE "deviceid=[0-9A-F:]+" "$LOG" | head -1 | cut -d= -f2)
 
-say "== ②③ 原始 RTSP：GET /info + OPTIONS，并校验 bplist =="
+say "== ②③ Raw RTSP: GET /info + OPTIONS, and validate bplist =="
 if python3 - "$PORT" "$DEVID" <<'PY'
 import plistlib, socket, sys
 
@@ -79,35 +79,35 @@ def chk(cond, msg):
 
 # ---- GET /info ----
 status, hdr, body = rtsp("GET", "/info")
-chk(status.startswith("RTSP/1.0 200"), f"/info 状态行：{status}")
+chk(status.startswith("RTSP/1.0 200"), f"/info status line: {status}")
 chk(hdr.get("content-type") == "application/x-apple-binary-plist",
-    f"/info Content-Type：{hdr.get('content-type')}")
+    f"/info Content-Type: {hdr.get('content-type')}")
 try:
     d = plistlib.loads(body)
 except Exception as e:
-    chk(False, f"plist 解析失败：{e}")
+    chk(False, f"plist parse failed: {e}")
     d = {}
-chk(d.get("deviceID") == devid, f"deviceID == {devid}（实际 {d.get('deviceID')}）")
+chk(d.get("deviceID") == devid, f"deviceID == {devid} (actual {d.get('deviceID')})")
 chk(d.get("features") == 0x615653AEE2, "features == 0x615653AEE2")
-chk(len(d.get("pi", "")) == 36, "pi 是 UUID")
-chk(len(d.get("pk", "")) == 64, "pk 是 32 字节 hex")
+chk(len(d.get("pi", "")) == 36, "pi is a UUID")
+chk(len(d.get("pk", "")) == 64, "pk is 32-byte hex")
 disps = d.get("displays") or []
 chk(len(disps) == 1 and disps[0].get("widthPixels") == 1280
     and disps[0].get("heightPixels") == 720, "displays[0] = 1280x720")
-chk(d.get("srcvers") == "370.10" and d.get("protovers") == "1.1", "srcvers/protovers")
+chk(d.get("srcvers") == "950.7.1" and d.get("protovers") == "1.1", "srcvers/protovers")
 
 # ---- OPTIONS ----
 status, hdr, _ = rtsp("OPTIONS", "/")
-chk(status.startswith("RTSP/1.0 200"), f"OPTIONS 状态行：{status}")
-chk("public" in hdr and "SETUP" in hdr.get("public", ""), "OPTIONS 带 Public（含 SETUP）")
+chk(status.startswith("RTSP/1.0 200"), f"OPTIONS status line: {status}")
+chk("public" in hdr and "SETUP" in hdr.get("public", ""), "OPTIONS includes Public (with SETUP)")
 
 sys.exit(1 if failures else 0)
 PY
-then ok "/info + OPTIONS 全过"; else fail "/info 或 OPTIONS 校验失败"; fi
+then ok "/info + OPTIONS all passed"; else fail "/info or OPTIONS validation failed"; fi
 
-say "== ④ Bonjour（按平台选验证工具）=="
+say "== ④ Bonjour (pick verification tool per platform) =="
 if [ "$(uname -s)" = "Darwin" ]; then
-    # macOS：dns_sd 后端；用系统 dns-sd 浏览。没有 timeout 命令，用后台+kill。
+    # macOS: dns_sd backend; browse with the system dns-sd. There is no timeout command, so background + kill.
     if command -v dns-sd >/dev/null 2>&1; then
         kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
         "$BIN" --port "$PORT" --state-dir "$STATE_DIR" >"$LOG" 2>&1 &
@@ -118,10 +118,10 @@ if [ "$(uname -s)" = "Darwin" ]; then
         DSPID=$!
         sleep 3
         kill "$DSPID" 2>/dev/null
-        grep -qi 'CarPlay' /tmp/m1-dns-sd.log && ok "dns-sd 能看到本机 _airplay._tcp" \
-                                              || fail "dns-sd 没找到本机服务"
+        grep -qF 'AllPlay' /tmp/m1-dns-sd.log && ok "dns-sd can see the local _airplay._tcp" \
+                                              || fail "dns-sd did not find the local service"
     else
-        say "   （跳过：没有 dns-sd）"
+        say "   (skipped: no dns-sd)"
     fi
 elif command -v avahi-browse >/dev/null 2>&1 && systemctl is-active avahi-daemon >/dev/null 2>&1; then
     kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
@@ -130,25 +130,25 @@ elif command -v avahi-browse >/dev/null 2>&1 && systemctl is-active avahi-daemon
     for i in $(seq 1 50); do grep -q "READY" "$LOG" && break; sleep 0.2; done
     grep -E "Bonjour" "$LOG" | sed 's/^/   /'
 
-    # 判据用"服务实例可见"（+ 行），不押在 TXT 解析上：
-    # 办公室局域网里 AirPlay 设备多，-r 解析会排队，短超时下 TXT 可能还没回来。
-    # 实例名里的空格被 avahi-browse -p 转义成 \032。
+    # Use "service instance visible" (the + line) as the criterion rather than relying on TXT parsing:
+    # the office LAN has many AirPlay devices, -r resolution queues up, and with a short timeout the TXT may not have arrived.
+    # Spaces in instance names are escaped as \032 by avahi-browse -p.
     FOUND=0; TXTOK=0
     for i in 1 2 3; do
         out="$(timeout 8 avahi-browse -r -t -p _airplay._tcp 2>/dev/null)"
-        printf '%s' "$out" | grep -qF 'CarPlay\032Linux' && FOUND=1
+        printf '%s' "$out" | grep -qF 'AllPlay' && FOUND=1
         printf '%s' "$out" | grep -qF "${DEVID}" && TXTOK=1
         [ "$FOUND" = 1 ] && break
     done
-    [ "$FOUND" = 1 ] && ok "avahi-browse 能看到本机 _airplay._tcp 服务" \
-                     || fail "avahi-browse 没找到本机服务"
-    [ "$TXTOK" = 1 ] && ok "TXT 解析到 deviceid=${DEVID}" \
-                     || say "   （TXT 解析这次没排上队，服务可见即可）"
+    [ "$FOUND" = 1 ] && ok "avahi-browse can see the local _airplay._tcp service" \
+                     || fail "avahi-browse did not find the local service"
+    [ "$TXTOK" = 1 ] && ok "TXT resolved deviceid=${DEVID}" \
+                     || say "   (TXT resolution did not get its turn this time; service visibility is enough)"
 else
-    say "   （跳过：没有 avahi-browse 或 avahi-daemon 未运行）"
+    say "   (skipped: no avahi-browse, or avahi-daemon is not running)"
 fi
 
 cleanup; PID=""
 echo
-if [ "$FAIL" = 0 ]; then say "==== M1 验收：全部通过 ===="; else say "==== M1 验收：有失败 ===="; tail -30 "$LOG"; fi
+if [ "$FAIL" = 0 ]; then say "==== M1 acceptance: all passed ===="; else say "==== M1 acceptance: failures present ===="; tail -30 "$LOG"; fi
 exit "$FAIL"

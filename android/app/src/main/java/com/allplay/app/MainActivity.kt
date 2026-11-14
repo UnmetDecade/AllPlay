@@ -36,8 +36,8 @@ import android.widget.Spinner
 import android.widget.ArrayAdapter
 
 /**
- * 入口：申请权限 → 起前台服务 → 三态 UI（等待连接 / 连接中 / 投屏画面）。
- * Surface 交给服务（→ native → MediaCodec）。
+ * Entry point: request permissions → start the foreground service → three-state UI (waiting for connection / connecting / projection).
+ * Pass the Surface to the service (→ native → MediaCodec).
  */
 class MainActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var serviceIntent: Intent
@@ -54,11 +54,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     private var lastState = -1
     private var dotStep = 0
 
-    // 等待连接文字后的三个点动画
+    // Three-dot animation after the "waiting for connection" text
     private val dotsRunnable = object : Runnable {
         override fun run() {
             if (lastState == 0 && launcherView.visibility == View.VISIBLE) {
-                val base = "等待连接"
+                val base = "Waiting for connection"
                 val dots = when (dotStep % 4) { 0 -> ""; 1 -> "."; 2 -> ".."; else -> "..." }
                 statusText.text = base + dots
                 dotStep++
@@ -67,7 +67,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    // 实时帧率（右上角角标，每秒刷新）
+    // Live frame rate (top-right badge, refreshed every second)
     private val fpsRunnable = object : Runnable {
         override fun run() {
             val cur = (application as? AllPlayApp)?.service?.videoSink?.renderedFrames ?: 0
@@ -78,7 +78,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
     }
 
-    // 会话状态轮询：0 等待连接 / 1 连接中 / 2 已连接
+    // Session state polling: 0 waiting / 1 connecting / 2 connected
     private val stateRunnable = object : Runnable {
         override fun run() {
             val s = (application as? AllPlayApp)?.service?.sessionState() ?: 0
@@ -92,23 +92,23 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun updateUiState(state: Int) {
         when (state) {
-            2 -> {   // 已连接 → 显示投屏画面，隐藏启动页
+            2 -> {   // connected → show the projection, hide the launch screen
                 launcherView.visibility = View.GONE
             }
-            1 -> {   // 连接中
+            1 -> {   // connecting
                 launcherView.visibility = View.VISIBLE
-                statusText.text = "连接中…"
+                statusText.text = "Connecting…"
             }
-            else -> {  // 等待连接
+            else -> {  // waiting for connection
                 launcherView.visibility = View.VISIBLE
-                statusText.text = "等待连接"
+                statusText.text = "Waiting for connection"
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 全屏沉浸：刘海区域也铺满
+        // Full-screen immersive: fill the notch area too
         if (Build.VERSION.SDK_INT >= 28) {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -118,7 +118,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.holder.addCallback(this)
         surfaceView.setOnTouchListener { v, e -> onTouch(v, e) }
 
-        // 启动/连接中页面：白色背景 + 品牌 + 蓝牙水纹 + 状态文字
+        // Launch/connecting screen: white background + branding + Bluetooth ripple + status text
         launcherView = FrameLayout(this)
         launcherView.setBackgroundColor(Color.WHITE)
 
@@ -127,7 +127,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             gravity = Gravity.CENTER
         }
         val title = TextView(this).apply {
-            // 双色 logo：「All」深色 + 「Play」蓝色，避免单调
+            // Two-tone logo: "All" in dark + "Play" in blue, to avoid monotony
             val sp = android.text.SpannableString("AllPlay")
             sp.setSpan(android.text.style.ForegroundColorSpan(Color.parseColor("#1A1A1A")), 0, 3,
                 android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -136,10 +136,10 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             text = sp
             textSize = 38f
             typeface = Typeface.create("sans-serif", Typeface.BOLD)
-            if (Build.VERSION.SDK_INT >= 21) letterSpacing = 0.04f   // setLetterSpacing 是 API 21
+            if (Build.VERSION.SDK_INT >= 21) letterSpacing = 0.04f   // setLetterSpacing is API 21
             gravity = Gravity.CENTER
         }
-        // 蓝牙水纹徽标：涟漪环 + 蓝色圆底 + 蓝牙图标
+        // Bluetooth ripple badge: ripple rings + blue circle base + Bluetooth icon
         btBadge = FrameLayout(this)
         val ripple = RippleView(this)
         btBadge.addView(ripple, FrameLayout.LayoutParams(dp(168), dp(168), Gravity.CENTER))
@@ -156,7 +156,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         btBadge.addView(btIcon, FrameLayout.LayoutParams(dp(52), dp(52), Gravity.CENTER))
 
         statusText = TextView(this).apply {
-            text = "等待连接"
+            text = "Waiting for connection"
             setTextColor(Color.parseColor("#666666"))
             textSize = 19f
             gravity = Gravity.CENTER
@@ -176,7 +176,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER))
 
-        // 左上角设置图标
+        // Settings icon in the top-left
         val settingsBtn = ImageView(this).apply {
             setImageResource(R.drawable.settings_icon)
             setPadding(dp(2), dp(2), dp(2), dp(2))
@@ -185,7 +185,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         launcherView.addView(settingsBtn, FrameLayout.LayoutParams(
             dp(60), dp(60), Gravity.TOP or Gravity.START))
 
-        // FPS 角标：右上角实时帧率（仅显示）
+        // FPS badge: live frame rate in the top-right (display only)
         fpsText = TextView(this).apply {
             setTextColor(Color.GREEN)
             textSize = 20f
@@ -205,7 +205,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             Gravity.TOP or Gravity.END))
         setContentView(root)
         hideSystemBars()
-        // 根据设置决定是否显示 FPS 角标
+        // Show the FPS badge according to the setting
         fpsText.visibility = if (java.io.File(filesDir, "fps_show").exists()) View.VISIBLE else View.GONE
 
         serviceIntent = Intent(this, AllPlaySessionService::class.java)
@@ -218,11 +218,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
-    /// 触摸 → 归一化 0..1 → 最多 2 触点 → [x,y,down] × 2 → 发到事件通道（参照协议 sendTouch）
+    /// Touch → normalize to 0..1 → at most 2 contacts → [x,y,down] × 2 → send to the event channel (per the protocol's sendTouch)
     private fun onTouch(v: View, e: MotionEvent): Boolean {
         val service = (application as? AllPlayApp)?.service ?: return false
         if (v.width == 0 || v.height == 0) return true
-        val pts = FloatArray(6)   // 2 触点 × 3
+        val pts = FloatArray(6)   // 2 contacts × 3
         val count = minOf(e.pointerCount, 2)
         for (i in 0 until count) {
             pts[i * 3] = e.getX(i) / v.width.toFloat()
@@ -236,7 +236,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private fun maybeRequestPermissions() {
-        // Android 4.4（<23）：危险权限安装即授予，无运行时权限模型，直接起服务
+        // Android 4.4 (<23): dangerous permissions are granted at install with no runtime model, so start the service directly
         if (Build.VERSION.SDK_INT < 23) {
             startService()
             return
@@ -263,9 +263,9 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         requestBatteryExemption()
     }
 
-    /// 申请电池优化豁免（退后台不被 Doze 杀进程/断热点；需用户在系统弹窗里点允许）
+    /// Request a battery optimization exemption (so Doze does not kill the process or drop the hotspot in the background; the user must tap Allow in the system dialog)
     private fun requestBatteryExemption() {
-        if (Build.VERSION.SDK_INT < 23) return   // Android 4.4 无电池优化概念
+        if (Build.VERSION.SDK_INT < 23) return   // Android 4.4 has no battery optimization concept
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         if (pm.isIgnoringBatteryOptimizations(packageName)) return
         try {
@@ -275,7 +275,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     private fun startService() {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(serviceIntent)
-        else startService(serviceIntent)   // Android 4.4 无 startForegroundService
+        else startService(serviceIntent)   // Android 4.4 has no startForegroundService
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -292,11 +292,11 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     override fun surfaceChanged(holder: SurfaceHolder, f: Int, w: Int, h: Int) {}
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         surfaceReady = false
-        // 退后台 Surface 销毁：通知服务释放解码器对死 Surface 的引用，避免崩溃导致 CarPlay 断连
+        // Surface destroyed on backgrounding: tell the service to drop the decoder's reference to the dead Surface, so a crash does not drop CarPlay
         (application as? AllPlayApp)?.service?.releaseSurface()
     }
 
-    /// 旋转（configChanges 已声明 orientation|screenSize）：方向变了让服务换分辨率重启会话
+    /// Rotation (configChanges declares orientation|screenSize): when the orientation changes, have the service restart the session at the new resolution
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         (application as? AllPlayApp)?.service?.restartForOrientation()
@@ -304,30 +304,30 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        // 沉浸模式失焦后会退出，重新聚焦时再隐藏，保证回前台仍全屏
+        // Immersive mode is exited on losing focus; hide again on regaining focus so it stays fullscreen when returning to foreground
         if (hasFocus) hideSystemBars()
     }
 
-    /// 手动切换流畅模式弹窗（点右上角 FPS 角标触发）
+    /// Manual smooth-mode toggle dialog (triggered by tapping the top-right FPS badge)
     private fun showSmoothModeDialog() {
         val svc = (application as? AllPlayApp)?.service ?: return
         val active = svc.smoothModeActive
         val builder = AlertDialog.Builder(this).setCancelable(false)
         if (active) {
-            builder.setTitle("退出流畅模式")
-                .setMessage("当前已是流畅模式（1280x720 + 30fps）。\n是否恢复正常分辨率？")
-                .setPositiveButton("恢复正常") { _, _ -> svc.disableSmoothMode() }
-                .setNegativeButton("保持流畅模式", null)
+            builder.setTitle("Exit smooth mode")
+                .setMessage("Smooth mode is active (1280x720 + 30fps).\nRestore normal resolution?")
+                .setPositiveButton("Restore") { _, _ -> svc.disableSmoothMode() }
+                .setNegativeButton("Keep smooth mode", null)
         } else {
-            builder.setTitle("进入流畅模式")
-                .setMessage("固定 1280x720 + 最高 30fps，降低解码压力、减少掉帧。")
-                .setPositiveButton("进入流畅模式") { _, _ -> svc.enableSmoothMode() }
-                .setNegativeButton("取消", null)
+            builder.setTitle("Enter smooth mode")
+                .setMessage("Lock to 1280x720 + 30fps max to reduce decoding load and dropped frames.")
+                .setPositiveButton("Enter smooth mode") { _, _ -> svc.enableSmoothMode() }
+                .setNegativeButton("Cancel", null)
         }
         builder.show()
     }
 
-    /// 设置弹窗（左上角齿轮触发）：下拉选模式 + 填 SSID/密码 + 流畅模式开关，保存后重启生效
+    /// Settings dialog (triggered by the top-left gear): pick a mode + enter SSID/passphrase + smooth-mode toggle; takes effect after saving and restarting
     private fun showSettingsDialog() {
         val files = filesDir
         val lanFile = java.io.File(files, "lan")
@@ -342,44 +342,44 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
             setPadding(dp(24), dp(20), dp(24), dp(8))
         }
         val modeLabel = TextView(this).apply {
-            text = "无线连接模式"
+            text = "Wireless connection mode"
             setTextColor(Color.parseColor("#333333"))
             textSize = 15f
         }
         val modeSpinner = Spinner(this)
-        val modes = arrayOf("热点模式（手机连本机热点）", "LAN 模式（连路由器 WiFi）")
+        val modes = arrayOf("Hotspot mode (phone connects to this device)", "LAN mode (connect to router WiFi)")
         val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, modes)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         modeSpinner.adapter = adapter
         modeSpinner.setSelection(if (lanFile.exists()) 1 else 0)
 
         val orientLabel = TextView(this).apply {
-            text = "屏幕方向"
+            text = "Screen orientation"
             setTextColor(Color.parseColor("#333333"))
             textSize = 15f
         }
         val orientSpinner = Spinner(this)
-        val orientModes = arrayOf("横屏（默认）", "竖屏")
+        val orientModes = arrayOf("Landscape (default)", "Portrait")
         val orientAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, orientModes)
         orientAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         orientSpinner.adapter = orientAdapter
         orientSpinner.setSelection(if (portraitFile.exists()) 1 else 0)
 
         val ssidEdit = EditText(this).apply {
-            hint = "SSID / 热点名"
+            hint = "SSID / hotspot name"
             setText(if (ssidFile.exists()) ssidFile.readText().trim() else "")
         }
         val passEdit = EditText(this).apply {
-            hint = "密码"
+            hint = "Password"
             setText(if (passFile.exists()) passFile.readText().trim() else "")
         }
         val smoothCheck = CheckBox(this).apply {
-            text = "流畅模式"
+            text = "Smooth mode"
             setTextColor(Color.parseColor("#333333"))
             isChecked = smoothFile.exists()
         }
         val fpsCheck = CheckBox(this).apply {
-            text = "显示 FPS"
+            text = "Show FPS"
             setTextColor(Color.parseColor("#333333"))
             isChecked = fpsFile.exists()
         }
@@ -411,13 +411,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         val scroll = ScrollView(this).apply { addView(layout) }
 
         AlertDialog.Builder(this)
-            .setTitle("设置")
+            .setTitle("Settings")
             .setView(scroll)
-            .setPositiveButton("保存") { _, _ ->
+            .setPositiveButton("Save") { _, _ ->
                 try {
-                    // 0 = 热点模式（删 lan），1 = LAN 模式（建 lan）
+                    // 0 = hotspot mode (delete lan), 1 = LAN mode (create lan)
                     if (modeSpinner.selectedItemPosition == 1) lanFile.createNewFile() else lanFile.delete()
-                    // 0 = 横屏，1 = 竖屏
+                    // 0 = landscape, 1 = portrait
                     if (orientSpinner.selectedItemPosition == 1) portraitFile.createNewFile() else portraitFile.delete()
                     ssidFile.writeText(ssidEdit.text.toString().trim())
                     passFile.writeText(passEdit.text.toString())
@@ -427,13 +427,13 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
                 fpsText.visibility = if (fpsCheck.isChecked) View.VISIBLE else View.GONE
                 (application as? AllPlayApp)?.service?.restartNative()
             }
-            .setNegativeButton("取消", null)
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
     private fun hideSystemBars() {
         if (Build.VERSION.SDK_INT >= 30) {
-            // 部分机型（如 vivo）setContentView 前 insetsController 可能为 null 抛 NPE，try/catch 兜底
+            // On some devices (e.g. vivo), insetsController may be null before setContentView and throw an NPE; catch it as a fallback
             try {
                 val c = window.insetsController
                 c?.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())

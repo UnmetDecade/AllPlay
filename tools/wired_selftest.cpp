@@ -1,15 +1,15 @@
 // ============================================================================
-// tools/wired_selftest.cpp —— 有线链路里"不需要手机"的那部分，离线自检
+// tools/wired_selftest.cpp -- the part of the wired path that needs no phone, checked offline
 // ============================================================================
-// 有线这条路的失败模式很讨厌：真机上一卡就是超时，而超时既可能是"手机不理我"，
-// 也可能是"我自己的代码写错了"。所以凡是**不用插手机就能验**的，都在这里验掉：
+// The wired path's failure mode is nasty: on a real device a hang becomes a timeout, and a timeout may be "the phone is ignoring me"
+// or "my own code is wrong". So anything that can be **verified without plugging in a phone** gets verified here:
 //
-//   ① XML plist 解析 —— 手机回话带 XML 声明与 DOCTYPE，解析器必须吃得下
-//   ② 证书结构     —— serial 0 / 空 DN / 扩展与 critical 位 / device 那张的公钥
-//   ③ TLS 回环握手 —— 自己跟自己握一次，验 BIO 管道、读写、以及 **root 证书能不能
-//                     当客户端身份用**（这一步真机上失败了极难定位）
+//   ① XML plist parsing -- the phone's reply carries an XML declaration and DOCTYPE, and the parser must swallow them
+//   ② Certificate structure -- serial 0 / empty DN / extensions and critical bits / the device cert's public key
+//   ③ TLS loopback handshake -- handshake against ourselves once to test the BIO pipe, read/write, and **whether the root cert
+//                     can serve as the client identity** (hard to pin down if it fails on a real device)
 //
-// 这些都是纯软件，在本机/9.202 上就能跑：wired_probe --selftest
+// All of this is pure software and runs on the local machine/9.202: wired_probe --selftest
 #include "usb/pair_record.h"
 #include "usb/plist_xml.h"
 #include "usb/tls_stream.h"
@@ -55,16 +55,16 @@ std::string opensslError()
         if (!out.empty()) out += " / ";
         out += buf;
     }
-    return out.empty() ? "（无错误码）" : out;
+    return out.empty() ? "(no error code)" : out;
 }
 
 // ---------------------------------------------------------------- ① plist ----
 
 void testPlist()
 {
-    std::printf("=== ① XML plist 解析 ===\n");
+    std::printf("=== ① XML plist parsing ===\n");
 
-    // 手机回的 plist 实测就长这样：带 XML 声明 + DOCTYPE
+    // This is what the phone's plist actually looked like in testing: XML declaration + DOCTYPE
     const std::string phoneReply =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
@@ -79,42 +79,42 @@ void testPlist()
 
     core::usb::Plist p;
     std::string     err;
-    check(core::usb::Plist::parse(phoneReply, &p, &err), "解析带声明的回话（" + err + "）");
+    check(core::usb::Plist::parse(phoneReply, &p, &err), "parse a reply with a declaration (" + err + ")");
     if (!p.isDict()) {
-        check(false, "顶层是 dict");
+        check(false, "top level is a dict");
         return;
     }
-    check(p.stringValue("Type") == "com.apple.mobile.lockdown", "string 字段");
-    check(p.intValue("Port") == 49152, "integer 字段");
-    check(p.boolValue("EnableSessionSSL", false), "true 字段");
-    check(!p.boolValue("Off", true), "false 字段");
+    check(p.stringValue("Type") == "com.apple.mobile.lockdown", "string field");
+    check(p.intValue("Port") == 49152, "integer field");
+    check(p.boolValue("EnableSessionSSL", false), "true field");
+    check(!p.boolValue("Off", true), "false field");
 
     const core::usb::Plist* blob = p.find("Blob");
     const bool blobOk = blob != nullptr && blob->type() == core::usb::Plist::Type::Data &&
                         blob->asData() == std::vector<uint8_t>({0, 1, 2, 3, 4});
-    check(blobOk, "data 字段（base64 解码）");
+    check(blobOk, "data field (base64 decoded)");
 
-    // 自产自销：自己生成的请求也要能被自己解回来（锁的是成帧，不是内容）
+    // Round-trip our own output: a request we generate must parse back (this pins framing, not content)
     core::usb::Plist req = core::usb::Plist::dict();
     req.set("Request", core::usb::Plist::string("Pair"));
     req.set("ProtocolVersion", core::usb::Plist::string("2"));
     core::usb::Plist back;
-    check(core::usb::Plist::parse(req.toXml(), &back, &err), "自己发的 XML 能解回来");
+    check(core::usb::Plist::parse(req.toXml(), &back, &err), "our own XML parses back");
     check(back.stringValue("Request") == "Pair" && back.stringValue("ProtocolVersion") == "2",
-          "往返值一致");
+          "round-trip values match");
 
-    // 空 DN 的证书要放进 <data>，先确认 base64 编解码在长数据上没问题
+    // The empty-DN cert goes into <data>; first confirm base64 encode/decode handles long data
     std::vector<uint8_t> big(1000);
     for (size_t i = 0; i < big.size(); ++i) big[i] = uint8_t(i * 7 + 3);
     core::usb::Plist d = core::usb::Plist::dict();
     d.set("D", core::usb::Plist::data(big));
     core::usb::Plist d2;
-    check(core::usb::Plist::parse(d.toXml(), &d2, &err), "1KB <data> 往返");
+    check(core::usb::Plist::parse(d.toXml(), &d2, &err), "1KB <data> round-trip");
     const core::usb::Plist* dv = d2.find("D");
-    check(dv != nullptr && dv->asData() == big, "1KB <data> 内容一致");
+    check(dv != nullptr && dv->asData() == big, "1KB <data> content matches");
 }
 
-// ------------------------------------------------------------- ② 证书 ----
+// ------------------------------------------------------------- ② Certificates ----
 
 X509* pemToX509(const std::string& pem)
 {
@@ -124,7 +124,7 @@ X509* pemToX509(const std::string& pem)
     return x;
 }
 
-/// 取扩展的 critical 位。返回 false = 没有这条扩展。
+/// Fetch an extension's critical bit. Returns false = the extension is absent.
 bool extCritical(X509* x, int nid, bool* critical)
 {
     int crit = -1;
@@ -135,7 +135,7 @@ bool extCritical(X509* x, int nid, bool* critical)
     return true;
 }
 
-/// 把公钥编成 PKCS#1 RSAPublicKey DER（跟手机给的那个格式对齐）
+/// Encode the public key as PKCS#1 RSAPublicKey DER (matching the format the phone gives)
 std::vector<uint8_t> pkcs1PublicDer(EVP_PKEY* key)
 {
     std::vector<uint8_t> der;
@@ -156,9 +156,9 @@ std::vector<uint8_t> pkcs1PublicDer(EVP_PKEY* key)
 
 void testCerts()
 {
-    std::printf("\n=== ② 配对证书结构 ===\n");
+    std::printf("\n=== ② Pairing certificate structure ===\n");
 
-    // 假造一把"手机公钥"：就是一把普通 RSA 公钥的 PKCS#1 编码
+    // Fake a "phone public key": just an ordinary RSA public key in PKCS#1 encoding
     EVP_PKEY* phoneKey = nullptr;
     {
         EVP_PKEY_CTX* c = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
@@ -168,10 +168,10 @@ void testCerts()
         EVP_PKEY_CTX_free(c);
     }
     const std::vector<uint8_t> phonePkcs1 = pkcs1PublicDer(phoneKey);
-    check(!phonePkcs1.empty(), "造出一把 2048 位测试公钥");
+    check(!phonePkcs1.empty(), "generate a 2048-bit test public key");
 
-    // 真机实测：GetValue(DevicePublicKey) 回来的是 **PEM 文本**，不是文档说的 PKCS#1 DER。
-    // 两种形态都必须能吃下 —— 这条回归踩过一次，别再靠真机才发现。
+    // Observed on a real device: GetValue(DevicePublicKey) returns **PEM text**, not the documented PKCS#1 DER.
+    // Both forms must be accepted -- we hit this regression once; don't wait for a real device to catch it again.
     std::string phonePem;
     {
         BIO* b = BIO_new(BIO_s_mem());
@@ -182,74 +182,74 @@ void testCerts()
         BIO_free(b);
     }
     EVP_PKEY_free(phoneKey);
-    check(!phonePem.empty(), "同一把公钥也能编成 PEM 文本");
+    check(!phonePem.empty(), "same public key also encodes as PEM text");
 
     core::usb::WiredPairIdentity id;
     std::string                 err;
     const int                   before = g_bad;
     check(core::usb::makeWiredPairIdentity(phonePkcs1, "", "", &id, &err),
-          "生成 root/host/device 三张证书（" + err + "）");
-    if (g_bad != before) return;  // 证书都没造出来，后面的检查没意义
+          "generate root/host/device certificates (" + err + ")");
+    if (g_bad != before) return;  // no certs were created, so further checks are pointless
 
     {
         core::usb::WiredPairIdentity id2;
         std::string                  err2;
         const std::vector<uint8_t>   pemBytes(phonePem.begin(), phonePem.end());
         check(core::usb::makeWiredPairIdentity(pemBytes, "", "", &id2, &err2),
-              "PEM 形态的手机公钥也能用（" + err2 + "）");
+              "phone public key in PEM form also works (" + err2 + ")");
         X509*     d2 = pemToX509(id2.deviceCertPem);
         EVP_PKEY* dp = d2 != nullptr ? X509_get0_pubkey(d2) : nullptr;
         check(dp != nullptr && pkcs1PublicDer(dp) == phonePkcs1,
-              "PEM 与 PKCS#1 两条路得到的是同一把公钥");
+              "PEM and PKCS#1 paths yield the same public key");
         if (d2 != nullptr) X509_free(d2);
     }
 
-    check(id.rootCertPem.rfind("-----BEGIN CERTIFICATE-----", 0) == 0, "证书是 CERTIFICATE PEM");
-    check(id.rootKeyPem.rfind("-----BEGIN PRIVATE KEY-----", 0) == 0, "私钥是 PKCS#8 PEM");
+    check(id.rootCertPem.rfind("-----BEGIN CERTIFICATE-----", 0) == 0, "certificate is CERTIFICATE PEM");
+    check(id.rootKeyPem.rfind("-----BEGIN PRIVATE KEY-----", 0) == 0, "private key is PKCS#8 PEM");
 
     std::string upper = id.hostId;
     for (char& c : upper) c = char(std::toupper(static_cast<unsigned char>(c)));
     check(id.hostId.size() == 36 && id.hostId == upper && id.hostId[8] == '-' &&
               id.hostId[13] == '-' && id.hostId[18] == '-' && id.hostId[23] == '-',
-          "HostID 是 36 位大写 UUID");
-    check(id.systemBuid != id.hostId && id.systemBuid.size() == 36, "SystemBUID 另给了一个");
+          "HostID is a 36-character uppercase UUID");
+    check(id.systemBuid != id.hostId && id.systemBuid.size() == 36, "SystemBUID is provided separately");
 
     X509* root = pemToX509(id.rootCertPem);
     X509* host = pemToX509(id.hostCertPem);
     X509* dev = pemToX509(id.deviceCertPem);
-    check(root && host && dev, "三张证书都能重新读出来");
+    check(root && host && dev, "all three certificates can be re-read");
     if (!root || !host || !dev) return;
 
-    check(ASN1_INTEGER_get(X509_get_serialNumber(root)) == 0, "serial 是 0");
-    check(X509_NAME_entry_count(X509_get_subject_name(root)) == 0, "subject DN 是空的");
-    check(X509_NAME_entry_count(X509_get_issuer_name(root)) == 0, "issuer DN 是空的");
-    check(X509_get_version(root) == 2, "是 v3 证书");
+    check(ASN1_INTEGER_get(X509_get_serialNumber(root)) == 0, "serial is 0");
+    check(X509_NAME_entry_count(X509_get_subject_name(root)) == 0, "subject DN is empty");
+    check(X509_NAME_entry_count(X509_get_issuer_name(root)) == 0, "issuer DN is empty");
+    check(X509_get_version(root) == 2, "is a v3 certificate");
 
-    // 有效期跨度：正好 10 年
+    // Validity span: exactly 10 years
     int days = 0, secs = 0;
     ASN1_TIME_diff(&days, &secs, X509_get0_notBefore(root), X509_get0_notAfter(root));
-    check(days == 3650, "有效期正好 3650 天（实测 " + std::to_string(days) + "）");
+    check(days == 3650, "validity is exactly 3650 days (measured " + std::to_string(days) + ")");
 
     bool crit = false;
-    check(extCritical(root, NID_basic_constraints, &crit) && crit, "root 的 basicConstraints 是 critical");
-    check(X509_check_ca(root) == 1, "root 是 CA");
+    check(extCritical(root, NID_basic_constraints, &crit) && crit, "root basicConstraints is critical");
+    check(X509_check_ca(root) == 1, "root is a CA");
 
     check(extCritical(host, NID_basic_constraints, &crit) && crit,
-          "host 的 basicConstraints 是 critical");
-    check(X509_check_ca(host) == 0, "host 不是 CA");
+          "host basicConstraints is critical");
+    check(X509_check_ca(host) == 0, "host is not a CA");
     const uint32_t ku = X509_get_key_usage(host);
     check((ku & (KU_DIGITAL_SIGNATURE | KU_KEY_ENCIPHERMENT)) ==
               (KU_DIGITAL_SIGNATURE | KU_KEY_ENCIPHERMENT),
-          "host 的 keyUsage 含 digitalSignature + keyEncipherment");
+          "host keyUsage has digitalSignature + keyEncipherment");
 
-    check(!extCritical(host, NID_subject_key_identifier, &crit), "host **没有** SKI");
-    check(extCritical(dev, NID_subject_key_identifier, &crit) && !crit, "device 有 SKI 且非 critical");
-    check(X509_check_ca(dev) == 0, "device 不是 CA");
+    check(!extCritical(host, NID_subject_key_identifier, &crit), "host has **no** SKI");
+    check(extCritical(dev, NID_subject_key_identifier, &crit) && !crit, "device has SKI and it is non-critical");
+    check(X509_check_ca(dev) == 0, "device is not a CA");
 
-    // device 那张的公钥必须就是手机给的那把
+    // the device cert's public key must be exactly the one the phone supplied
     EVP_PKEY* devPub = X509_get0_pubkey(dev);
     check(devPub != nullptr && pkcs1PublicDer(devPub) == phonePkcs1,
-          "device 证书里的公钥 = 手机给的公钥");
+          "public key in the device certificate = the one the phone supplied");
 
     X509_free(root);
     X509_free(host);
@@ -258,7 +258,7 @@ void testCerts()
 
 // ------------------------------------------------------------- ③ TLS ----
 
-/// 把一条 fd 包成 IByteStream，好让 startTlsClient 有东西可套
+/// Wrap an fd as an IByteStream so startTlsClient has something to layer over
 class FdStream final : public core::IByteStream {
 public:
     explicit FdStream(int fd) : fd_(fd) {}
@@ -269,7 +269,7 @@ public:
         if (fd_ < 0) return -1;
         pollfd p{fd_, POLLIN, 0};
         const int r = ::poll(&p, 1, timeoutMs);
-        if (r == 0) return 0;   // 超时
+        if (r == 0) return 0;   // timeout
         if (r < 0) return -1;
         const ssize_t k = ::recv(fd_, buf, n, 0);
         return k < 0 ? -1 : int(k);
@@ -294,11 +294,11 @@ private:
     int fd_;
 };
 
-/// 假手机：用**同一套证书**接一次 TLS，收一句回一句
+/// Fake phone: accept one TLS connection using **the same certs** and reply once per message received
 void fakePhone(int fd, const std::string& certPem, const std::string& keyPem, bool* ok)
 {
     *ok = false;
-    // 客户端要是没来（比如那边证书就装不上），别让这条线程把 join 卡死
+    // If the client never shows up (e.g. its certs failed to load), don't let this thread hang join forever
     timeval tv{5, 0};
     ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
@@ -314,7 +314,7 @@ void fakePhone(int fd, const std::string& certPem, const std::string& keyPem, bo
     BIO_free(kb);
     if (x == nullptr || k == nullptr || SSL_CTX_use_certificate(ctx, x) != 1 ||
         SSL_CTX_use_PrivateKey(ctx, k) != 1) {
-        std::printf("    （假手机装证书失败：%s）\n", opensslError().c_str());
+        std::printf("    (fake phone failed to install certificate: %s)\n", opensslError().c_str());
         goto done;
     }
 
@@ -326,10 +326,10 @@ void fakePhone(int fd, const std::string& certPem, const std::string& keyPem, bo
             const int n = SSL_read(ssl, buf, sizeof buf);
             if (n > 0) {
                 if (SSL_write(ssl, "pong", 4) == 4) *ok = true;
-                std::printf("    （假手机收到 %d 字节：%.*s）\n", n, n, buf);
+                std::printf("    (fake phone received %d bytes: %.*s)\n", n, n, buf);
             }
         } else {
-            std::printf("    （假手机握手失败：%s）\n", opensslError().c_str());
+            std::printf("    (fake phone handshake failed: %s)\n", opensslError().c_str());
         }
         SSL_free(ssl);
     }
@@ -342,7 +342,7 @@ done:
 
 void testTls()
 {
-    std::printf("\n=== ③ TLS 回环握手 ===\n");
+    std::printf("\n=== ③ TLS loopback handshake ===\n");
 
     core::usb::WiredPairIdentity id;
     std::string                 err;
@@ -357,27 +357,27 @@ void testTls()
     const std::vector<uint8_t> phonePkcs1 = pkcs1PublicDer(pk);
     EVP_PKEY_free(pk);
     if (!core::usb::makeWiredPairIdentity(phonePkcs1, "", "", &id, &err)) {
-        check(false, "造证书（" + err + "）");
+        check(false, "make certificate (" + err + ")");
         return;
     }
 
     int fds[2] = {-1, -1};
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
-        check(false, "socketpair 失败");
+        check(false, "socketpair failed");
         return;
     }
 
     bool serverOk = false;
-    // 客户端身份用 **root** —— 跟真机上保持一致，这点搞反了真机才会暴露
+    // Use **root** as the client identity -- matching the real device; getting this backwards only shows up on real hardware
     std::thread server(fakePhone, fds[1], id.rootCertPem, id.rootKeyPem, &serverOk);
 
     FdStream raw(fds[0]);
     auto     tls = core::usb::startTlsClient(raw, id.rootCertPem, id.rootKeyPem, &err);
-    check(tls != nullptr, "客户端握手完成（" + err + "）");
+    check(tls != nullptr, "client handshake completed (" + err + ")");
 
     if (tls != nullptr) {
         const char* ping = "ping";
-        check(tls->writeAll(reinterpret_cast<const uint8_t*>(ping), 4), "经 TLS 写出去");
+        check(tls->writeAll(reinterpret_cast<const uint8_t*>(ping), 4), "write through TLS");
 
         char   buf[64] = "";
         size_t got = 0;
@@ -387,22 +387,22 @@ void testTls()
             if (n < 0) break;
             if (n > 0) got += size_t(n);
         }
-        check(got == 4 && std::memcmp(buf, "pong", 4) == 0, "经 TLS 读回来");
+        check(got == 4 && std::memcmp(buf, "pong", 4) == 0, "read back through TLS");
     }
 
-    server.join();  // 假手机要么握完手退出，要么等客户端 close 后超时退出
-    check(serverOk, "服务端那一侧也认为握手成功");
+    server.join();  // the fake phone either finishes the handshake and exits, or exits on timeout after the client closes
+    check(serverOk, "server side also considers the handshake successful");
 }
 
 }  // namespace
 
-/// wired_probe --selftest 的入口
+/// Entry point for wired_probe --selftest
 int wiredSelfTest()
 {
-    std::printf("=== 有线链路离线自检（不需要手机）===\n\n");
+    std::printf("=== Wired link offline self-test (no phone needed) ===\n\n");
     testPlist();
     testCerts();
     testTls();
-    std::printf("\n%s（%d 项不通过）\n", g_bad == 0 ? "全部通过" : "有失败", g_bad);
+    std::printf("\n%s (%d checks failed)\n", g_bad == 0 ? "ALL PASSED" : "FAILURES", g_bad);
     return g_bad == 0 ? 0 : 1;
 }

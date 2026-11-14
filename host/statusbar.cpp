@@ -8,8 +8,8 @@ namespace allplay {
 
 namespace {
 
-// 候选字体（第一个能开的就用）。可用 ALLPLAY_FONT 环境变量覆盖。
-// index：.ttc 里的第几个字面（Noto Sans CJK 的 SC 是 2 号；JP=0/KR=1/SC=2/TC=3/HK=4）。
+// Font candidates (the first one that opens is used). Can be overridden by the ALLPLAY_FONT env var.
+// index: which face inside the .ttc (Noto Sans CJK's SC is #2; JP=0/KR=1/SC=2/TC=3/HK=4).
 struct FontFile { const char* path; int index; };
 
 const FontFile kMonoCandidates[] = {
@@ -28,7 +28,7 @@ const FontFile kSansCandidates[] = {
     {"/System/Library/Fonts/Helvetica.ttc", 0},
 };
 
-// 中文界面：优先带全 CJK 字形的字体（它们也含拉丁字母，不必再拼 DejaVu）
+// Chinese UI: prefer fonts with the full CJK glyph set (they also cover Latin, so DejaVu need not be combined in)
 const FontFile kCjkCandidates[] = {
     {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", 2},   // SC
     {"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", 0},
@@ -37,7 +37,7 @@ const FontFile kCjkCandidates[] = {
     {"/System/Library/Fonts/STHeiti Light.ttc", 0},
 };
 
-// 粗体优先用真粗体字面（比 TTF 的合成粗体好看）；拿不到再退到合成
+// Bold prefers a real bold face (looks better than TTF's synthetic bold); fall back to synthetic if unavailable
 const FontFile kBoldCandidates[] = {
     {"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 0},
     {"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 0},
@@ -45,8 +45,8 @@ const FontFile kBoldCandidates[] = {
 
 const FontFile kCjkBoldCandidates[] = {
     {"/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 2},
-    // 冬青黑体的 .ttc 里：0=W3、1=Interface W3、**2=W6**、3=Interface W6。
-    // 以前写的 1 其实是常规体，所以 Mac 上的"粗体"根本没粗（用户："bold 再加粗一些"）。
+    // In Hiragino Sans GB's .ttc: 0=W3, 1=Interface W3, **2=W6**, 3=Interface W6.
+    // The 1 written before was actually the regular face, so the Mac "bold" was not bold at all (user: "make bold bolder").
     {"/System/Library/Fonts/Hiragino Sans GB.ttc", 2},
 };
 
@@ -57,7 +57,7 @@ bool openFont(const FontFile& f, int px, TTF_Font** out)
     return *out != nullptr;
 }
 
-/// 按族挑一个字体：粗体先找真粗体字面，找不到就用主字体 + 合成粗体
+/// Pick a font by family: for bold, first look for a real bold face, else use the main font + synthetic bold
 TTF_Font* openFace(int px, FontFace face, bool bold, bool* realBold)
 {
     const bool cjk = (face == FontFace::CJK);
@@ -83,13 +83,13 @@ TTF_Font* openFace(int px, FontFace face, bool bold, bool* realBold)
             if (openFont(list[i], px, &f)) break;
         }
     }
-    // 只有拿不到真粗体时才合成（合成加粗会糊边，能开真粗体字面就别用）
+    // Synthesize only when no real bold face is available (synthetic bold blurs the edges; use a real bold face whenever possible)
     if (f && bold && !*realBold) TTF_SetFontStyle(f, TTF_STYLE_BOLD);
     return f;
 }
 
-// TTF_Init/TTF_Quit 是库级全局状态：多个 TextRenderer 共存时必须引用计数，
-// 否则先析构的那个会把还活着的那些字体一起带走。
+// TTF_Init/TTF_Quit is library-level global state: with multiple TextRenderers alive it must be reference-counted,
+// otherwise the first one destroyed takes the still-live fonts down with it.
 int g_ttfRefs = 0;
 
 }  // namespace
@@ -111,14 +111,14 @@ void TextRenderer::clearCache() const
     for (CachedText& e : cache_)
         if (e.tex) SDL_DestroyTexture(e.tex);
     cache_.clear();
-    ink_.clear();          // 墨迹量的是"当前字号"下的行内偏移，字号变了就作废
+    ink_.clear();          // ink measurements are in-line offsets at the "current font size"; a size change invalidates them
 }
 
 bool TextRenderer::init(int pixelHeight, FontFace face, bool bold)
 {
     if (!font_) {
         if (g_ttfRefs == 0 && TTF_Init() != 0) {
-            std::fprintf(stderr, "[statusbar] TTF_Init 失败：%s（状态栏不显示文本）\n",
+            std::fprintf(stderr, "[statusbar] TTF_Init failed: %s (status bar will not show text)\n",
                          TTF_GetError());
             return false;
         }
@@ -133,13 +133,13 @@ bool TextRenderer::init(int pixelHeight, FontFace face, bool bold)
     if (env && *env) {
         font_ = TTF_OpenFont(env, pixelHeight);
         if (!font_)
-            std::fprintf(stderr, "[statusbar] ALLPLAY_FONT=\"%s\" 打不开：%s\n",
+            std::fprintf(stderr, "[statusbar] Cannot open ALLPLAY_FONT=\"%s\": %s\n",
                          env, TTF_GetError());
     }
     if (!font_) font_ = openFace(pixelHeight, face, bold, &hasRealBold_);
     if (!font_) {
-        std::fprintf(stderr, "[statusbar] 找不到可用字体（装有 fonts-dejavu-core 吗？）"
-                             "—— 状态栏降级为色块\n");
+        std::fprintf(stderr, "[statusbar] No usable font found (is fonts-dejavu-core installed?)"
+                             " — status bar degraded to color blocks\n");
         return false;
     }
     lh_ = TTF_FontLineSkip(font_);
@@ -150,9 +150,9 @@ void TextRenderer::setRasterScale(double scale)
 {
     if (scale < 0.25) scale = 0.25;
     if (scale > 4.0)  scale = 4.0;
-    if (std::abs(scale - scale_) < 0.02) return;   // 缩放没变就不用重开字体
+    if (std::abs(scale - scale_) < 0.02) return;   // scale unchanged, no need to reopen the font
 
-    clearCache();          // 字号变了，缓存里的字形纹理全作废
+    clearCache();          // font size changed; all cached glyph textures are invalid
     ++gen_;
     if (hi_) {
         TTF_CloseFont(hi_);
@@ -172,8 +172,8 @@ bool TextRenderer::inkSpan(const std::string& s, double* top, double* bot) const
     for (const InkSpan& e : ink_)
         if (e.gen == gen_ && e.s == s) { *top = e.top; *bot = e.bot; return true; }
 
-    // 渲染一次、扫 alpha 找墨迹的上下沿。结果按 (字符串, 字号代) 缓存 —— 启动页
-    // 每帧都问同一批字符串，真正扫描只发生一次。
+    // Render once and scan alpha to find the ink's top/bottom edges. Results are cached by (string, font generation) -- the launcher
+    // asks about the same batch of strings every frame, and the actual scan happens only once.
     SDL_Surface* surf = TTF_RenderUTF8_Blended(f, s.c_str(), SDL_Color{255, 255, 255, 255});
     if (!surf) return false;
 
@@ -188,9 +188,9 @@ bool TextRenderer::inkSpan(const std::string& s, double* top, double* bot) const
         if (SDL_MUSTLOCK(surf)) SDL_UnlockSurface(surf);
     }
     SDL_FreeSurface(surf);
-    if (y1 < y0) return false;      // 空行（全是空白）
+    if (y1 < y0) return false;      // empty line (all whitespace)
 
-    // 表面是"设备像素"栅格化的，换算回设计稿坐标（draw() 也按同一比例贴回去）
+    // The surface is rasterized at "device pixels"; convert back to design coordinates (draw() maps back at the same ratio)
     const double sc = hi_ ? scale_ : 1.0;
     InkSpan e;
     e.s   = s;
@@ -209,7 +209,7 @@ int TextRenderer::centeredY(int top, int h, const std::string& s) const
     double t = 0.0, b = 0.0;
     if (inkSpan(s, &t, &b))
         return int(std::lround(top + h / 2.0 - (t + b) / 2.0));
-    return top + (h - lineHeight()) / 2;    // 量不出来就退回行框居中
+    return top + (h - lineHeight()) / 2;    // fall back to line-box centering if it cannot be measured
 }
 
 void TextRenderer::draw(SDL_Renderer* r, int x, int y, const std::string& s,
@@ -218,8 +218,8 @@ void TextRenderer::draw(SDL_Renderer* r, int x, int y, const std::string& s,
     TTF_Font* f = hi_ ? hi_ : font_;
     if (!f || s.empty()) return;
 
-    // 字形纹理缓存：启动页每帧重画，但同样的字/颜色只有一份 —— 每帧都
-    // TTF_RenderUTF8_Blended 一遍 CJK 是 CPU 90% 的来源。
+    // Glyph texture cache: the launcher redraws every frame, but each text/color has only one copy -- calling
+    // TTF_RenderUTF8_Blended on CJK every frame is the source of 90% CPU.
     for (const CachedText& e : cache_) {
         if (e.gen == gen_ && e.s == s && e.c.r == c.r && e.c.g == c.g &&
             e.c.b == c.b && e.c.a == c.a) {
@@ -254,7 +254,7 @@ void TextRenderer::draw(SDL_Renderer* r, int x, int y, const std::string& s,
     SDL_RenderCopy(r, tex, nullptr, &dst);
 
     cache_.push_back(std::move(e));
-    if (cache_.size() > 48) clearCache();   // 状态文字每 600ms 变一次，够用
+    if (cache_.size() > 48) clearCache();   // the status text changes every 600 ms, so this is plenty
 }
 
 int TextRenderer::measure(const std::string& s) const
@@ -293,7 +293,7 @@ SDL_Color StatusBar::stateColor(LinkState s) const
 
 void StatusBar::draw(SDL_Renderer* r, const SharedStatus& st) const
 {
-    // 背板 + 顶边
+    // Backing panel + top edge
     SDL_SetRenderDrawColor(r, 0x22, 0x22, 0x26, 255);
     SDL_Rect bg{0, y_, w_, h_};
     SDL_RenderFillRect(r, &bg);
@@ -304,12 +304,12 @@ void StatusBar::draw(SDL_Renderer* r, const SharedStatus& st) const
     const SDL_Color sc = stateColor(s);
     const int   midY = y_ + h_ / 2;
 
-    // 状态点（8x8 方块；字体缺失时这就是全部状态显示）
+    // Status dot (8x8 square; when the font is missing this is the entire status display)
     SDL_SetRenderDrawColor(r, sc.r, sc.g, sc.b, 255);
     SDL_Rect dot{10, midY - 4, 8, 8};
     SDL_RenderFillRect(r, &dot);
 
-    // 左侧：状态文本（Error 时带原因，过长就截断）
+    // Left: status text (with the reason on Error, truncated if too long)
     std::string left = toString(s);
     if (s == LinkState::Error) {
         std::string msg = st.error();
@@ -319,27 +319,27 @@ void StatusBar::draw(SDL_Renderer* r, const SharedStatus& st) const
         }
     }
     const SDL_Color fg{230, 230, 230, 255};
-    const int textY = text_.centeredY(y_, h_, left);   // 左右两段共用，保持共基线
+    const int textY = text_.centeredY(y_, h_, left);   // shared by both segments to keep a common baseline
     text_.draw(r, 24, textY, left, fg);
 
-    // 右侧：分辨率 | fps | 帧数
+    // Right: resolution | fps | frame count
     char buf[128];
     const int vw = st.videoW.load(std::memory_order_relaxed);
     const int vh = st.videoH.load(std::memory_order_relaxed);
     const int fps = st.fps.load(std::memory_order_relaxed);
     const uint64_t frames = st.frames.load(std::memory_order_relaxed);
-    // 音频只在真有流时才出现（没音频流时显示 0 只会让人以为坏了）
+    // Audio appears only when a stream actually exists (showing 0 with no audio stream just looks broken)
     const uint64_t aframes = st.audioFrames.load(std::memory_order_relaxed);
     const uint64_t aunder  = st.audioUnderruns.load(std::memory_order_relaxed);
     char abuf[48] = "";
     if (aframes > 0)
         std::snprintf(abuf, sizeof abuf, " | a:%llu%s", static_cast<unsigned long long>(aframes),
-                      aunder > 0 ? "!" : "");   // "!" = 音频缓冲欠载过
+                      aunder > 0 ? "!" : "");   // "!" = the audio buffer has underrun
     if (vw > 0 && vh > 0) {
         std::snprintf(buf, sizeof buf, "%dx%d | %d fps | %llu frames%s",
                       vw, vh, fps, static_cast<unsigned long long>(frames), abuf);
     } else {
-        std::snprintf(buf, sizeof buf, "allplay (M0: 显示管线未接入)");
+        std::snprintf(buf, sizeof buf, "allplay (M0: display pipeline not connected)");
     }
     const std::string right = buf;
     const int rightW = text_.measure(right);

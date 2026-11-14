@@ -1,16 +1,16 @@
 /**
  * @file   plist_xml.h
- * @brief  极简 XML plist（lockdown 那条通道只吃 XML）
+ * @brief  Minimal XML plist (the lockdown channel only accepts XML)
  * @author blt
  */
 
 // ============================================================================
-// core/usb/plist_xml.h —— 极简 XML plist
+// core/usb/plist_xml.h — minimal XML plist
 // ============================================================================
-// lockdown 的 plist 通道用的是 **XML plist**，不是本项目 core/bplist 那套二进制 plist，
-// 两者不能混用。这里只实现 lockdown 用得到的那几个类型（dict/array/string/integer/
-// data/bool/real）与最小的 XML 子集：不处理命名空间、不处理 CDATA、不做 DTD 校验。
-// 够用就好 —— 多引一个 XML 库不划算。
+// The lockdown plist channel uses **XML plist**, not the binary plist in core/bplist;
+// the two are not interchangeable. This implements only the types lockdown needs (dict/array/string/integer/
+// data/bool/real) and a minimal XML subset: no namespaces, no CDATA, no DTD validation.
+// Just enough — pulling in an XML library is not worth it.
 #pragma once
 
 #include <cstdint>
@@ -24,7 +24,7 @@ class Plist {
 public:
     enum class Type { Null, Bool, Integer, Real, String, Data, Dict, Array };
 
-    using Dict = std::vector<std::pair<std::string, Plist>>;  // 保序：发出去的请求要人能读
+    using Dict = std::vector<std::pair<std::string, Plist>>;  // order-preserving: outgoing requests must be human-readable
     using Array = std::vector<Plist>;
 
     Plist() = default;
@@ -44,7 +44,7 @@ public:
     bool                        asBool(bool def = false) const;
     int64_t                     asInteger(int64_t def = 0) const;
     double                      asReal(double def = 0.0) const;
-    const std::string&          asString() const;  ///< 不是字符串时返回空串
+    const std::string&          asString() const;  ///< returns an empty string when not a string
     const std::vector<uint8_t>& asData() const;
 
     const Dict&  items() const { return dict_; }
@@ -52,14 +52,14 @@ public:
     const Array& elements() const { return arr_; }
     Array&       elements() { return arr_; }
 
-    /// dict 查 key；不是 dict 或没这个 key 返回 nullptr
+    /// Look up a key in a dict; returns nullptr if not a dict or the key is absent
     const Plist* find(const std::string& key) const;
 
     std::string stringValue(const std::string& key, const std::string& def = "") const;
     int64_t     intValue(const std::string& key, int64_t def = 0) const;
     bool        boolValue(const std::string& key, bool def = false) const;
 
-    /// 只在 dict 上有效：已有同 key 就覆盖，没有就追加
+    /// Only valid on dicts: overwrite an existing key, append if absent
     void set(const std::string& key, Plist v);
 
     std::string toXml() const;

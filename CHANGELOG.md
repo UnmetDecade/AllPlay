@@ -1,451 +1,611 @@
-# 更新日志
+# Changelog
 
-版本号对应**平台能力**：每个版本打通一个平台的端到端渲染。
-协议核心（`core/`）是所有平台共用的那一份，不在版本之间分叉。
+<div align="left"><b>English</b> · <a href="CHANGELOG.zh-CN.md">简体中文</a></div>
 
-格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
+Version numbers correspond to **platform capability**: each version gets one platform to
+end-to-end rendering.
+The protocol core (`core/`) is the single copy shared by all platforms and never forks
+between versions.
 
----
-
-## [v1.1] — 多协议后端骨架 · 2026-11-08
-
-把 `core/` 拆成"协议后端"结构：CarPlay 成为第一个后端，Android Auto 有线模块落地，
-CarLife / HiCar 先占接口。宿主行为不变（仍走原路径），桌面构建与现有自测全绿。
-
-### 新增
-
-- **协议后端接口**（`core/projection/backend.h`）：`IProjectionBackend` /
-  `IProjectionSession` / `IProjectionSink` / `BackendRegistry`。宿主只认协议中立的
-  目标、输入事件与媒体配置，不再直接碰 iAP2 / RTSP；迁移方案见
-  `docs/projection-backend.md`。
-- **CarPlay 后端**（`core/projection/carplay/backend_carplay.*`）：无线（bt_trigger +
-  Receiver）与有线（usbmux / WiredControl / iAP2）两种会话都包进同一接口；平台能力经
-  `WiredPorts` 注入，core 里没有平台头。
-- **Android Auto 有线**（`core/projection/androidauto/`）：AOAP 51/52/53 → AAP VERSION →
-  TLS 1.2（记录装在 0x0003）→ 服务发现 → 通道 / AV SETUP / 媒体流。自带 protobuf wire
-  子集与 Annex-B → avcC 合成，PCM 小端转大端后交给宿主；实现 AV_MEDIA_ACK 流控。
-  `platform/posix/aa_usb_libusb.cpp` 提供 Linux/macOS 共用的 libusb 传输层。
-- **CarLife / HiCar 占位后端**：接口齐全，`probe()` 返回空、`connect()` 报未实现。
-- **自测** `tools/aa_wire_test.cpp`：AAP 分帧/拼帧、6 字节长度字段、半帧、protobuf 编解码。
-
-### 变更
-
-- `core/airplay` / `core/iap2` / `core/mfi` / `core/usb` / `core/bt` 整体迁到
-  `core/projection/carplay/`（纯 `git mv` + include 路径兼容），协议代码零改动。
-- 鸿蒙与 Android 的构建文件跟着新路径更新。
-
-### 已知限制
-
-- 宿主仍走原来的 `Receiver` / `WiredTask` / `BtTask`，尚未切到 `BackendRegistry`；
-  Android Auto 也还没有 UI 入口。
-- Android Auto 只完成协议与传输层实现，**未上真机验证**；无线 AA、CarLife、HiCar 未实现。
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [v1.0] — 真机稳定性 · 2026-11-06
+## [v1.1] — Multi-protocol backend skeleton · 2026-11-08
 
-iPhone SE2 / 16 连续上手用下来修的一批问题。
+Split `core/` into a "protocol backend" structure: CarPlay becomes the first backend, the
+wired Android Auto module lands, and CarLife / HiCar reserve their interfaces. Host
+behavior is unchanged (still the original path); the desktop build and existing self-tests
+are all green.
 
-### 修复
+### Added
 
-- **一直滑动会卡死**（`core/airplay/event_channel.cpp`）：触摸原来是 UI 线程直接
-  加密 + `send()`，手机忙着重绘时发送缓冲写满，UI 线程就卡在系统调用里；这条通道的
-  读线程（要给手机回 ACK）也被同一把锁挡着。现在拆出独立写线程，调用方只入队；
-  触摸按"位置快照"处理，新的直接顶掉还没发出去的旧的。
-- **开流那一下的噪音**：手机开流时先囤约两秒再一口气吐过来，把 1s 的环形池撑爆后，
-  旧逻辑"超出多少丢多少"，连续几十个 9~21ms 的断口连成一片。改成一次切到 70%，
-  一个断口代替几十个。
-- **开流起手的卡顿**：头一拍水位从 250ms 提到 800ms，开声后再降回续播水位，
-  扛住手机开流时的第一次停顿。
-- **听歌时偶尔卡一下（没有任何操作）**：手机送音频是**成团**的——实测连续两包之间
-  能空 569ms，RTP 序号连着、一个包都没丢，只是没发。水位低于这个空档就会每来一波
-  抽干一次。环形池 1s→1.5s、续播水位 250ms→700ms（569ms + 余量），按实测空档定，
-  不再拍脑袋定。
-- **0x4301 之后手机不拨号**：iOS 有概率不主动连 AirPlay 端口（实测空了 14.5 秒，
-  黑屏那几次干脆一直没连），只有人工关开一次 Wi-Fi 才会重连。现在 3 秒没等到连接
-  就重发 `0x5703 + 0x4301`，最多催两次。
+- **Protocol backend interface** (`core/projection/backend.h`): `IProjectionBackend` /
+  `IProjectionSession` / `IProjectionSink` / `BackendRegistry`. The host only knows
+  protocol-neutral targets, input events, and media configuration, and no longer touches
+  iAP2 / RTSP directly; see `docs/projection-backend.md` for the migration plan.
+- **CarPlay backend** (`core/projection/carplay/backend_carplay.*`): both wireless
+  (bt_trigger + Receiver) and wired (usbmux / WiredControl / iAP2) sessions are wrapped in
+  the same interface; platform capabilities are injected through `WiredPorts`, and core
+  contains no platform headers.
+- **Wired Android Auto** (`core/projection/androidauto/`): AOAP 51/52/53 → AAP VERSION →
+  TLS 1.2 (records wrapped in 0x0003) → service discovery → channels / AV SETUP / media
+  streams. Includes a protobuf wire subset and Annex-B → avcC synthesis; PCM is converted
+  from little-endian to big-endian before handing it to the host; implements AV_MEDIA_ACK
+  flow control. `platform/posix/aa_usb_libusb.cpp` provides the libusb transport shared by
+  Linux/macOS.
+- **CarLife / HiCar placeholder backends**: interfaces complete; `probe()` returns empty
+  and `connect()` reports not implemented.
+- **Self-test** `tools/aa_wire_test.cpp`: AAP framing/deframing, 6-byte length field,
+  half-frames, protobuf encode/decode.
 
-### 新增
+### Changed
 
-- **Wi-Fi 加密方式可选**（设置页）：无密码 / WEP / WPA2 / WPA3，`0x5703` 与
-  `0x4301` 里的 `securityType` 跟着走（以前写死 2）；开放网络不再要求填密码。
+- `core/airplay` / `core/iap2` / `core/mfi` / `core/usb` / `core/bt` were moved wholesale
+  into `core/projection/carplay/` (pure `git mv` + compatible include paths), with zero
+  protocol code changes.
+- HarmonyOS and Android build files were updated to follow the new paths.
 
-### 诊断
+### Known limitations
 
-- 音频侧补齐了四路信号：收包空档（>80ms，带 RTP 序号差）、环形池溢出、
-  **每一次**欠载、声卡回调停摆（>300ms）与系统打断/报错。
-
----
-
-## [v0.9] — 方控接口 · 2026-11-06
-
-`core` 里立起方控（方向盘媒体键）这一层：上层把按键放进队列，无线/有线两条 iAP2 链路
-各自编码成 HID 报表发给手机。接口与编码已自测通过；`0x4E0x` 消息号、报表格式和按键来源
-都还等真机与各平台去接。
-
-### 新增
-
-- **方控接口**（`core/port/control.h`）：`MediaKey`（播放/暂停、上一首/下一首、Siri、
-  接听/挂断…）+ 线程安全的 `MediaKeyQueue` + `IMediaKeySink`。方向是**车机 → 手机**，
-  与 `media.h` 相反。按键从哪来（界面按钮、系统媒体键、将来的硬件驱动）由上层实现。
-- **HID 编码**（`core/iap2/hid.h`）：`MediaKey` → HID usage（消费者页 0x0C / 电话页 0x0B）
-  → 报表字节 → `0x4E02` 报文。无线的 `WirelessTrigger` 在 `run()` 里排干队列，
-  有线的 `WiredLink` 提供 `sendMediaKey` / `pumpMediaKeys` 由调用方在 pump 之间调用。
-  **`0x4E0x` 这一族消息号与报表格式尚未在真机上核验**，接真机时用抓包对一遍（要改只有一处）。
-- 自测补 ①b 段：usage 映射、按下/抬起报表、报文往返、队列 FIFO 与溢出。
+- The host still uses the original `Receiver` / `WiredTask` / `BtTask` and has not
+  switched to `BackendRegistry`; Android Auto also has no UI entry point.
+- Android Auto has only the protocol and transport layers implemented, **not yet verified
+  on hardware**; wireless AA, CarLife, and HiCar are not implemented.
 
 ---
 
-## [v0.8] — 鸿蒙音频出声 · 2026-11-06
+## [v1.0] — Real-device stability · 2026-11-06
 
-Mate 60 上 CarPlay 的声音出来了：手机建的音频流（type=102、AAC-LC、48kHz 立体声、裸帧）
-在本机解码后由系统声卡播放。视频、触摸、音频三条流第一次同时跑通。
+A batch of fixes from continuous hands-on use with an iPhone SE2 / 16.
 
-### 新增
+### Fixed
 
-- **音频输出**（`harmony/entry/src/main/cpp/harmony_audio.cpp`）：`core::IAudioOutput` 的鸿蒙实现。
-  解码用 `OH_AudioCodec` 的**同步模式**（`OH_MD_KEY_ENABLE_SYNC_MODE=1`，默认的异步模式下
-  `QueryInputBuffer` 一律返回 `AV_ERR_OPERATE_NOT_PERMIT`），播放用 `OHAudio` 渲染器的
-  `OnWriteData` 回调。解码在两把锁的里侧、播放回调只碰环形池，10ms 的解码查询永远堵不到声卡。
+- **Swiping continuously would freeze** (`core/airplay/event_channel.cpp`): touch
+  previously encrypted and called `send()` directly on the UI thread; when the phone was
+  busy repainting, the send buffer filled up and the UI thread blocked in the syscall. The
+  read thread on this channel (which must ACK the phone) was blocked by the same lock.
+  Now there is a dedicated write thread and callers only enqueue; touch is treated as a
+  "position snapshot", and a new one directly replaces an old one that has not been sent
+  yet.
+- **Noise when the stream opens**: when the phone opens the stream it buffers about two
+  seconds and then delivers it all at once, which overflows the 1s ring pool; the old
+  logic "dropped whatever exceeded the limit", and dozens of 9–21ms gaps in a row merged
+  into one long gap. Now it switches to 70% in one step, replacing dozens of gaps with
+  one.
+- **Stutter at the start of streaming**: the initial water level was raised from 250ms to
+  800ms, then lowered back to the resumption level once sound starts, absorbing the
+  phone's first pause when it opens the stream.
+- **Occasional hitch while listening to music (with no interaction)**: the phone sends
+  audio in **bursts** — measured gaps of up to 569ms between consecutive packets, with RTP
+  sequence numbers contiguous and not a single packet lost, just not sent. When the water
+  level is below this gap, it drains once per burst. Ring pool 1s→1.5s, resumption water
+  level 250ms→700ms (569ms + margin), set from measured gaps instead of guesswork.
+- **Phone does not dial after 0x4301**: iOS sometimes does not proactively connect to the
+  AirPlay port (measured: 14.5 seconds idle, and in the black-screen cases it never
+  connected at all); only manually toggling Wi-Fi once would make it reconnect. Now if no
+  connection arrives within 3 seconds, resend `0x5703 + 0x4301`, at most twice.
 
-### 修复
+### Added
 
-- **裸 AAC 帧必须补 ADTS 头**：`OH_MD_KEY_AAC_IS_ADTS=0` 是 LATM，喂裸帧时解码器只吃不吐
-  （实测 3000 包解出 0 帧）。改成每帧前补 7 字节 ADTS 头、该键置 1，48 帧解出 47 帧；
-  带外 ASC（`OH_MD_KEY_CODEC_CONFIG`）那条路在同一台机上解出 0 帧。
-- **"先接住不播"变成能播**：此前 `feed()` 是空实现，现在整条链路走通。
-- **卡顿三连**：回调块从 93ms 钉小又放开、续播水位低于一次回调、`QueryOutputBuffer` 用 0 超时
-  导致 PCM 积在解码器里——三处合起来表现为持续爆点（600 次回调欠载 193 次）。
-  现在环形池 700ms + 续播水位 250ms + 2ms 输出轮询，实测欠载降到 0～3/600。
-- **滑动时偶发卡顿**是发送端的问题：同一台 Mate 60 换 iPhone 16 作为发送端后不再复现，
-  iPhone 13 mini 在滑动时自身掉帧。
+- **Selectable Wi-Fi security type** (settings page): none / WEP / WPA2 / WPA3, with
+  `securityType` in `0x5703` and `0x4301` following it (previously hard-coded to 2); open
+  networks no longer require a password.
 
-### 已知限制
+### Diagnostics
 
-- **iOS 13 及更老系统连不上**：iPhone SE2（iOS 13）在 0x1D01 识别这一步被回 0x1D03，
-  报的参数 id 含 6/7/10。全量消息清单、只报 CarPlay 必需的最小集、完全不报清单三组都试过，
-  连报空了也被拒——是手机侧不接受，不是报文格式问题（同样的字节 iOS 16/18 收）。
-  iOS 13 的 SE2 升级系统后可正常连；代码里保留了"被拒就逐级收窄重试"的兜底。
-
-## [v0.7] — HarmonyOS 无线真机端到端 · 2026-11-05
-
-鸿蒙（**Mate 60**）上也走通了：蓝牙 iAP2 把 iPhone 叫醒 → 同网 Wi-Fi → RTSP 协商 →
-**硬解上屏、横屏铺满、触摸可点**。协议核心一行没分叉，`core/airplay` 原样经 NAPI 编进 HAP。
-
-### 新增
-
-- **鸿蒙平台**：ArkTS + hvigor 工程（`harmony/`）。蓝牙 SPP（`socket.sppConnect`）、mDNS 广播、
-  屏幕尺寸走系统 API；协议全部在 `core/`，由 `liballplay_core.so` 经 NAPI 桥接。
-- **AVCodec 硬解上屏**（`harmony_decoder.cpp`）：`OH_VideoDecoder_CreateByMime` + 回调式输入输出，
-  `RenderOutputBuffer` 直接画到 `XComponent` 的 surface（surface id → `OHNativeWindow`）。
-- **全屏**：`/info` 里协商的显示分辨率改成**按屏幕长宽比**（1080p 档、宽封 1920，实测 1920×868），
-  iPhone 会按这个尺寸重排 CarPlay 界面；会话进来转横屏，断开转回竖屏。
-- **触摸回传**：`XComponent.onTouch` → 归一化坐标 → 事件通道 HID `touchReport`（双触点）。
-- **构建脚本**：`scripts/build-ohos-openssl.sh`（交叉编译 OHOS OpenSSL）、
-  `scripts/sync-harmony-identity.sh`（把 `identity/` 临时拷进 HAP rawfile，仍在 `.gitignore`）。
-
-### 修复
-
-- **avcC 的 SPS/PPS 必须 in-band**：`OH_MD_KEY_CODEC_CONFIG` 在这台机的解码器上被忽略
-  （系统日志 `pps is null` / `EVNT_PARAMETER_SETS_LOST`），改成每个 IDR 前补一份 AnnexB。
-- **手机每 ~5 秒重发同一份 avcC**：原先每次重建解码器，参考链清空、画面周期性卡住；
-  改成按 `csd + 尺寸 + 编码类型` 比对，相同就跳过重建。
-- **横竖屏切换后画面停住**：转屏会重建 `XComponent`，旧的 `OHNativeWindow` 指向已回收的 surface。
-  surface id 变化时拆掉重建，并用上次的 csd 立刻恢复，不等手机重发配置。
-
-### 已知限制
-
-- **音频只接住不播**：`IAudioOutput` 收下数据后丢弃，鸿蒙侧还没接 AudioRenderer。
-- **流式播放时没有退出入口**：画面铺满整块屏，启动页上的"取消"被盖住，只能从手机或系统侧退出。
-- 设备选择与热点 SSID/密码未持久化，应用重启后要重新选一次。
+- The audio side now reports four additional signals: packet-arrival gap (>80ms, with RTP
+  sequence delta), ring-pool overflow, **every** underrun, audio-callback stall (>300ms),
+  and system interruption/errors.
 
 ---
 
-## [v0.6] — macOS 无线真机端到端 · 2026-11-05
+## [v0.9] — Steering-wheel control interface · 2026-11-06
 
-真 iPhone 在 Mac 上走**蓝牙 iAP2 → 同网 Wi-Fi 投屏**跑通，并把"车机该有的常驻行为"补齐：
-手机离开自动回启动页，回来自动重新进 CarPlay，全程不用碰宿主。启动页整个重做。
+Established the steering-wheel-control (wheel media key) layer in `core`: the upper layer
+puts keys into a queue, and the two iAP2 links (wireless/wired) each encode them into HID
+reports sent to the phone. The interface and encoding have passed self-tests; the `0x4E0x`
+message numbers, report format, and key sources still await real-device and per-platform
+integration.
 
-### 新增
+### Added
 
-- **启动页重做**（`host/launcher`）：按 1540×850 设计稿坐标绘制后整体缩放，线性采样让圆角/圆弧
-  不再出台阶；显示**蓝牙适配器名**（手机蓝牙列表里看到的那个，不是 Bonjour 名）、中/EN 语言切换、
-  连接状态与等待动效。
-- **高 DPI 渲染**：`SDL_WINDOW_ALLOW_HIGHDPI`，渲染面按物理像素（Retina 2×）出图；同时补上
-  窗口"点"与渲染"像素"的换算 —— 否则启动页鼠标命中与触摸坐标都会偏（实测 Mac 上触摸 y 轴偏上）。
-- **双通道 `--dual`**：有线（USB）+ 无线**同时**监听，谁先连上算谁；另一条把后来的连接挡在门外，
-  会话结束自动放行。
-- **常驻重连**：`--bt` 下手机离开后隔 5 秒自动重新触发，不需要按键，也不需要重启宿主。
-
-### 修复
-
-- **重连后整场 CarPlay 总在 5 秒定时器上被掐断**：事件通道对象跨会话复用（监听端口不变），
-  但读写密钥是**每场** pair-verify 出来的。宿主周期发的 `forceKeyFrame` 用旧密钥加密，手机解不开，
-  iOS 直接结束会话。新增 `EventChannel::rekey()`，每条会话首次 SETUP 用本场 sharedSecret 重算密钥。
-- **会话活到 90 秒自己断**：0x4301 发出后这条 iAP2 链路就是无线 CarPlay 的心跳线，iOS 一直在上面
-  发消息、配件必须继续读并 ACK。触发窗口（90s）一到就停读，iOS 约 30 秒后判定配件掉线并 TEARDOWN。
-  改成发出 0x4301 后长期保持，直到链路真的断。
-- **手机回来不会自动进 CarPlay**：常驻心跳让触发线程一直守在旧链路上，永远等不到新的 0x4301。
-  增加取消旗标：会话结束（或空等 45 秒）就撤掉这次触发，重排下一次。
-- **手机离开后回启动页卡 10 秒**：控制连接空闲判定 10s → 5s，并在日志里打出断线原因
-  （读超时 = 手机不再发包 / 读返回断开 = 对端关闭），不再靠猜。
+- **Control interface** (`core/port/control.h`): `MediaKey` (play/pause, previous/next,
+  Siri, answer/hang up…) + thread-safe `MediaKeyQueue` + `IMediaKeySink`. The direction is
+  **head unit → phone**, opposite to `media.h`. Where keys come from (UI buttons, system
+  media keys, future hardware drivers) is up to the upper layer.
+- **HID encoding** (`core/iap2/hid.h`): `MediaKey` → HID usage (consumer page 0x0C /
+  telephony page 0x0B) → report bytes → `0x4E02` messages. The wireless
+  `WirelessTrigger` drains the queue in `run()`; the wired `WiredLink` provides
+  `sendMediaKey` / `pumpMediaKeys`, called by the caller between pumps.
+  **The `0x4E0x` message family and report format have not yet been verified on a real
+  device**; check them with a packet capture when integrating (only one place needs
+  changing).
+- Self-test section ①b: usage mapping, key-down/up reports, message round-trip, queue FIFO
+  and overflow.
 
 ---
 
-## [v0.5] — Android 4.4（API 19）· 2026-10-14
+## [v0.8] — HarmonyOS audio · 2026-11-06
 
-安卓端降到 **Android 4.4（API 19）**，在 32 位 Amlogic S905M 电视盒子上真机跑通
-（蓝牙 iAP2 触发 → mDNS 发现 → RTSP 协商 → 720p 投屏 → 音频）。意义：**最弱的安卓盒子也能当 CarPlay 屏。**
+CarPlay sound came out on a Mate 60: the audio stream the phone creates (type=102, AAC-LC,
+48kHz stereo, raw frames) is decoded locally and played through the system sound card.
+Video, touch, and audio all worked simultaneously for the first time.
 
-### 新增
+### Added
 
-- **Android 4.4 移植**：`minSdk 28→19`。Kotlin 层把 NotificationChannel / AudioAttributes+AudioFormat.Builder /
-  MediaCodec buffer 访问 / setOutputSurface / startLocalOnlyHotspot / startForegroundService /
-  运行时权限 / 电池优化 / 对话框主题 / letterSpacing 等 20 多处 API 26+ 调用全部加 `SDK_INT` 守卫；
-  新增 `MediaCodecCompat`（旧数组式 buffer 访问，API 19 用 `getInputBuffers()`）。
-- **原生层 API 19 兼容**：`cpp/CMakeLists` 启用 C++17；`net_posix` 用 SIOCGIFCONF 替代
-  API 24 才有的 `getifaddrs`；新增 `stdio_compat` 提供 API<23 缺失的 `stdin/stdout/stderr` 符号；
-  `log.cpp` 安卓上只走 logcat（不引 stderr）。
-- **双 ABI + 降 NDK**：`abiFilters` 加 `armeabi-v7a`（32 位盒子），OpenSSL 按 ABI 分目录交叉编译；
-  NDK 降至 r25c（r26 起不支持 API 19）。
+- **Audio output** (`harmony/entry/src/main/cpp/harmony_audio.cpp`): the HarmonyOS
+  implementation of `core::IAudioOutput`.
+  Decoding uses `OH_AudioCodec` in **synchronous mode** (`OH_MD_KEY_ENABLE_SYNC_MODE=1`;
+  in the default asynchronous mode `QueryInputBuffer` always returns
+  `AV_ERR_OPERATE_NOT_PERMIT`), and playback uses the `OHAudio` renderer's `OnWriteData`
+  callback. Decoding is inside two locks, and the playback callback only touches the ring
+  pool, so the 10ms decode query can never block the sound card.
 
-### 修复
+### Fixed
 
-- **mDNS 在安卓盒子上广播失败**：JmDNS 抢不到 5353（被系统 netd 占用，EADDRINUSE），退回系统 NsdManager。
-  API 19 上不设 TXT —— `setTxtRecord(byte[])` 不存在、`setTxtRecord(DnsSdTxtRecord)` 会导致
-  NsdServiceInfo Binder 序列化失败；实测 iPhone 靠蓝牙 0x4301 + RTSP `/info` 就能连，TXT 非必需。
-- **性能模式改为固定 1280x720@30fps**（原先是"分辨率减半"）。
-- **断开后不自动重连**：AirPlay 会话断开后，蓝牙触发改为关旧 RFCOMM 再重发 0x4301
-  （iPhone 的 iAP2 SPP 服务只接受一条连接，旧的不关新的连不上）。
+- **Raw AAC frames must have an ADTS header prepended**: `OH_MD_KEY_AAC_IS_ADTS=0` means
+  LATM, and when fed raw frames the decoder only consumed and produced nothing (measured:
+  3000 packets decoded to 0 frames). Changed to prepend a 7-byte ADTS header per frame and
+  set that key to 1; 48 frames decoded to 47. The out-of-band ASC path
+  (`OH_MD_KEY_CODEC_CONFIG`) decoded 0 frames on the same machine.
+- **"Catch but do not play" became playable**: `feed()` was previously an empty
+  implementation; now the whole path works.
+- **A trio of stutters**: the callback block was pinned smaller and then released, the
+  resumption water level was below one callback, and `QueryOutputBuffer` used a 0 timeout,
+  causing PCM to accumulate in the decoder — together these produced continuous crackle
+  (193 underruns out of 600 callbacks).
+  Now: 700ms ring pool + 250ms resumption water level + 2ms output polling, measured
+  underruns down to 0–3 per 600.
+- **Occasional stutter while swiping** was a sender-side problem: switching the same Mate
+  60 to an iPhone 16 as the sender no longer reproduced it; an iPhone 13 mini itself drops
+  frames while swiping.
 
-### 已知限制
+### Known limitations
 
-- 手动断开 iPhone 的 WiFi 后，iOS 会主动退出 CarPlay，盒子无法强制重进 —— iOS 行为，
-  真实场景（WiFi 因干扰短暂掉线）不受影响。
-- 盒子的系统热点（SoftAP）被 Amlogic 框架锁定为"仅系统包可调"（`setWifiApEnabled`
-  抛 `SecurityException: Package android does not belong to ...`），App 内反射开热点不可用；
-  需同 WiFi 或外部方式开热点。
+- **iOS 13 and older cannot connect**: an iPhone SE2 (iOS 13) is answered with 0x1D03 at
+  the 0x1D01 identification step, with reported parameter ids including 6/7/10. Tried all
+  three of: the full message list, only the minimal CarPlay-required set, and no list at
+  all — even an empty list was rejected. It is the phone side rejecting it, not the message
+  format (the same bytes are accepted by iOS 16/18).
+  The SE2 on iOS 13 connects normally after upgrading the OS; the code retains a
+  "narrow down and retry on rejection" fallback.
 
----
+## [v0.7] — HarmonyOS wireless real-device end-to-end · 2026-11-05
 
-## [v0.4] — 有线（USB）CarPlay · 2026-10-13
+HarmonyOS (**Mate 60**) also works end-to-end: Bluetooth iAP2 wakes the iPhone → same-network
+Wi-Fi → RTSP negotiation → **hardware-decoded on screen, landscape full-screen, touch
+works**. The protocol core did not fork a single line; `core/airplay` was compiled into the
+HAP unchanged through NAPI.
 
-**插上数据线就行。** 前几版走的都是无线（蓝牙叫醒 + 同一局域网）。这一版加了**有线**那条路：
-USB 控制面整条自己写，媒体面交给内核，最后把手机引到和无线**同一套** RTSP / 加密 / 屏幕流代码上。
+### Added
 
-![真 iPhone 的有线 CarPlay 界面渲染在 Ubuntu 上](docs/images/carplay-wired.jpg)
+- **HarmonyOS platform**: ArkTS + hvigor project (`harmony/`). Bluetooth SPP
+  (`socket.sppConnect`), mDNS advertisement, screen size from system APIs; the protocol is
+  entirely in `core/`, bridged by `liballplay_core.so` through NAPI.
+- **AVCodec hardware decoding to screen** (`harmony_decoder.cpp`):
+  `OH_VideoDecoder_CreateByMime` + callback-style input/output, with `RenderOutputBuffer`
+  drawing directly to the `XComponent` surface (surface id → `OHNativeWindow`).
+- **Full screen**: the display resolution negotiated in `/info` is now **based on the
+  screen aspect ratio** (1080p tier, width capped at 1920; measured 1920×868), and the
+  iPhone rearranges the CarPlay UI to that size; entering a session switches to landscape,
+  disconnecting switches back to portrait.
+- **Touch reports**: `XComponent.onTouch` → normalized coordinates → event-channel HID
+  `touchReport` (two contacts).
+- **Build scripts**: `scripts/build-ohos-openssl.sh` (cross-compile OHOS OpenSSL),
+  `scripts/sync-harmony-identity.sh` (temporarily copy `identity/` into the HAP rawfile;
+  still in `.gitignore`).
 
-（上图：真 iPhone 插着数据线，宿主 `--wired` 跑在 Ubuntu 上 —— 这一轮宿主侧**渲染满 3000 帧**
-正常退出，零 WARN/ERR。另有一轮探针侧的 200 秒长跑：收 1320 帧 / 12.4 MB，全程不掉线。）
+### Fixed
 
-![注入一次触摸后，CarPlay 跟着进了"外观"页](docs/images/carplay-wired-touch.jpg)
+- **avcC SPS/PPS must be in-band**: `OH_MD_KEY_CODEC_CONFIG` is ignored by this machine's
+  decoder (system log `pps is null` / `EVNT_PARAMETER_SETS_LOST`), so a copy of AnnexB is
+  prepended before every IDR.
+- **The phone resends the same avcC every ~5 seconds**: previously the decoder was rebuilt
+  each time, clearing the reference chain and making the picture periodically freeze;
+  changed to compare by `csd + size + codec type` and skip rebuilding when identical.
+- **Picture freezes after rotating**: rotating recreates the `XComponent`, and the old
+  `OHNativeWindow` points to a reclaimed surface. Now the surface is torn down and rebuilt
+  when the surface id changes, and restored immediately from the last csd without waiting
+  for the phone to resend configuration.
 
-（上图：`--inject-touch 0.5,0.72` 打在"外观"那一行上，手机**真的导航进了这一页** ——
-投出去的事件通道 HID 有线这条路上一样被接受。）
+### Known limitations
 
-### 新增
-
-**有线控制面（`core/usb/`，平台无关）**
-- `usbmux` v2：版本协商 + setup + 迷你 TCP（手机那侧是个 TCP 栈，成帧要自己来）。
-- `wired_control`：串起手机要的三条连接 —— ① 明文 lockdown 配对 → ② 会话**原地升 TLS** →
-  ③ `StartService(carkit)` 拿到的 iAP2 流。三条缺一条都拿不到最后那条服务流。
-- `platform/posix/usb_libusb`：只做两件事 —— 把 iPhone 切进 **CarPlay 配置**（锁屏时它只报
-  1 个配置，这是 iOS 的行为不是线的问题），以及把 USBMUX 口的 bulk 端点包成 `IByteStream`。
-
-**有线 iAP2（`core/iap2/wired_link`）**
-- 链路层**由主机发起**：发完 6 字节 marker 之后不等任何回话，自己立刻发 SYN 并每 500ms 重发。
-  只发 marker 的话手机一声不吭（干等 260 秒零字节）—— 这是最早那版 naive 实现的死法。
-- `0x4300` 解析 + `0x4301 CarPlayStartSession` 组装。有线组的报文结构容易搭错：
-  地址是**每个地址一个 string 参数、重复 id 0**，不是字符串列表。
-
-**有线媒体面**——**自己不写**。切进 CarPlay 配置后内核的 `cdc_ncm` 会建出一块真网卡，
-AirPlay 直接绑到那块网卡的 IPv6 链路本地地址上，NTB16 / 以太网 / IPv6 全是内核的事。
-
-**宿主 `--wired`（`host/wired_task`）**：和 `--bt` 对称，但**相位不同** —— 无线是
-"Receiver 先起、手机找过来"，有线是"手机从 `0x4301` 里**读**地址"，所以 Receiver 必须等
-USB 侧拆到知道 NCM 网卡叫什么、地址钉成哪个之后才能起。任务因此分两段（准备 / 保活），
-`rx` 的生命周期仍然只有一个线程在管。准备失败时按 `W` 重来一次，不用重启程序。
-
-**触摸**：有线这条路上触摸走的是**和无线完全相同**的那条事件通道（`POST /command` + 加密 HID），
-一行都没改。真机验证：注入一次点击打在"外观"那一行，手机跟着进了该页（见上图）。
-
-**探针**：`tools/usb_probe`（切配置）、`tools/wired_probe`（控制面，含 `--selftest` 离线自检）。
-
-### 修复
-
-下面这些**只有真机才暴露**。
-
-- **`0x4301` 发了，手机却不来连 —— Receiver 绑错地址。** 有线这条路上地址是**我们先定好的**
-  （NCM 网卡上的链路本地），`0x4301` 报的必须和 Receiver 实际监听的一模一样。原 `Receiver::start`
-  拿"有没有 IPv4"当成功判据，而 NCM 网卡上**根本没有 IPv4**，于是它去绑通配 —— 手机照着
-  `0x4301` 里的地址连过来，扑空。新增 `ReceiverConfig::bindAddr`：显式绑定跳过 IPv4 判据。
-- **链路本地地址 `bind()` 报 EINVAL。** `fe80::/10` 的地址绑定必须带 `sin6_scope_id`，
-  否则内核直接拒绝（而且报的是 EINVAL，看着像参数写错了）。现在 `bindAddr` 支持 `%网卡` 后缀，
-  裸 `fe80:` 地址由 `Receiver` 自己补上 `%ifname`。
-- **NCM 网卡上一个 IPv6 地址都没有。** 内核在它上面 `addr_gen_mode=1`（不生成任何地址），
-  同时 NetworkManager 把这根点对点链路当"有线连接"去要 DHCP（那儿根本没有 DHCP 服务器），
-  一直卡在 connecting 并随时可能清掉地址。新增 `allplay::posix::prepareWiredNcm`：
-  `nmcli device set … managed no` → `ip link set up` → 钉 `fe80::2/64 … nodad`，
-  网卡名按 USB `busnum`/`devnum` 反查 `/sys/class/net/*/device/..`（名字由 MAC 来，不能写死）。
-- **控制面全绿、`RECORD` 也过了，然后卡在 `/feedback`** —— 每 2 秒一次，永远等不到画面。
-  根因是 `SETUP` 里手机要屏幕流、我们没接 `IVideoOutput` 就没给 `dataPort`，手机拿不到数据端口
-  只能干等。宿主本来就接了 sink，所以只有探针中招；已在探针里补一个只点数的 sink。
-- **`pkill -f wired_probe` 会把执行它的那个 shell 一起杀掉**（shell 自己的命令行里就含这个串），
-  于是"杀掉旧进程再重新编译"那条命令链在第 1 步就断了，后面的编译根本没跑，看起来却像编译失败。
-
-### 注意
-
-- 有线**只在 Linux 上做**：媒体面依赖内核 `cdc_ncm`，macOS / Windows 没有对应物。
-- 没有 `libusb-1.0-dev` 时 CMake 会跳过整条有线链路，`--wired` 会明确报"这个构建没带 libusb"。
-- 跑之前的三件前置（停 `usbmuxd`、`pkill gvfsd-gphoto2`、blacklist `apple_mfi_fastcharge`）
-  和 `sudo` 环境下的两个坑见 [README 的有线前置条件](README.md#有线的前置条件linux缺一不可)。
+- **Audio is received but not played**: `IAudioOutput` discards data after receiving it;
+  the HarmonyOS side has not yet integrated AudioRenderer.
+- **No exit entry point during streaming**: the picture fills the entire screen and covers
+  the "cancel" button on the launcher; you can only exit from the phone or the system side.
+- Device selection and hotspot SSID/password are not persisted; you must select them again
+  after an app restart.
 
 ---
 
-## [v0.3] — 真 iPhone 端到端 · 2026-10-12
+## [v0.6] — macOS wireless real-device end-to-end · 2026-11-05
 
-**手机是被宿主自己叫来的。** v0.2 证明的是"拿到流能渲染"，这一版证明的是"能主动把真机叫来"：
-宿主发起蓝牙 iAP2 触发 → iPhone 经 mDNS 发现本机 → RTSP 协商 → 屏幕流上屏。
-**CarPlay 画面出现在 Ubuntu 桌面上，触摸回传可点。**
+A real iPhone works on a Mac through **Bluetooth iAP2 → same-network Wi-Fi projection**,
+and the "always-on behaviors a head unit should have" were completed: when the phone
+leaves it automatically returns to the launcher, and when it returns it automatically
+re-enters CarPlay, without touching the host at all. The launcher was fully redesigned.
 
-![真 iPhone 的 CarPlay 界面渲染在 Ubuntu 桌面上](docs/images/carplay-home.jpg)
+### Added
 
-### 新增
+- **Launcher redesign** (`host/launcher`): drawn at the coordinates of a 1540×850 design
+  and scaled as a whole, with linear sampling so rounded corners/arcs no longer show
+  stair-stepping; shows the **Bluetooth adapter name** (the one seen in the phone's
+  Bluetooth list, not the Bonjour name), Chinese/English language switching, connection
+  state, and waiting animation.
+- **High-DPI rendering**: `SDL_WINDOW_ALLOW_HIGHDPI`, with the render surface producing
+  physical pixels (Retina 2×); also added conversion between window "points" and render
+  "pixels" — otherwise both launcher mouse hit-testing and touch coordinates are off
+  (measured: touch y-axis biased upward on Mac).
+- **Dual-channel `--dual`**: listen for wired (USB) + wireless **simultaneously**; whichever
+  connects first wins. The other path keeps later connections outside and reopens
+  automatically when the session ends.
+- **Always-on reconnect**: under `--bt`, after the phone leaves it automatically retriggers
+  after 5 seconds, with no key press and no host restart.
 
-**蓝牙触发（桌面宿主）**
-- `host/bt_task`：宿主从"只等手机来连"变成"自己把手机叫起来"。`runBtTrigger` 是全阻塞
-  且**没有取消接口**的，所以放独立线程跑；失败按 3 秒间隔整链重试。线程把自己需要的
-  transport 与参数全部 move 进闭包，退出时 detach 而非 join —— 否则一次退出最多卡 90 秒。
-- 开关一律 opt-in，**不加 `--bt` 时行为与之前完全一致**：
-  `--bt` / `--bt-addr` / `--bt-device` / `--bt-mode` / `--ssid` / `--wifi-pass` / `--bt-retry`。
-  运行时按 `B` 可重新触发一次。
+### Fixed
 
-### 修复
-
-下面这些**只有真机才暴露**，假手机一个都测不出来。
-
-- **mDNS 的 TXT 记录是二进制垃圾 —— "手机根本不连"的根因。**
-  `avahi_entry_group_add_service()` 是**可变参数**接口（`...` 是一串以 NULL 结尾的
-  `const char*`），原代码传进去的是 `const char**`，avahi 于是把**指针数组自身的内存**
-  当成第一个 TXT 字符串读，广播出去只有几个字节的乱码 —— 表象是"手机压根不来"，
-  日志里一行 RTSP 都没有。iPhone 靠 TXT 里的 `features` / `flags=0x4` / `deviceid` /
-  `srcvers` 认接收端，读不到就不连。改用 `avahi_entry_group_add_service_strlst()` +
-  `AvahiStringList`（`avahi_string_list_add` 是头插，要倒着加才能保持原序）。
-- **点图标毫无反应，拖地图却正常。** 触摸上报在抬起那一帧只发 `down=false`，
-  坐标留在 (0,0) —— 手机收到的是"在图标处按下 → 在左上角抬起"，被判定成滑动而非点击。
-  改为**抬起也带最后的位置**，与 Android 侧 `MainActivity.kt` 的 `ACTION_UP` 语义对齐。
-- **断开后回不到启动页，画面卡在最后一帧。** "画面停住而不是消失"本来是给会话中途掉帧
-  设计的，结果会话结束时纹理里那张末帧被 `present()` 一直重画 —— 日志明明打了"回启动页"，
-  屏上却纹丝不动。新增 `SdlVideoSink::dropFrame()`，会话结束时丢掉。
-- **开 `--statusbar` 就有黑边，且状态栏根本看不见。** 状态栏画在 `y = screenH`，
-  可窗口只有 `screenH` 高 —— 整条落在窗口之外；渲染循环又按 `winH - barH` 排视频，
-  16:9 被缩进 1280x694，左右各多出 23px 黑边。窗口高度改为 `screenH + barH`，两个毛病一起消失。
-- **屏幕流被跳过时静默失败。** `video_` 为空时 `session.cpp` 原来直接 `continue`：
-  不回 `dataPort`，手机干等 10 秒断开，而日志里一点提示都没有（排查时因此绕了很久）。
-  补一条 WARN，只记日志、不改行为。
-
-### 文档
-
-- README 更新"当前状态"；新增排障条目 **"手机压根不来连 → 先查 mDNS TXT"**。
-
----
-
-## [v0.2] — Ubuntu 平台渲染 · 2026-10-12
-
-桌面宿主从"只有窗口"补齐到**能真正渲染出 CarPlay 画面**，并接上 Linux 蓝牙传输层。
-与 v0.1 的 Android 端共用同一份 `core/`，只换了 `platform/` 和 `host/`。
-
-### 新增
-
-**视频**
-- `host/media/ffmpeg_decoder` + `sdl_video_sink`：ffmpeg 软解 H.264/HEVC → SDL2 纹理，letterbox 上屏。
-- 解码在 ScreenStream 线程做（对 TCP 收包形成自然背压），主线程只管抽帧渲染；
-  帧队列有界，满时丢最旧帧保低延迟；尺寸/格式变化才重建纹理。
-
-**音频**
-- `host/media/sdl_audio_sink`：AAC-LC / Opus / LPCM 三种格式，SDL2 输出。
-- **有意不引 libswresample** —— 它整套 channel-layout 参数在 ffmpeg 4.4 与 5.1+ 之间签名不同，
-  而这里只需要"平面 float → 交织 s16"这一种转换，自己写反而更省事。
-  版本差异全部收敛在 `host/media/ffmpeg_compat.h` 一个文件里。
-
-**界面与输入**
-- `host/launcher`：启动页（双色 logo + 蓝牙水纹 + 状态文字），与 Android 启动页对齐；
-  连上后切全屏视频，状态栏退化为 `--statusbar` 显式开启的调试叠加。
-- 触摸回传：鼠标 / 手指 → 按 **letterbox 后的视频矩形**归一化 → 事件通道。
-
-**蓝牙（Linux）**
-- `platform/posix/bt_bluez.cpp`：BlueZ 传输层，客户端模式（我们主动连手机的 iAP2 SPP 服务）。
-  链路：SDP 查到 `00000000-deca-fade-deca-deafdecacafe` → **RFCOMM 通道 1** → 连上 →
-  iAP2 识别 → 收到手机主动发来的 `0xAA00 请求证书`。
-  真机（iPhone）验证到此为止，再往后需要 MFi 身份。
-
-**验收工具**
-- `tools/fake_phone`：假 iPhone。真 socket 跑完 RTSP + pair-setup/verify + ControlCipher 加密
-  + 加密屏幕流推帧 —— **端到端验收不再需要 iPhone**。
-- `tools/video_probe`：本地喂 AnnexB H.264 的解码冒烟工具。黑屏时先跑它二分：
-  有画面 = 协议侧的锅，没画面 = 解码侧的锅。
-- `tools/phone_crypto.h`：手机侧密码学从 `m3_test` 抽出来两边共用 ——
-  抄两份的话它们会一起错，还会让"自测全绿但端到端失败"变成可能。
-
-### 修复
-
-- **SETUP 阶段 SIGSEGV**：`Receiver::start()` 把 `PlatformServices` 的**参数地址**存进了 Session，
-  而 Session 到 SETUP 才第一次用它去建数据/事件通道，那时 `start()` 早已返回。改为自己持有一份。
-- **关键帧判不出来、一直黑屏**：`ScreenStream::isRandomAccess()` 只看访问单元的第一个 NAL，
-  而关键帧 AU 的常见排布是 `[SPS][PPS][IDR]`，首 NAL 是 SPS(7) 就被判成"非关键帧"——
-  放行闸门永远打不开。改为扫完整个 AU。真机与假手机都会踩。
-
-### 构建
-
-- CMake 接 ffmpeg（avcodec/avutil/swscale，**不含** swresample）、bluez、dbus-1；
-  缺 ffmpeg 时宿主降级为桩而不是整个跳过。
-- 新增 `fake_phone` / `video_probe` 两个 target。
+- **After reconnecting, the whole CarPlay session was always cut off at the 5-second
+  timer**: the event channel object is reused across sessions (the listening port does not
+  change), but the read/write keys are derived **per session** by pair-verify. The host's
+  periodic `forceKeyFrame` encrypted with the old key, the phone could not decrypt it, and
+  iOS ended the session immediately. Added `EventChannel::rekey()`; the first SETUP of each
+  session recomputes the keys from that session's sharedSecret.
+- **The session disconnected itself at 90 seconds**: after 0x4301 is sent, this iAP2 link
+  is wireless CarPlay's heartbeat line; iOS keeps sending messages on it and the accessory
+  must keep reading and ACKING. When the trigger window (90s) ended, reading stopped, and
+  iOS judged the accessory offline about 30 seconds later and sent TEARDOWN. Changed to
+  keep it open indefinitely after sending 0x4301, until the link actually breaks.
+- **The phone would not automatically re-enter CarPlay after returning**: the always-on
+  heartbeat kept the trigger thread on the old link, so it could never see a new 0x4301.
+  Added a cancel flag: when the session ends (or after idling 45 seconds), withdraw this
+  trigger and schedule the next one.
+- **Stuck on the launcher for 10 seconds after the phone leaves**: control-connection
+  idle detection shortened from 10s to 5s, and the disconnect reason is logged (read
+  timeout = the phone stopped sending / read returned disconnected = peer closed) instead
+  of guessing.
 
 ---
 
-## [v0.1] — Android 平台渲染 · 2026-10-11
+## [v0.5] — Android 4.4 (API 19) · 2026-10-14
 
-首个版本。协议核心从零实现，并在 Android 上端到端跑通。
+The Android side was lowered to **Android 4.4 (API 19)** and verified on a 32-bit Amlogic
+S905M TV box (Bluetooth iAP2 trigger → mDNS discovery → RTSP negotiation → 720p projection
+→ audio). The point: **even the weakest Android box can serve as a CarPlay screen.**
 
-### 新增
+### Added
 
-**协议核心 `core/`**（平台无关 C++，唯一三方依赖 OpenSSL）
-- `airplay/rtsp`：极简 RTSP 服务器（控制通道，pair-verify 后加密）
-- `airplay/session`：会话状态机 —— pair-setup / pair-verify / auth-setup / SETUP / RECORD
-- `airplay/video_stream`：屏幕流 —— 128B 头解密 → AVCC→AnnexB → 关键帧闸门
-- `airplay/audio_stream`：音频流 —— RTP over UDP 解密 + 序号乱序重排
-- `airplay/event_channel`：事件通道 —— 触摸 HID 回传（最多 2 触点）+ forceKeyFrame 命令
-- `airplay/control_cipher`：控制通道帧加密（ChaCha20-Poly1305）
-- `iap2/`：iAP2 协议栈 —— 线格式 / 链路层（marker→SYN→ACK→NORMAL）/ 无线控制流程
-- `mfi/mfi_identity`：MFi 配件身份接口（证书 + ECDSA 签名），**接口按硬件芯片的形状设计**，
-  将来换成鉴权芯片实现时 core 不用动
-- `crypto/`：加密原语全部从零实现（hkdf / chacha20poly1305 / srp6a / x25519 / ed25519 / tlv8 / aes_ctr）
-- `bplist`：Apple 二进制 plist 编解码
-- `bt/bt_trigger`：蓝牙触发编排（选设备 → RFCOMM → iAP2 → 0x4301 引导）
+- **Android 4.4 port**: `minSdk 28→19`. The Kotlin layer guards more than 20 API 26+ calls
+  with `SDK_INT` (NotificationChannel / AudioAttributes+AudioFormat.Builder / MediaCodec
+  buffer access / setOutputSurface / startLocalOnlyHotspot / startForegroundService /
+  runtime permissions / battery optimization / dialog themes / letterSpacing, etc.);
+  added `MediaCodecCompat` (old array-style buffer access; API 19 uses `getInputBuffers()`).
+- **Native-layer API 19 compatibility**: `cpp/CMakeLists` enables C++17; `net_posix` uses
+  SIOCGIFCONF instead of `getifaddrs`, which only exists in API 24; added `stdio_compat` to
+  provide the `stdin/stdout/stderr` symbols missing before API 23; `log.cpp` uses logcat
+  only on Android (no stderr).
+- **Dual ABI + older NDK**: `abiFilters` adds `armeabi-v7a` (32-bit boxes); OpenSSL is
+  cross-compiled per ABI into separate directories; NDK lowered to r25c (r26 no longer
+  supports API 19).
 
-**Android 宿主**
-- `MediaCodecSink`：MediaCodec 硬解 → Surface 直出
-- `AudioSink`：AudioTrack 播放
-- `BluetoothService` / `MdnsService` / `HotspotManager`：蓝牙、mDNS、热点
-- 触摸回传、启动页与状态栏
-- Gradle + NDK：Kotlin 外壳 + C++ core，经 `jni_bridge.cpp` 接系统 API
-- `minSdk 28` / `targetSdk 34` / 仅 `arm64-v8a`
+### Fixed
 
-**平台适配**
-- `platform/posix`：POSIX socket、avahi（Linux）/ dns_sd（macOS）、IOBluetooth、BlueZ（桩）
-- `platform/windows`：Winsock2 + `AF_BTH`（骨架，未接宿主）
+- **mDNS advertisement failed on Android boxes**: JmDNS could not get 5353 (occupied by
+  system netd, EADDRINUSE), so it falls back to the system NsdManager.
+  On API 19 no TXT is set — `setTxtRecord(byte[])` does not exist, and
+  `setTxtRecord(DnsSdTxtRecord)` causes NsdServiceInfo Binder serialization to fail;
+  measured: an iPhone can connect using just Bluetooth 0x4301 + RTSP `/info`, so TXT is not
+  required.
+- **Performance mode changed to a fixed 1280x720@30fps** (previously "halve the
+  resolution").
+- **No automatic reconnect after disconnecting**: after an AirPlay session disconnects,
+  the Bluetooth trigger now closes the old RFCOMM before resending 0x4301
+  (the iPhone's iAP2 SPP service accepts only one connection; the new one cannot connect
+  until the old one is closed).
 
-**自测**
-- `core_selftest`（RTSP + `/info` + mDNS 广播）
-- `iap2_test`（iAP2 线格式 + 链路层 + MFi 签名）
-- `m3_test`（SRP 对 Python 参考向量 + 假手机全流程 + mock 屏幕流）
+### Known limitations
+
+- After manually disconnecting the iPhone's Wi-Fi, iOS proactively exits CarPlay and the
+  box cannot force re-entry — that is iOS behavior; real-world scenarios (brief Wi-Fi
+  drops due to interference) are unaffected.
+- The box's system hotspot (SoftAP) is locked by the Amlogic framework to "system packages
+  only" (`setWifiApEnabled` throws `SecurityException: Package android does not belong to
+  ...`), so enabling the hotspot by reflection inside the app is unavailable; use the same
+  Wi-Fi or an external way to enable the hotspot.
 
 ---
 
-## 未发布
+## [v0.4] — Wired (USB) CarPlay · 2026-10-13
 
-- **产品化的 MFi 身份**：`0xAA00 请求证书` 那道关要求 Apple MFi 计划签发的配件身份
-  （`identity/`，不入库）。开发期用自备身份可以走通全链路 —— v0.3 的真机验证就是这么做的 ——
-  但**纯软件身份不是产品路径**，要作为配件出货仍得走 MFi 计划。
-- **桌面端音频**：真机那一轮 iPhone 只请求了屏幕流和 `type=130`，**没有请求任何音频流**，
-  所以桌面端的音频链路至今只有假手机验证过，真机行为待观察。
+**Just plug in the cable.** Previous versions all used wireless (Bluetooth wake-up + same
+LAN). This version adds the **wired** path: the entire USB control plane is written by us,
+the media plane is delegated to the kernel, and finally the phone is guided onto the **same**
+RTSP / encryption / screen-stream code as wireless.
+
+![A real iPhone's wired CarPlay rendering on Ubuntu](docs/images/carplay-wired.jpg)
+
+(The image above: a real iPhone with the cable plugged in, host `--wired` running on
+Ubuntu — this host-side round **rendered all 3000 frames** and exited normally, with zero
+WARN/ERR. Another probe-side 200-second long run: 1320 frames / 12.4 MB received, no
+disconnects throughout.)
+
+![After injecting one touch, CarPlay navigated into the "Appearance" page](docs/images/carplay-wired-touch.jpg)
+
+(The image above: `--inject-touch 0.5,0.72` landed on the "Appearance" row, and the phone
+**actually navigated into that page** — HID events sent over the event channel are
+accepted on the wired path too.)
+
+### Added
+
+**Wired control plane (`core/usb/`, platform-agnostic)**
+- `usbmux` v2: version negotiation + setup + mini TCP (the phone side is a TCP stack, so
+  framing is up to us).
+- `wired_control`: strings together the three connections the phone requires —
+  ① plaintext lockdown pairing → ② in-place TLS upgrade of the session →
+  ③ the iAP2 stream obtained from `StartService(carkit)`. Miss any one of the three and
+  you cannot get the final service stream.
+- `platform/posix/usb_libusb`: does only two things — switch the iPhone into the **CarPlay
+  configuration** (when locked it reports only 1 configuration; this is iOS behavior, not a
+  cable problem), and wrap the USBMUX port's bulk endpoints as `IByteStream`.
+
+**Wired iAP2 (`core/iap2/wired_link`)**
+- The link layer is **initiated by the host**: after sending the 6-byte marker, it does not
+  wait for any reply; it immediately sends SYN itself and resends every 500ms.
+  Sending only the marker leaves the phone completely silent (260 seconds of zero bytes) —
+  that is how the earliest naive implementation died.
+- `0x4300` parsing + `0x4301 CarPlayStartSession` assembly. The wired group's message
+  structure is easy to build wrong: addresses are **each a separate string parameter with
+  repeated id 0**, not a string list.
+
+**Wired media plane** — **we do not write it**. After switching into the CarPlay
+configuration, the kernel's `cdc_ncm` creates a real NIC, and AirPlay binds directly to that
+NIC's IPv6 link-local address; NTB16 / Ethernet / IPv6 are all the kernel's job.
+
+**Host `--wired` (`host/wired_task`)**: symmetric to `--bt`, but with a **different phase**
+— wireless is "Receiver starts first, the phone finds us", while wired is "the phone **reads**
+the address from `0x4301`", so the Receiver must wait until the USB side has figured out the
+NCM NIC name and pinned the address before starting. The task is therefore split into two
+stages (prepare / keep-alive), and `rx`'s lifetime is still managed by a single thread. On
+prepare failure, press `W` to retry once without restarting the program.
+
+**Touch**: on the wired path, touch goes through **exactly the same** event channel as
+wireless (`POST /command` + encrypted HID), with no code change. Real-device verification:
+injecting a click on the "Appearance" row made the phone navigate to that page (see the
+image above).
+
+**Probes**: `tools/usb_probe` (config switch), `tools/wired_probe` (control plane, including
+`--selftest` offline self-check).
+
+### Fixed
+
+The following **only show up on real hardware**; a fake phone cannot catch any of them.
+
+- **`0x4301` was sent but the phone did not connect — the Receiver bound the wrong
+  address.** On the wired path the address is **chosen by us in advance**
+  (link-local on the NCM NIC), and what `0x4301` reports must exactly match what the
+  Receiver actually listens on. The original `Receiver::start` used "is there an IPv4
+  address" as its success criterion, but the NCM NIC has **no IPv4 at all**, so it bound the
+  wildcard — the phone connected to the address from `0x4301` and hit nothing. Added
+  `ReceiverConfig::bindAddr`: an explicit binding bypasses the IPv4 criterion.
+- **Link-local address `bind()` returned EINVAL.** Binding a `fe80::/10` address must
+  include `sin6_scope_id`, otherwise the kernel rejects it outright (and reports EINVAL,
+  which looks like a malformed argument). `bindAddr` now supports a `%interface` suffix,
+  and a bare `fe80:` address gets `%ifname` appended by `Receiver` itself.
+- **No IPv6 address at all on the NCM NIC.** The kernel sets `addr_gen_mode=1` on it
+  (generating no addresses), while NetworkManager treats this point-to-point link as a
+  "wired connection" and asks for DHCP (there is no DHCP server there), staying stuck in
+  connecting and possibly clearing the address at any time. Added
+  `allplay::posix::prepareWiredNcm`: `nmcli device set … managed no` → `ip link set up` →
+  pin `fe80::2/64 … nodad`; the NIC name is looked up by USB `busnum`/`devnum` via
+  `/sys/class/net/*/device/..` (the name derives from the MAC and must not be hard-coded).
+- **Control plane all green, `RECORD` passed, then stuck at `/feedback`** — once every 2
+  seconds, never seeing a picture. Root cause: in `SETUP` the phone asks for the screen
+  stream, and because we had no `IVideoOutput` we did not provide `dataPort`; the phone had
+  no data port and could only wait. The host already had a sink, so only the probe was
+  affected; a counting-only sink was added to the probe.
+- **`pkill -f wired_probe` also kills the shell running it** (the shell's own command line
+  contains that string), so the command chain "kill the old process, then recompile" broke
+  at step 1, the subsequent compile never ran, and it looked like a compile failure.
+
+### Notes
+
+- Wired is **only implemented on Linux**: the media plane depends on the kernel's `cdc_ncm`,
+  and macOS / Windows have no equivalent.
+- Without `libusb-1.0-dev`, CMake skips the entire wired path, and `--wired` explicitly
+  reports "this build has no libusb".
+- The three prerequisites before running (stop `usbmuxd`, `pkill gvfsd-gphoto2`, blacklist
+  `apple_mfi_fastcharge`) and the two `sudo` environment traps are covered in
+  [README wired prerequisites](README.md#wired-prerequisites-linux-all-three-required).
+
+---
+
+## [v0.3] — Real iPhone end-to-end · 2026-10-12
+
+**The phone is summoned by the host itself.** v0.2 proved "once we get the stream, we can
+render it"; this version proves "we can actively summon a real device": the host initiates
+the Bluetooth iAP2 trigger → the iPhone discovers this machine via mDNS → RTSP negotiation
+→ screen stream on screen. **The CarPlay picture appears on the Ubuntu desktop, and touch
+reports work.**
+
+![A real iPhone's CarPlay rendering on the Ubuntu desktop](docs/images/carplay-home.jpg)
+
+### Added
+
+**Bluetooth trigger (desktop host)**
+- `host/bt_task`: the host goes from "only waiting for the phone to connect" to "waking
+  the phone up itself". `runBtTrigger` is fully blocking and **has no cancellation
+  interface**, so it runs on a dedicated thread; on failure the whole chain is retried
+  every 3 seconds. The thread moves all the transport and parameters it needs into the
+  closure, and detaches rather than joins on exit — otherwise a single exit can block for
+  up to 90 seconds.
+- All switches are opt-in, and **behavior is completely unchanged without `--bt`**:
+  `--bt` / `--bt-addr` / `--bt-device` / `--bt-mode` / `--ssid` / `--wifi-pass` /
+  `--bt-retry`. Pressing `B` at runtime retriggers once.
+
+### Fixed
+
+The following **only show up on real hardware**; a fake phone catches none of them.
+
+- **The mDNS TXT record was binary garbage — the root cause of "the phone never
+  connects".**
+  `avahi_entry_group_add_service()` is a **variadic** interface (`...` is a series of
+  NULL-terminated `const char*`), but the original code passed a `const char**`, so avahi
+  read **the pointer array's own memory** as the first TXT string and advertised a few bytes
+  of garbage — the symptom was "the phone never comes", with not a single RTSP line in the
+  log. The iPhone identifies the receiver by the TXT fields `features` / `flags=0x4` /
+  `deviceid` / `srcvers`; if it cannot read them, it does not connect. Switched to
+  `avahi_entry_group_add_service_strlst()` + `AvahiStringList` (`avahi_string_list_add`
+  prepends, so add in reverse to preserve order).
+- **Tapping an icon did nothing, but dragging the map worked.** The touch report sent only
+  `down=false` on the lift frame, leaving the coordinates at (0,0) — the phone received
+  "pressed at the icon → lifted at the top-left corner", interpreted as a swipe rather than
+  a tap. Changed so **the lift also carries the last position**, aligning with the
+  `ACTION_UP` semantics in Android's `MainActivity.kt`.
+- **After disconnecting it did not return to the launcher; the picture froze on the last
+  frame.** "Freeze rather than disappear" was originally designed for dropped frames
+  mid-session, but at session end the last frame in the texture kept being redrawn by
+  `present()` — the log said "back to launcher" while the screen did not move. Added
+  `SdlVideoSink::dropFrame()` and drop it at session end.
+- **With `--statusbar` there were black bars and the status bar was invisible.** The status
+  bar was drawn at `y = screenH`, but the window was only `screenH` tall — the whole bar fell
+  outside the window; the render loop also laid out video as `winH - barH`, squeezing 16:9
+  into 1280x694 with 23px of black on each side. Window height changed to
+  `screenH + barH`, and both defects disappeared.
+- **The screen stream failed silently when skipped.** When `video_` was null,
+  `session.cpp` used to just `continue`: no `dataPort` returned, the phone waited 10
+  seconds and disconnected, and the log gave no hint at all (which cost a lot of debugging
+  time). Added a WARN that only logs and does not change behavior.
+
+### Docs
+
+- README updates the "current status"; adds a troubleshooting entry **"the phone never
+  connects → check the mDNS TXT first"**.
+
+---
+
+## [v0.2] — Ubuntu platform rendering · 2026-10-12
+
+The desktop host grew from "window only" to **actually rendering the CarPlay picture**, and
+the Linux Bluetooth transport layer was wired up.
+It shares the same `core/` with v0.1's Android side, changing only `platform/` and `host/`.
+
+### Added
+
+**Video**
+- `host/media/ffmpeg_decoder` + `sdl_video_sink`: ffmpeg software-decodes H.264/HEVC →
+  SDL2 texture, displayed with letterboxing.
+- Decoding runs on the ScreenStream thread (providing natural backpressure on TCP
+  receive); the main thread only pulls frames and renders. The frame queue is bounded;
+  when full it drops the oldest frame to keep latency low; the texture is rebuilt only when
+  size/format changes.
+
+**Audio**
+- `host/media/sdl_audio_sink`: AAC-LC / Opus / LPCM, SDL2 output.
+- **Deliberately avoids libswresample** — its whole set of channel-layout parameters has
+  different signatures between ffmpeg 4.4 and 5.1+, and here we only need one conversion,
+  "planar float → interleaved s16", so writing it ourselves is simpler.
+  All version differences are confined to one file, `host/media/ffmpeg_compat.h`.
+
+**UI and input**
+- `host/launcher`: launcher page (two-tone logo + Bluetooth ripple + status text), aligned
+  with the Android launcher; after connecting it switches to full-screen video, and the
+  status bar degrades to a debug overlay explicitly enabled by `--statusbar`.
+- Touch reports: mouse / finger → normalized against the **letterboxed video rectangle** →
+  event channel.
+
+**Bluetooth (Linux)**
+- `platform/posix/bt_bluez.cpp`: BlueZ transport layer, client mode (we actively connect to
+  the phone's iAP2 SPP service).
+  Path: SDP finds `00000000-deca-fade-deca-deafdecacafe` → **RFCOMM channel 1** → connect →
+  iAP2 identification → receive the phone's proactively sent `0xAA00 RequestCertificate`.
+  Real-device (iPhone) verification stops here; beyond it requires an MFi identity.
+
+**Acceptance tools**
+- `tools/fake_phone`: fake iPhone. Real sockets run RTSP + pair-setup/verify +
+  ControlCipher encryption + encrypted screen-stream frame push — **end-to-end acceptance no
+  longer needs an iPhone**.
+- `tools/video_probe`: a decode smoke tool that feeds local AnnexB H.264. When the screen is
+  black, run it first to bisect: picture = protocol side's fault, no picture = decode side's
+  fault.
+- `tools/phone_crypto.h`: phone-side cryptography extracted from `m3_test` for both to
+  share — two copies would go wrong together and make "self-tests green but end-to-end
+  failing" possible.
+
+### Fixed
+
+- **SIGSEGV during SETUP**: `Receiver::start()` stored the **address of the
+  `PlatformServices` parameter** in the Session, but the Session first uses it at SETUP to
+  create data/event channels, long after `start()` returned. Changed to hold its own copy.
+- **Keyframes not detected, permanently black screen**: `ScreenStream::isRandomAccess()`
+  looked only at the first NAL of an access unit, but the common layout of a keyframe AU is
+  `[SPS][PPS][IDR]`; with SPS(7) first it was judged "not a keyframe" — the release gate
+  never opened. Changed to scan the entire AU. Affects both real and fake phones.
+
+### Build
+
+- CMake links ffmpeg (avcodec/avutil/swscale, **not** swresample), bluez, dbus-1.
+  When ffmpeg is missing, the host degrades to a stub instead of being skipped entirely.
+- Added the `fake_phone` / `video_probe` targets.
+
+---
+
+## [v0.1] — Android platform rendering · 2026-10-11
+
+First release. The protocol core was implemented from scratch and verified end-to-end on
+Android.
+
+### Added
+
+**Protocol core `core/`** (platform-agnostic C++, sole third-party dependency OpenSSL)
+- `airplay/rtsp`: minimal RTSP server (control channel; encrypted after pair-verify)
+- `airplay/session`: session state machine — pair-setup / pair-verify / auth-setup / SETUP /
+  RECORD
+- `airplay/video_stream`: screen stream — 128B header decryption → AVCC→AnnexB → keyframe
+  gate
+- `airplay/audio_stream`: audio stream — RTP over UDP decryption + out-of-order sequence
+  reordering
+- `airplay/event_channel`: event channel — touch HID reports (up to 2 contacts) +
+  forceKeyFrame commands
+- `airplay/control_cipher`: control-channel frame encryption (ChaCha20-Poly1305)
+- `iap2/`: iAP2 protocol stack — wire format / link layer (marker→SYN→ACK→NORMAL) /
+  wireless control flow
+- `mfi/mfi_identity`: MFi accessory identity interface (certificate + ECDSA signature);
+  **the interface follows the shape of the hardware chip**, so core does not change when it
+  is later replaced by an authentication-chip implementation
+- `crypto/`: all cryptographic primitives implemented from scratch (hkdf /
+  chacha20poly1305 / srp6a / x25519 / ed25519 / tlv8 / aes_ctr)
+- `bplist`: Apple binary plist encoder/decoder
+- `bt/bt_trigger`: Bluetooth trigger orchestration (select device → RFCOMM → iAP2 → 0x4301
+  bootstrap)
+
+**Android host**
+- `MediaCodecSink`: MediaCodec hardware decode → direct Surface output
+- `AudioSink`: AudioTrack playback
+- `BluetoothService` / `MdnsService` / `HotspotManager`: Bluetooth, mDNS, hotspot
+- Touch reports, launcher and status bar
+- Gradle + NDK: Kotlin shell + C++ core, wired to system APIs through `jni_bridge.cpp`
+- `minSdk 28` / `targetSdk 34` / `arm64-v8a` only
+
+**Platform adapters**
+- `platform/posix`: POSIX sockets, avahi (Linux) / dns_sd (macOS), IOBluetooth, BlueZ (stub)
+- `platform/windows`: Winsock2 + `AF_BTH` (skeleton, not wired to the host)
+
+**Self-tests**
+- `core_selftest` (RTSP + `/info` + mDNS advertisement)
+- `iap2_test` (iAP2 wire format + link layer + MFi signature)
+- `m3_test` (SRP against Python reference vectors + full fake-phone flow + mock screen
+  stream)
+
+---
+
+## Unreleased
+
+- **Productized MFi identity**: the `0xAA00 RequestCertificate` gate requires an accessory
+  identity issued by the Apple MFi program (`identity/`, not checked in). During
+  development, a self-provided identity can take the full path — that is how v0.3's
+  real-device verification was done — but **a pure software identity is not a product
+  path**; shipping as an accessory still requires the MFi program.
+- **Desktop audio**: in the real-device round, the iPhone only requested the screen stream
+  and `type=130`, **without requesting any audio stream**, so the desktop audio path has
+  only ever been verified by the fake phone; real-device behavior remains to be observed.

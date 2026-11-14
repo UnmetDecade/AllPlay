@@ -13,9 +13,9 @@ namespace allplay {
 
 namespace {
 
-constexpr const char* kTag = "解码";
+constexpr const char* kTag = "decode";
 
-/// 往 out 追加一个 AnnexB NALU（4 字节起始码 + 数据）
+/// Append one AnnexB NALU to out (4-byte start code + data)
 void appendNalu(std::vector<uint8_t>* out, const uint8_t* d, size_t n)
 {
     static const uint8_t kStart[] = {0x00, 0x00, 0x00, 0x01};
@@ -23,10 +23,10 @@ void appendNalu(std::vector<uint8_t>* out, const uint8_t* d, size_t n)
     out->insert(out->end(), d, d + n);
 }
 
-/// avcC 记录体 → AnnexB extradata（SPS/PPS 各自加起始码）。
-/// 布局：[0]=1, [1..3]=profile/compat/level, [4]=长度前缀位数-1, [5]=低 5 位 SPS 个数,
-///       然后 × N { u16BE len + SPS }，再 1 字节 PPS 个数，然后 × M { u16BE len + PPS }。
-/// 参照安卓 MediaCodecSink.buildCsd() 的 H.264 分支。
+/// avcC record body -> AnnexB extradata (each SPS/PPS gets a start code).
+/// Layout: [0]=1, [1..3]=profile/compat/level, [4]=length-prefix size-1, [5]=low 5 bits = SPS count,
+///       then x N { u16BE len + SPS }, then 1 byte PPS count, then x M { u16BE len + PPS }.
+/// Modeled on the H.264 branch of Android's MediaCodecSink.buildCsd().
 bool avcCToAnnexB(const std::vector<uint8_t>& c, std::vector<uint8_t>* out)
 {
     if (c.size() < 7) return false;
@@ -53,9 +53,9 @@ bool avcCToAnnexB(const std::vector<uint8_t>& c, std::vector<uint8_t>* out)
     return !out->empty();
 }
 
-/// hvcC 记录体 → AnnexB extradata（VPS/SPS/PPS 逐数组取出，各自加起始码）。
-/// 布局：… [21] 低 2 位 = 长度前缀位数-1，[22] = 数组个数，
-///       然后 × N { 1B: 类型(低 6 位) + u16BE 个数 + × M { u16BE len + NAL } }。
+/// hvcC record body -> AnnexB extradata (VPS/SPS/PPS taken array by array, each with a start code).
+/// Layout: ... [21] low 2 bits = length-prefix size-1, [22] = array count,
+///       then x N { 1B: type (low 6 bits) + u16BE count + x M { u16BE len + NAL } }.
 bool hvcCToAnnexB(const std::vector<uint8_t>& c, std::vector<uint8_t>* out)
 {
     if (c.size() < 23) return false;
@@ -63,7 +63,7 @@ bool hvcCToAnnexB(const std::vector<uint8_t>& c, std::vector<uint8_t>* out)
     const int numArrays = c[off++];
     for (int a = 0; a < numArrays; ++a) {
         if (off + 3 > c.size()) return false;
-        off += 1;   // 数组头（complete/类型），类型不关心：VPS/SPS/PPS 全带上
+        off += 1;   // array header (complete/type); type does not matter: take VPS/SPS/PPS all the same
         const int numNalus = (int(c[off]) << 8) | int(c[off + 1]);
         off += 2;
         for (int i = 0; i < numNalus; ++i) {
@@ -95,15 +95,15 @@ void FfmpegVideoDecoder::close()
 FfmpegVideoDecoder::Action
 FfmpegVideoDecoder::configure(core::VideoCodec codec, const std::vector<uint8_t>& codecData)
 {
-    // 手机回应 forceKeyFrame 时会重发同一份 avcC —— 配置没变就别重建（否则周期性黑帧）
+    // The phone resends the same avcC in response to forceKeyFrame -- do not rebuild when the config is unchanged (otherwise periodic black frames)
     if (ctx_ && codec == codec_ && codecData == codecData_) return Action::Unchanged;
 
-    // 先把 extradata 备好：失败就别拆掉现有解码器（能凑合就凑合）
+    // Prepare extradata first: on failure do not tear down the existing decoder (make do if possible)
     std::vector<uint8_t> extradata;
     const bool parsed = (codec == core::VideoCodec::HEVC) ? hvcCToAnnexB(codecData, &extradata)
                                                           : avcCToAnnexB(codecData, &extradata);
     if (!parsed) {
-        LOG_ERROR("%s：codecData 解析失败（%s，%zu 字节），拿不到参数集",
+        LOG_ERROR("%s: codecData parse failed (%s, %zu bytes), cannot get parameter sets",
                   kTag, codec == core::VideoCodec::HEVC ? "hvcC" : "avcC", codecData.size());
         return Action::Failed;
     }
@@ -111,7 +111,7 @@ FfmpegVideoDecoder::configure(core::VideoCodec codec, const std::vector<uint8_t>
     const AVCodec* dec = avcodec_find_decoder(codec == core::VideoCodec::HEVC ? AV_CODEC_ID_HEVC
                                                                              : AV_CODEC_ID_H264);
     if (!dec) {
-        LOG_ERROR("%s：本机 ffmpeg 没编入 %s 解码器",
+        LOG_ERROR("%s: this ffmpeg build has no %s decoder",
                   kTag, codec == core::VideoCodec::HEVC ? "HEVC" : "H.264");
         return Action::Failed;
     }
@@ -120,8 +120,8 @@ FfmpegVideoDecoder::configure(core::VideoCodec codec, const std::vector<uint8_t>
     ctx_ = avcodec_alloc_context3(dec);
     if (!ctx_) return Action::Failed;
 
-    // extradata 用 AnnexB（带起始码）—— 若首字节是 0x01，解码器会以为数据是
-    // 长度前缀格式，之后喂 AnnexB 全解错。必须给 +padding 的零填充缓冲。
+    // extradata uses AnnexB (with start codes) -- if the first byte is 0x01, the decoder thinks the data is
+    // length-prefixed and then decodes all fed AnnexB wrong. Must give a zero-padded buffer with +padding size.
     ctx_->extradata = static_cast<uint8_t*>(
         av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
     if (!ctx_->extradata) {
@@ -131,14 +131,14 @@ FfmpegVideoDecoder::configure(core::VideoCodec codec, const std::vector<uint8_t>
     std::memcpy(ctx_->extradata, extradata.data(), extradata.size());
     ctx_->extradata_size = int(extradata.size());
 
-    // 只开 slice 线程：帧线程（frame threading）会把输出整体延后 N 帧（N≈核数），
-    // 触摸回传对延迟很敏感，不划算。单 slice 的流会自然退化成单线程。
+    // Slice threading only: frame threading delays output by N frames overall (N ~= core count),
+    // and touch feedback is very latency-sensitive, so it is not worth it. A single-slice stream naturally degrades to one thread.
     ctx_->thread_count = 0;
     ctx_->thread_type  = FF_THREAD_SLICE;
 
     const int ret = avcodec_open2(ctx_, dec, nullptr);
     if (ret < 0) {
-        LOG_ERROR("%s：avcodec_open2 失败（%d）", kTag, ret);
+        LOG_ERROR("%s: avcodec_open2 failed (%d)", kTag, ret);
         close();
         return Action::Failed;
     }
@@ -152,11 +152,11 @@ FfmpegVideoDecoder::configure(core::VideoCodec codec, const std::vector<uint8_t>
 
     codec_     = codec;
     codecData_ = codecData;
-    // 协商值只是参考；真实尺寸等第一帧解出来再更新
+    // The negotiated values are only a hint; the real size is updated once the first frame is decoded
     width_ = 0;
     height_ = 0;
 
-    LOG_INFO("%s：解码器已配置 %s，extradata %zu 字节（参数集已转 AnnexB）",
+    LOG_INFO("%s: decoder configured %s, extradata %zu bytes (parameter sets converted to AnnexB)",
              kTag, codec == core::VideoCodec::HEVC ? "HEVC" : "H.264", extradata.size());
     return Action::Rebuilt;
 }
@@ -167,7 +167,7 @@ void FfmpegVideoDecoder::receiveAll(const std::function<void(const AVFrame*)>& o
         const int ret = avcodec_receive_frame(ctx_, frame_);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) return;
         if (ret < 0) {
-            LOG_WARN("%s：avcodec_receive_frame 出错（%d）", kTag, ret);
+            LOG_WARN("%s: avcodec_receive_frame error (%d)", kTag, ret);
             return;
         }
         if (frame_->width > 0 && frame_->height > 0) {
@@ -184,7 +184,7 @@ bool FfmpegVideoDecoder::decode(const uint8_t* data, size_t len,
 {
     if (!ctx_ || !pkt_) return false;
 
-    // 先把上一轮攒下的输出取干净，避免下面 send 撞 EAGAIN
+    // Drain the output accumulated in the previous round first, so the send below does not hit EAGAIN
     receiveAll(onFrame);
 
     av_packet_unref(pkt_);
@@ -193,12 +193,12 @@ bool FfmpegVideoDecoder::decode(const uint8_t* data, size_t len,
 
     const int ret = avcodec_send_packet(ctx_, pkt_);
     if (ret < 0) {
-        // EAGAIN：drain 过一轮还塞不进去，说明解码器积压 —— 丢这一帧但不当作致命错误
+        // EAGAIN: still cannot push after draining a round, so the decoder is backed up -- drop this frame but treat it as non-fatal
         if (ret == AVERROR(EAGAIN)) {
-            LOG_WARN("%s：解码器积压，丢弃一帧（%zu 字节）", kTag, len);
+            LOG_WARN("%s: decoder backlogged, dropping one frame (%zu bytes)", kTag, len);
             return true;
         }
-        LOG_WARN("%s：avcodec_send_packet 出错（%d）", kTag, ret);
+        LOG_WARN("%s: avcodec_send_packet error (%d)", kTag, ret);
         return false;
     }
 

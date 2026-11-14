@@ -1,16 +1,16 @@
 #!/bin/sh
 # ============================================================================
-# build-ohos-openssl.sh —— 给鸿蒙交叉编译一份 OpenSSL（只要 libcrypto）
+# build-ohos-openssl.sh — cross-compile OpenSSL for HarmonyOS (libcrypto only)
 # ============================================================================
-# 为什么需要：core/mfi 的 MFi 签名要"对 32 字节摘要直接做 ECDSA"，而鸿蒙系统
-# crypto 的 ECDSA 只有 "ECC|SHA256" 这种会再哈希一次的算法名，没有 NoHash
-# （实测 OH_CryptoSign_Create("ECC|NoHash") 返回 17620003）。所以只能自带
-# OpenSSL —— 这也是项目在桌面/Android 上一直用的那份依赖，不算新增。
+# Why this is needed: core/mfi's MFi signing needs "ECDSA directly over a 32-byte digest", but the HarmonyOS system
+# crypto ECDSA only offers algorithm names like "ECC|SHA256" that hash again; there is no NoHash
+# (measured: OH_CryptoSign_Create("ECC|NoHash") returns 17620003). So we have to bundle
+# OpenSSL — the same dependency the project already uses on desktop/Android, so not a new addition.
 #
-# 产物：tmp/ohos-ssl/install-aarch64/{include,lib/libcrypto.a}
-# （tmp/ 在 .gitignore 里，二进制不进库；换台机器重跑本脚本即可）
+# Output: tmp/ohos-ssl/install-aarch64/{include,lib/libcrypto.a}
+# (tmp/ is in .gitignore, so binaries never enter the repo; just rerun this script on another machine)
 #
-# 用法：
+# Usage:
 #   ./scripts/build-ohos-openssl.sh
 set -e
 
@@ -22,8 +22,8 @@ WORK="$ROOT/tmp/ohos-ssl"
 PREFIX="$WORK/install-aarch64"
 
 if [ ! -x "$TOOLCHAIN/aarch64-unknown-linux-ohos-clang" ]; then
-    echo "找不到 OHOS 工具链：$TOOLCHAIN" >&2
-    echo "设 DEVECO_SDK_HOME 指向 DevEco 的 sdk 目录" >&2
+    echo "OHOS toolchain not found: $TOOLCHAIN" >&2
+    echo "Set DEVECO_SDK_HOME to point at DevEco's sdk directory" >&2
     exit 1
 fi
 
@@ -31,7 +31,7 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 if [ ! -f "openssl-$VERSION.tar.gz" ]; then
-    echo "下载 openssl-$VERSION …"
+    echo "Downloading openssl-$VERSION …"
     curl -L --fail --retry 3 -o "openssl-$VERSION.tar.gz" \
         "https://github.com/openssl/openssl/releases/download/openssl-$VERSION/openssl-$VERSION.tar.gz"
 fi
@@ -42,10 +42,10 @@ fi
 
 cd "openssl-$VERSION"
 
-# no-asm：跳过 perl 汇编，省掉"目标名/汇编文件对不上"的一整类问题
-# no-shared：静态链进 liballplay_core.so，应用包里不额外带 .so
-# 工具链里只有 aarch64-unknown-linux-ohos-clang 这一个带前缀的包装（编解码器），
-# ar/ranlib 只有不带前缀的 llvm-*，所以显式指定，别指望 --cross-compile-prefix。
+# no-asm: skip perl assembly, avoiding a whole class of "target name / assembly file mismatch" problems
+# no-shared: link statically into liballplay_core.so so the app bundle carries no extra .so
+# The toolchain has only one prefixed wrapper, aarch64-unknown-linux-ohos-clang (the codec),
+# while ar/ranlib are unprefixed llvm-*; specify them explicitly and do not rely on --cross-compile-prefix.
 export PATH="$TOOLCHAIN:$PATH"
 ./Configure linux-aarch64 \
     CC=aarch64-unknown-linux-ohos-clang \
@@ -58,5 +58,5 @@ make -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 make install_sw
 
 echo
-echo "完成：$PREFIX/lib/libcrypto.a"
-echo "重新构建 HAP 时会自动用上（CMake 里检测到这个路径就编真 MFi）"
+echo "Done: $PREFIX/lib/libcrypto.a"
+echo "The next HAP build will pick it up automatically (CMake builds real MFi when it sees this path)"

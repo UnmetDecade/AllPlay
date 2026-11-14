@@ -1,12 +1,12 @@
 // ============================================================================
-// jni_bridge.cpp —— AllPlay 原生桥：把 core::port 接口实现成对 Kotlin 服务的下调
+// jni_bridge.cpp — AllPlay native bridge: implements the core::port interfaces as downcalls to Kotlin services
 // ============================================================================
-// core 跑在原生线程（RTSP/屏幕流）。蓝牙 / mDNS / 视频解码经 JNI 下调到
-// Kotlin 的 BluetoothService / MdnsService / MediaCodecSink；TCP 与网卡复用
-// platform/posix/net_posix.cpp（NDK 提供 POSIX socket + getifaddrs）。
+// core runs on native threads (RTSP/screen stream). Bluetooth / mDNS / video decode are downcalled via JNI into
+// Kotlin's BluetoothService / MdnsService / MediaCodecSink; TCP and NIC reuse
+// platform/posix/net_posix.cpp (the NDK provides POSIX sockets + getifaddrs).
 //
-// 线程约定：JavaVM 指针在 JNI_OnLoad 拿；core 线程下调前 AttachCurrentThread。
-// 服务对象（bt/mdns/video）用 NewGlobalRef 保活到 nativeStop。
+// Threading: the JavaVM pointer is obtained in JNI_OnLoad; core threads AttachCurrentThread before downcalls.
+// Service objects (bt/mdns/video) are kept alive with NewGlobalRef until nativeStop.
 #include <jni.h>
 
 #include "airplay/server.h"
@@ -29,8 +29,8 @@
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "AllPlay", __VA_ARGS__)
 
-// net_posix.cpp 的 makePlatformServices 会引用 allplay::posix::makeMdnsAdvertiser；
-// Android 不编译 posix 的 mdns/bt 实现，这里给个桩满足链接（实际用 jni_bridge 自组的 services）。
+// makePlatformServices in net_posix.cpp references allplay::posix::makeMdnsAdvertiser;
+// Android does not compile the posix mdns/bt implementations, so provide a stub here to satisfy the linker (the actual services are assembled in jni_bridge).
 namespace allplay::posix {
 std::unique_ptr<core::IMdnsAdvertiser> makeMdnsAdvertiser() { return nullptr; }
 }
@@ -38,7 +38,7 @@ std::unique_ptr<core::IMdnsAdvertiser> makeMdnsAdvertiser() { return nullptr; }
 namespace {
 
 JavaVM* g_vm = nullptr;
-jobject g_bt    = nullptr;   // BluetoothService（global ref）
+jobject g_bt    = nullptr;   // BluetoothService (global ref)
 jobject g_mdns  = nullptr;   // MdnsService
 jobject g_video = nullptr;   // MediaCodecSink
 jobject g_audio = nullptr;   // AudioSink
@@ -47,7 +47,7 @@ std::unique_ptr<core::airplay::Receiver> g_receiver;
 core::PlatformServices g_services;
 core::airplay::ReceiverConfig g_cfg;
 
-/// 拿当前线程的 JNIEnv（core 线程要 attach）。
+/// Get the current thread's JNIEnv (core threads must attach).
 JNIEnv* envOf(bool* attached)
 {
     *attached = false;
@@ -75,7 +75,7 @@ jstring newJstr(JNIEnv* env, const std::string& s)
 }  // namespace
 
 // ---------------------------------------------------------------------------
-/// 把 BluetoothService 的 handle 包成 core::IByteStream（read/write/close 下调 Kotlin）。
+/// Wrap a BluetoothService handle as core::IByteStream (read/write/close downcall into Kotlin).
 class JniByteStream : public core::IByteStream {
 public:
     explicit JniByteStream(int handle) : handle_(handle) {}
@@ -92,9 +92,9 @@ public:
         if (!m) return -1;
         auto arr = static_cast<jbyteArray>(env->CallObjectMethod(g_bt, m, jint(handle_),
                                                                  jint(n), jint(timeoutMs)));
-        if (!arr) { if (attached) g_vm->DetachCurrentThread(); return -1; }   // null=断开
+        if (!arr) { if (attached) g_vm->DetachCurrentThread(); return -1; }   // null = disconnected
         const jsize len = env->GetArrayLength(arr);
-        if (len == 0) { env->DeleteLocalRef(arr); if (attached) g_vm->DetachCurrentThread(); return 0; }  // 空=超时
+        if (len == 0) { env->DeleteLocalRef(arr); if (attached) g_vm->DetachCurrentThread(); return 0; }  // empty = timeout
         env->GetByteArrayRegion(arr, 0, len, reinterpret_cast<jbyte*>(buf));
         env->DeleteLocalRef(arr);
         if (attached) g_vm->DetachCurrentThread();
@@ -136,7 +136,7 @@ private:
     int handle_ = -1;
 };
 
-// JniBluetooth —— IBluetooth：下调 Kotlin BluetoothService
+// JniBluetooth — IBluetooth: downcalls into Kotlin BluetoothService
 // ---------------------------------------------------------------------------
 class JniBluetooth : public core::IBluetooth {
 public:
@@ -183,8 +183,8 @@ public:
         if (!m) return nullptr;
         const jint h = env->CallIntMethod(g_bt, m, newJstr(env, address), newJstr(env, uuid));
         if (attached) g_vm->DetachCurrentThread();
-        if (h < 0) { if (err) *err = "connectSpp 失败"; return nullptr; }
-        // 关掉上一条 RFCOMM：iPhone 的 iAP2 SPP 服务只接受一条连接，重连前必须先关旧的
+        if (h < 0) { if (err) *err = "connectSpp failed"; return nullptr; }
+        // Close the previous RFCOMM link: the iPhone's iAP2 SPP service accepts only one connection, so the old one must be closed before reconnecting
         closeStream();
         currentStream_ = new JniByteStream(h);
         return currentStream_;
@@ -201,7 +201,7 @@ public:
         if (!m) return nullptr;
         const jint h = env->CallIntMethod(g_bt, m, newJstr(env, core::kWirelessIapUuid), jint(timeoutMs));
         if (attached) g_vm->DetachCurrentThread();
-        if (h < 0) { if (err) *err = "listenSpp 失败"; return nullptr; }
+        if (h < 0) { if (err) *err = "listenSpp failed"; return nullptr; }
         closeStream();
         currentStream_ = new JniByteStream(h);
         return currentStream_;
@@ -217,7 +217,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// JniMdns —— IMdnsAdvertiser：下调 Kotlin MdnsService（NsdManager）
+// JniMdns — IMdnsAdvertiser: downcalls into Kotlin MdnsService (NsdManager)
 // ---------------------------------------------------------------------------
 class JniMdns : public core::IMdnsAdvertiser {
 public:
@@ -238,14 +238,14 @@ public:
         const bool ok = env->CallBooleanMethod(g_mdns, m, newJstr(env, name), jint(port), arr);
         env->DeleteLocalRef(arr);
         if (attached) g_vm->DetachCurrentThread();
-        if (!ok && err) *err = "NsdManager.registerService 失败";
+        if (!ok && err) *err = "NsdManager.registerService failed";
         return ok;
     }
-    void stop() override { /* NsdManager 在 nativeStop 统一注销 */ }
+    void stop() override { /* NsdManager is unregistered centrally in nativeStop */ }
 };
 
 // ---------------------------------------------------------------------------
-// JniVideo —— IVideoOutput：下调 Kotlin MediaCodecSink（MediaCodec → Surface）
+// JniVideo — IVideoOutput: downcalls into Kotlin MediaCodecSink (MediaCodec → Surface)
 // ---------------------------------------------------------------------------
 class JniVideo : public core::IVideoOutput {
 public:
@@ -311,7 +311,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// JniAudio —— IAudioOutput：下调 Kotlin AudioSink（Opus/AAC 解码 + AudioTrack）
+// JniAudio — IAudioOutput: downcalls into Kotlin AudioSink (Opus/AAC decode + AudioTrack)
 // ---------------------------------------------------------------------------
 class JniAudio : public core::IAudioOutput {
 public:
@@ -360,7 +360,7 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// 组合根：装配 PlatformServices 并起 Receiver
+// Composition root: assemble PlatformServices and start the Receiver
 // ---------------------------------------------------------------------------
 static JniBluetooth* s_bt = nullptr;
 static JniMdns*       s_mdns = nullptr;
@@ -423,13 +423,13 @@ Java_com_allplay_app_NativeAllPlay_nativeStart(JNIEnv* env, jobject,
          int(port), g_receiver->ip().c_str(), g_receiver->info().deviceId.c_str(),
          btMacStr.c_str(), ssidStr.c_str());
 
-    // 蓝牙触发线程：连 iPhone 的 iAP2（RFCOMM）→ 0x4301（手机随后走 Wi-Fi 来连 AirPlay）
-    // 旋转重启时 skipBtTrigger=true：iPhone 已在同一 WiFi，直接靠 mDNS + carplay-probe 快速重连，别重走慢速蓝牙握手
+    // Bluetooth trigger thread: connect to the iPhone's iAP2 (RFCOMM) → 0x4301 (the phone then connects to AirPlay over Wi-Fi)
+    // On rotation restart skipBtTrigger=true: the iPhone is already on the same WiFi, so reconnect quickly via mDNS + carplay-probe instead of the slow Bluetooth handshake
     if (!skipBtTrigger) {
         std::thread([btMacStr, ssidStr, passStr, ipStr] {
             core::bt::BtTriggerParams bp;
             bp.deviceName = "iPhone";
-            bp.serverMode = false;                   // 客户端模式：主动连手机的 iAP2 SPP 服务（协议主路径）
+            bp.serverMode = false;                   // Client mode: actively connect to the phone's iAP2 SPP service (main protocol path)
             bp.serverWaitMs = 180000;
             auto& c = bp.iap2;
             c.name = g_cfg.name;
@@ -442,8 +442,8 @@ Java_com_allplay_app_NativeAllPlay_nativeStart(JNIEnv* env, jobject,
             c.ssid = ssidStr;
             c.passphrase = passStr;
             c.channel = 0;
-            c.securityType = passStr.empty() ? 0 : 2;   // 有口令→WPA2；无口令→NONE
-            c.ipAddresses = {ipStr.empty() ? g_receiver->ip() : ipStr};   // 热点模式用热点接口 IP
+            c.securityType = passStr.empty() ? 0 : 2;   // passphrase → WPA2; none → NONE
+            c.ipAddresses = {ipStr.empty() ? g_receiver->ip() : ipStr};   // in hotspot mode use the hotspot interface IP
             c.airPlayPort = g_receiver->port();
             c.deviceIdentifier = g_receiver->info().deviceId;
             c.publicKeyHex = g_receiver->info().pkHex;
@@ -455,10 +455,10 @@ Java_com_allplay_app_NativeAllPlay_nativeStart(JNIEnv* env, jobject,
                  c.ssid.c_str(), c.securityType, c.passphrase.size(),
                  c.ipAddresses.empty() ? "?" : c.ipAddresses[0].c_str());
 
-            // iPhone 的 iAP2 SPP 服务在蓝牙 ACL 连上后才异步打开，单次 connectSpp 极易太早失败。
-            // 整链重试（枚举→RFCOMM→iAP2→0x4301），直到发出 0x4301。
-            // 发出后等 AirPlay 会话断开（如 iPhone 手动断开 WiFi），断开后重新触发——否则
-            // iPhone 重连 WiFi 后不会自动重进 CarPlay。
+            // The iPhone's iAP2 SPP service opens asynchronously only after the Bluetooth ACL link is up, so a single connectSpp often fails too early.
+            // Retry the whole chain (enumerate→RFCOMM→iAP2→0x4301) until 0x4301 is sent.
+            // After sending, wait for the AirPlay session to drop (e.g. the iPhone disconnects WiFi), then trigger again — otherwise
+            // the iPhone will not re-enter CarPlay automatically after reconnecting WiFi.
             constexpr int kTriggerAttempts = 10;
             constexpr int kRetryDelayMs    = 3000;
             for (;;) {
@@ -466,38 +466,38 @@ Java_com_allplay_app_NativeAllPlay_nativeStart(JNIEnv* env, jobject,
                 for (int attempt = 1; attempt <= kTriggerAttempts; ++attempt) {
                     auto r = core::bt::runBtTrigger(s_bt, bp, [](const std::string& s) { LOGI("[bt] %s", s.c_str()); });
                     if (r.ok) {
-                        LOGI("bt trigger 成功（第 %d 次尝试）", attempt);
+                        LOGI("bt trigger succeeded (attempt %d)", attempt);
                         triggered = true;
                         break;
                     }
-                    LOGI("bt trigger 第 %d/%d 次失败：%s", attempt, kTriggerAttempts, r.error.c_str());
+                    LOGI("bt trigger attempt %d/%d failed: %s", attempt, kTriggerAttempts, r.error.c_str());
                     if (attempt < kTriggerAttempts)
                         std::this_thread::sleep_for(std::chrono::milliseconds(kRetryDelayMs));
                 }
                 if (!triggered) {
-                    LOGI("bt trigger 重试 %d 次后仍失败，放弃", kTriggerAttempts);
+                    LOGI("bt trigger still failed after %d retries, giving up", kTriggerAttempts);
                     break;
                 }
-                // 等 AirPlay 会话建立（sessionActive → true），最多 60 秒
+                // Wait for the AirPlay session to come up (sessionActive → true), at most 60 seconds
                 bool becameActive = false;
                 for (int i = 0; i < 60; ++i) {
                     if (g_receiver && g_receiver->sessionActive()) { becameActive = true; break; }
                     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 }
                 if (!becameActive) {
-                    LOGI("AirPlay 会话 60 秒内未建立，重新触发蓝牙");
+                    LOGI("AirPlay session not established within 60s, re-triggering Bluetooth");
                     continue;
                 }
-                // 等 AirPlay 会话断开（sessionActive → false），再重新触发
+                // Wait for the AirPlay session to drop (sessionActive → false), then trigger again
                 while (g_receiver && g_receiver->sessionActive()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 }
-                LOGI("AirPlay 会话已断开，重新触发蓝牙");
+                LOGI("AirPlay session disconnected, re-triggering Bluetooth");
                 std::this_thread::sleep_for(std::chrono::milliseconds(1000));
             }
         }).detach();
     } else {
-        LOGI("跳过蓝牙触发（旋转重启）：走 mDNS + carplay-probe 快速重连");
+        LOGI("Skipping Bluetooth trigger (rotation restart): fast reconnect via mDNS + carplay-probe");
     }
 
     return port;
@@ -563,9 +563,9 @@ JNIEXPORT jint JNICALL
 Java_com_allplay_app_NativeAllPlay_nativeSessionState(JNIEnv* env, jobject)
 {
     if (!g_receiver) return 0;
-    if (g_receiver->sessionActive()) return 2;   // 已连接（RECORD 后）
-    if (g_receiver->connecting())   return 1;   // 连接中（收到 RTSP 请求但未 RECORD）
-    return 0;                                    // 等待连接
+    if (g_receiver->sessionActive()) return 2;   // connected (after RECORD)
+    if (g_receiver->connecting())   return 1;   // connecting (RTSP request received but not yet RECORD)
+    return 0;                                    // waiting for connection
 }
 
 }  // extern "C"

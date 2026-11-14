@@ -1,8 +1,8 @@
 // ============================================================================
-// platform/posix/net_posix.cpp —— TCP 监听/连接 + 网卡信息（Linux/macOS 共用）
+// platform/posix/net_posix.cpp -- TCP listener/connection + network interface info (shared by Linux/macOS)
 // ============================================================================
-// 实现 core::ITcpListener / core::ITcpStream / core::INetworkInfo。
-// 读超时用 poll() 按调用给；accept 用 poll() 轮询，stop() 关闭监听 fd 即会退出。
+// Implements core::ITcpListener / core::ITcpStream / core::INetworkInfo.
+// Read timeouts are per-call via poll(); accept polls with poll(), and stop() closes the listening fd to make it exit.
 #include "posix/posix.h"
 
 #include "common/log.h"
@@ -14,13 +14,13 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/wait.h>          // pclose 的退出码（有线 NCM bring-up 走 shell）
+#include <sys/wait.h>          // pclose exit codes (wired NCM bring-up goes through the shell)
 #include <unistd.h>
 
 #if defined(__APPLE__)
 #  include <net/if_dl.h>       // sockaddr_dl / LLADDR
 #else
-#  include <linux/if_packet.h> // sockaddr_ll（AF_PACKET）
+#  include <linux/if_packet.h> // sockaddr_ll (AF_PACKET)
 #  include <linux/sockios.h>   // SIOCGIFHWADDR
 #  include <sys/ioctl.h>
 #endif
@@ -33,7 +33,7 @@
 #include <vector>
 
 #if !defined(__APPLE__)
-#  include <dirent.h>          // /sys/class/net 枚举（有线 CarPlay 的 NCM 网卡）
+#  include <dirent.h>          // /sys/class/net enumeration (wired CarPlay NCM interface)
 #  include <cstdlib>
 #endif
 
@@ -41,7 +41,7 @@ namespace allplay::posix {
 
 namespace {
 
-// macOS 无 MSG_NOSIGNAL（往断开的 socket 写会 SIGPIPE）→ 用 SO_NOSIGPIPE。
+// macOS has no MSG_NOSIGNAL (writing to a closed socket raises SIGPIPE) -> use SO_NOSIGPIPE.
 #if !defined(MSG_NOSIGNAL)
 #  define MSG_NOSIGNAL 0
 #endif
@@ -55,7 +55,7 @@ void setNoSigpipe(int fd)
 }
 
 // ---------------------------------------------------------------------------
-// TCP 流
+// TCP stream
 // ---------------------------------------------------------------------------
 class PosixTcpStream : public core::ITcpStream {
 public:
@@ -68,7 +68,7 @@ public:
         if (fd_ < 0) return -1;
         struct pollfd pfd{fd_, POLLIN, 0};
         int r = ::poll(&pfd, 1, timeoutMs < 0 ? -1 : timeoutMs);
-        if (r == 0) return 0;                       // 超时
+        if (r == 0) return 0;                       // timeout
         if (r < 0) {
             if (errno == EINTR) return read(buf, n, timeoutMs);
             return -1;
@@ -76,7 +76,7 @@ public:
         if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
         ssize_t got = ::recv(fd_, buf, n, 0);
         if (got > 0) return int(got);
-        if (got == 0) return -1;                    // 对端关闭
+        if (got == 0) return -1;                    // peer closed
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         return -1;
     }
@@ -103,7 +103,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// TCP 监听
+// TCP listener
 // ---------------------------------------------------------------------------
 class PosixTcpListener : public core::ITcpListener {
 public:
@@ -111,26 +111,26 @@ public:
 
     bool start(const std::string& bindAddr, uint16_t port, std::string* err) override
     {
-        // IPv6 双栈监听：一个监听器同时收 IPv4 与 IPv6（iPhone 的 CarPlay 常走 IPv6）
+        // Dual-stack IPv6 listener: a single listener accepts both IPv4 and IPv6 (iPhone CarPlay typically uses IPv6)
         int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
         if (fd < 0) {
-            if (err) *err = "socket 失败：" + std::string(std::strerror(errno));
+            if (err) *err = "socket failed: " + std::string(std::strerror(errno));
             return false;
         }
         int one = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
         int zero = 0;
-        ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);   // 双栈：也收 IPv4
+        ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);   // dual stack: also accept IPv4
 
         struct sockaddr_in6 addr{};
         addr.sin6_family = AF_INET6;
         addr.sin6_port = htons(port);
         addr.sin6_addr = in6addr_any;
         if (!bindAddr.empty()) {
-            // "地址%网卡" 的写法要在这里拆开：**链路本地（fe80::/10）绑定时必须给
-            // scope id**，不给就是 bind() 直接 EINVAL —— 不是"绑不上"，是"参数非法"，
-            // 报错信息很容易把人往错的方向带。inet_pton 不认 %zone，所以自己切。
-            // 有线 CarPlay 那条路绑的就是 NCM 网卡上的 fe80::2，必然走到这个分支。
+            // The "address%interface" form has to be split here: **link-local (fe80::/10) binds
+            // require a scope id**; without one bind() returns EINVAL outright -- not "cannot bind"
+            // but "invalid argument", which easily misleads. inet_pton does not understand %zone, so split it ourselves.
+            // The wired CarPlay path binds fe80::2 on the NCM interface and always takes this branch.
             std::string host = bindAddr;
             const size_t pct = host.find('%');
             if (pct != std::string::npos) {
@@ -139,20 +139,20 @@ public:
                 const unsigned idx = ::if_nametoindex(zone.c_str());
                 if (idx == 0) {
                     ::close(fd);
-                    if (err) *err = "绑定地址里的网卡名不认：" + zone;
+                    if (err) *err = "unknown interface name in bind address: " + zone;
                     return false;
                 }
                 addr.sin6_scope_id = idx;
             } else if (host.rfind("fe80:", 0) == 0 || host.rfind("FE80:", 0) == 0) {
                 ::close(fd);
-                if (err) *err = "链路本地地址必须带 %网卡（不然 bind 会 EINVAL）：" + bindAddr;
+                if (err) *err = "link-local address must include %<interface> (otherwise bind returns EINVAL): " + bindAddr;
                 return false;
             }
-            // 支持 IPv6 地址，或 IPv4 点分（写入 v4-mapped 的低 4 字节）
+            // Accept an IPv6 address or dotted IPv4 (written into the low 4 bytes of a v4-mapped address)
             if (::inet_pton(AF_INET6, host.c_str(), &addr.sin6_addr) != 1 &&
                 ::inet_pton(AF_INET, host.c_str(), &addr.sin6_addr.s6_addr[12]) != 1) {
                 ::close(fd);
-                if (err) *err = "非法绑定地址：" + bindAddr;
+                if (err) *err = "invalid bind address: " + bindAddr;
                 return false;
             }
         }
@@ -160,7 +160,7 @@ public:
             ::listen(fd, 16) != 0) {
             int e = errno;
             ::close(fd);
-            if (err) *err = "绑定/监听失败：" + std::string(std::strerror(e));
+            if (err) *err = "bind/listen failed: " + std::string(std::strerror(e));
             return false;
         }
 
@@ -201,7 +201,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// UDP socket（音频 RTP/RTCP）
+// UDP socket (audio RTP/RTCP)
 // ---------------------------------------------------------------------------
 class PosixUdpSocket : public core::IUdpSocket {
 public:
@@ -209,9 +209,9 @@ public:
 
     bool bind(uint16_t port, std::string* err) override
     {
-        int fd = ::socket(AF_INET6, SOCK_DGRAM, 0);   // 双栈 UDP
+        int fd = ::socket(AF_INET6, SOCK_DGRAM, 0);   // dual-stack UDP
         if (fd < 0) {
-            if (err) *err = "udp socket 失败：" + std::string(std::strerror(errno));
+            if (err) *err = "udp socket failed: " + std::string(std::strerror(errno));
             return false;
         }
         int zero = 0;
@@ -223,7 +223,7 @@ public:
         if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof addr) != 0) {
             int e = errno;
             ::close(fd);
-            if (err) *err = "udp bind 失败：" + std::string(std::strerror(e));
+            if (err) *err = "udp bind failed: " + std::string(std::strerror(e));
             return false;
         }
         fd_ = fd;
@@ -243,7 +243,7 @@ public:
         if (fd_ < 0) return -1;
         struct pollfd pfd{fd_, POLLIN, 0};
         const int r = ::poll(&pfd, 1, timeoutMs < 0 ? -1 : timeoutMs);
-        if (r <= 0) return r;   // 0 = 超时；-1 = 错误
+        if (r <= 0) return r;   // 0 = timeout; -1 = error
         peerLen_ = sizeof peer_;
         const ssize_t got = ::recvfrom(fd_, buf, n, 0,
                                        reinterpret_cast<struct sockaddr*>(&peer_), &peerLen_);
@@ -268,7 +268,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 网卡信息
+// Network interface info
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -286,7 +286,7 @@ std::string ipv4String(const struct sockaddr_in& sin)
 }
 
 #if !defined(__APPLE__)
-/// 读一个 sysfs 小文本文件并去掉尾部换行（失败返回空串）。
+/// Read a small sysfs text file and strip trailing newlines (empty string on failure).
 std::string readSmallFile(const std::string& path)
 {
     std::FILE* f = std::fopen(path.c_str(), "r");
@@ -301,8 +301,8 @@ std::string readSmallFile(const std::string& path)
 }
 #endif
 
-// 枚举所有 IPv4 网卡。桌面/Linux 用 getifaddrs；Android 4.4（API<24）没有
-// getifaddrs/freeifaddrs，改用 SIOCGIFCONF（AF_INET socket 下每条目固定大小）。
+// Enumerate all IPv4 interfaces. Desktop/Linux uses getifaddrs; Android 4.4 (API<24) lacks
+// getifaddrs/freeifaddrs, so SIOCGIFCONF is used instead (fixed-size entries on an AF_INET socket).
 bool enumerateIPv4(std::vector<IfInfo>* out)
 {
     out->clear();
@@ -360,7 +360,7 @@ public:
             std::string ip = ipv4String(ifa.addr);
             if (ip.empty()) continue;
             if (ifnameOut) *ifnameOut = ifa.name;
-            return ip;   // 第一个够（lo 已排除；多网卡用 --ifname 显式指定）
+            return ip;   // first one is enough (lo is excluded; for multiple NICs specify --ifname explicitly)
         }
         return {};
     }
@@ -395,7 +395,7 @@ public:
         freeifaddrs(head);
         return ok;
 #else
-        // 有 getifaddrs 时先试 AF_PACKET；Android 4.4（API<24）没有 getifaddrs，直接走 SIOCGIFHWADDR。
+        // With getifaddrs, try AF_PACKET first; Android 4.4 (API<24) has no getifaddrs, so go straight to SIOCGIFHWADDR.
 #if !(defined(__ANDROID__) && __ANDROID_API__ < 24)
         struct ifaddrs* head = nullptr;
         if (getifaddrs(&head) == 0) {
@@ -428,9 +428,9 @@ public:
     std::string interfaceForUsbDevice(int bus, int address) override
     {
 #if defined(__APPLE__)
-        // macOS 上没有内核 cdc_ncm 可查：NCM 网卡是 AppleUSBNCMData 挂出来的，
-        // 映射关系只在 IORegistry 里（按序列号找，见 usbmuxd_mac.cpp 的
-        // prepareWiredNcmDarwin）。这里给不出网卡名 —— 调用方会退回到"显式指定接口"。
+        // On macOS there is no kernel cdc_ncm to query: the NCM interface is exposed by AppleUSBNCMData,
+        // and the mapping exists only in IORegistry (looked up by serial number; see prepareWiredNcmDarwin
+        // in usbmuxd_mac.cpp). No interface name can be produced here -- callers fall back to "explicitly specify the interface".
         (void)bus;
         (void)address;
         return {};
@@ -442,20 +442,20 @@ public:
         const std::string wantBus  = std::to_string(bus);
         const std::string wantAddr = std::to_string(address);
 
-        // 同一个 USB 设备可能挂出**多张**网卡：iPhone 进 CarPlay 配置（6）之后，
-        // 内核同时给 ipheth（6.2，Apple 私有，实测常驻 NO-CARRIER）和 cdc_ncm
-        // （6.3，真正跑 IP 的那条）各绑了一张。readdir 的顺序不保证，先撞上
-        // ipheth 就会把 fe80::2 钉到一张永远没有载波的网卡上 —— 手机按 0x4301
-        // 里的地址发来的 SYN 到了另一张网卡上，内核查不到本机地址，静默丢掉
-        // （症状：RX/TX 全是 0 字节，监听 socket 永远不 accept）。
-        // 所以先收齐候选再打分：cdc_ncm > 有载波 > 随便一张。
+        // One USB device may expose **several** network interfaces: after the iPhone enters the
+        // CarPlay configuration (6), the kernel binds both ipheth (6.2, Apple-private, observed
+        // permanently NO-CARRIER) and cdc_ncm (6.3, the one that actually carries IP). readdir
+        // order is not guaranteed; hitting ipheth first would pin fe80::2 to an interface that never
+        // has carrier -- SYNs from the phone to the 0x4301 address then arrive on the other interface,
+        // the kernel finds no local address and drops them silently (symptom: RX/TX all zero bytes, listener never accepts).
+        // So collect candidates first, then score: cdc_ncm > has carrier > anything.
         std::vector<std::string> cands;
         while (struct dirent* e = ::readdir(d)) {
             const std::string name = e->d_name;
             if (name == "." || name == ".." || name == "lo") continue;
-            // /sys/class/net/<n>/device 是指向 USB **接口**目录的符号链接
-            // （形如 …/usb1/1-3/1-3:6.3）；它的父目录才是 USB 设备本身，
-            // busnum/devnum 就在那里 —— 和 libusb 报的 bus/address 是同一对数。
+            // /sys/class/net/<n>/device is a symlink to the USB **interface** directory
+            // (e.g. .../usb1/1-3/1-3:6.3); its parent is the USB device itself,
+            // where busnum/devnum live -- the same pair libusb reports as bus/address.
             const std::string usbDev = "/sys/class/net/" + name + "/device/..";
             if (readSmallFile(usbDev + "/busnum") != wantBus) continue;
             if (readSmallFile(usbDev + "/devnum") != wantAddr) continue;
@@ -490,8 +490,8 @@ public:
     {
         std::vector<std::string> out;
 #if defined(__ANDROID__)
-        // Android 宿主没接有线（USB cdc_ncm）这条路（见 core/port/network.h 的默认实现），
-        // 且 getifaddrs 要 API 24+ 才有（minSdk 19 下不声明）—— 直接给空，退回接口默认行为。
+        // The Android host does not support the wired (USB cdc_ncm) path (see the default implementation in core/port/network.h),
+        // and getifaddrs requires API 24+ (not declared under minSdk 19) -- return empty and fall back to the interface default behavior.
         (void)ifname;
         return out;
 #else
@@ -533,15 +533,15 @@ std::unique_ptr<core::IUdpSocket> makeUdpSocket()
 }
 
 // ---------------------------------------------------------------------------
-// 有线 CarPlay 的媒体面（内核 cdc_ncm）
+// Wired CarPlay media plane (kernel cdc_ncm)
 // ---------------------------------------------------------------------------
 
 namespace {
 
-/// 跑一条 shell 命令，输出收进 out。返回退出码（-1 = 起不来进程）。
-/// 为什么走 shell 而不是 netlink：这里要干的活（摘 NetworkManager、拉 up、钉地址带
-/// nodad）在 ip/nmcli 里都是一行，自己写 netlink 得几百行且更容易写错。这是**开机
-/// bring-up 路径**，不是热路径，一次进程开销无所谓。
+/// Run a shell command and collect its output into out. Returns the exit code (-1 = could not start the process).
+/// Why the shell instead of netlink: the jobs here (detach NetworkManager, bring up, pin an address with
+/// nodad) are one-liners in ip/nmcli, while hand-written netlink would take hundreds of lines and be easier to get wrong. This is a
+/// **boot-time bring-up path**, not a hot path, so one process spawn does not matter.
 int runCmd(const std::string& cmd, std::string* out)
 {
     const std::string full = cmd + " 2>&1";
@@ -577,8 +577,8 @@ bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLoca
     const std::string ifname = networkInfo().interfaceForUsbDevice(usbBus, usbAddress);
     if (ifname.empty()) {
         if (err != nullptr) {
-            *err = "找不到 USB " + std::to_string(usbBus) + "-" + std::to_string(usbAddress) +
-                   " 挂出来的网卡（内核 cdc_ncm 建了没有？设备进 CarPlay 配置了吗？）";
+            *err = "cannot find the network interface exposed by USB " + std::to_string(usbBus) + "-" + std::to_string(usbAddress) +
+                   " (did the kernel cdc_ncm create it? did the device enter the CarPlay configuration?)";
         }
         return false;
     }
@@ -589,25 +589,25 @@ bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLoca
 
     const std::string want = wantLinkLocal.empty() ? std::string("fe80::2") : wantLinkLocal;
 
-    // ① 先把 NetworkManager 摘开。它会把这根线当"有线连接"去要 DHCP（点对点链路上
-    //    根本没有 DHCP 服务器），一直卡在 connecting，并且随时可能清掉我们钉的地址。
-    //    摘不掉不算致命（有些系统没装 NM），继续往下走。
+    // 1. Detach NetworkManager first. It treats this cable as a "wired connection" and asks for
+    //    DHCP (there is no DHCP server on a point-to-point link), stays stuck in connecting, and
+    //    may wipe our pinned address at any time. Failing to detach is not fatal (some systems do not have NM); continue.
     std::string log;
     if (runCmd("nmcli device set '" + ifname + "' managed no", &log) != 0) {
-        LOG_INFO("[wired-ncm] nmcli 摘管失败（没装 NM？不影响）：%s", trimNewlines(log).c_str());
+        LOG_INFO("[wired-ncm] failed to unmanage via nmcli (NM not installed? harmless): %s", trimNewlines(log).c_str());
     } else {
         out->unmanaged = true;
     }
 
-    // ② 拉 up。网卡刚被内核建出来时默认是 DOWN，DOWN 的链路上钉不了地址。
+    // 2. Bring it up. A freshly created interface is DOWN by default, and addresses cannot be pinned on a DOWN link.
     if (runCmd("ip link set dev '" + ifname + "' up", &log) != 0) {
-        if (err != nullptr) *err = "ip link set up 失败：" + trimNewlines(log);
+        if (err != nullptr) *err = "ip link set up failed: " + trimNewlines(log);
         return false;
     }
     out->broughtUp = true;
 
-    // ③ 链路上有没有可用的链路本地地址？没有就自己钉一个。
-    //    判据是"读回来看"，不是"命令退出码"—— 重复 add 会报 EEXIST，那不算失败。
+    // 3. Is there a usable link-local address on the link? If not, pin one ourselves.
+    //    The criterion is "read it back", not "command exit code" -- a duplicate add reports EEXIST, which is not a failure.
     out->ipv6 = networkInfo().interfaceIPv6LinkLocal(ifname);
     bool hasWant = false;
     for (const std::string& a : out->ipv6)
@@ -616,7 +616,7 @@ bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLoca
     if (!hasWant) {
         if (runCmd("ip -6 addr add " + want + "/64 dev '" + ifname + "' nodad", &log) != 0) {
             if (err != nullptr) {
-                *err = "钉 " + want + "/64 失败：" + trimNewlines(log);
+                *err = "failed to pin " + want + "/64: " + trimNewlines(log);
             }
             return false;
         }
@@ -624,7 +624,7 @@ bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLoca
         out->ipv6   = networkInfo().interfaceIPv6LinkLocal(ifname);
     }
 
-    // ④ 钉的那个排第一 —— 调用方（0x4301）只用第一个，得保证它是我们指定的那个。
+    // 4. Put the pinned address first -- the caller (0x4301) uses only the first one, so it must be the one we chose.
     for (size_t i = 0; i < out->ipv6.size(); ++i) {
         if (out->ipv6[i] == want) {
             std::swap(out->ipv6[0], out->ipv6[i]);
@@ -633,12 +633,12 @@ bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLoca
     }
 
     if (out->ipv6.empty()) {
-        if (err != nullptr) *err = ifname + " 上没有 IPv6 链路本地地址（钉完还是没有？）";
+        if (err != nullptr) *err = ifname + " has no IPv6 link-local address (still missing after pinning?)";
         return false;
     }
-    LOG_INFO("[wired-ncm] %s：MAC %s，IPv6 %s（%s），NM %s", ifname.c_str(), out->mac.c_str(),
-             out->ipv6.front().c_str(), out->pinned ? "这次新钉的" : "原本就有",
-             out->unmanaged ? "已摘开" : "没动");
+    LOG_INFO("[wired-ncm] %s: MAC %s, IPv6 %s (%s), NM %s", ifname.c_str(), out->mac.c_str(),
+             out->ipv6.front().c_str(), out->pinned ? "pinned just now" : "already present",
+             out->unmanaged ? "unmanaged" : "untouched");
     return true;
 }
 
@@ -649,7 +649,7 @@ core::PlatformServices makePlatformServices()
     s.makeTcpListener   = &makeTcpListener;
     s.makeMdnsAdvertiser = &makeMdnsAdvertiser;
     s.makeUdpSocket     = &makeUdpSocket;
-    s.bluetooth         = nullptr;   // 蓝牙触发由组合根显式装配（见 makeBluetooth）
+    s.bluetooth         = nullptr;   // Bluetooth trigger is wired explicitly by the composition root (see makeBluetooth)
     return s;
 }
 

@@ -1,6 +1,6 @@
 /**
  * @file   pair_record.cpp
- * @brief  有线配对要用的本地证书材料的实现
+ * @brief  Implementation of local certificate material for wired pairing
  * @author blt
  */
 
@@ -36,10 +36,10 @@ namespace {
 
 constexpr const char* kTag = "pair";
 constexpr int         kRsaBits = 2048;
-/// 有效期 10 年（按 3650 天算，跟 DiPlay 一致）
+/// 10-year validity (3650 days, matching DiPlay)
 constexpr long        kValiditySeconds = 3650L * 24 * 60 * 60;
-/// notBefore 往前挪一天：手机要是时钟慢一点，不至于判成"还没生效"。
-/// 这只动时间，不动手机能看见的任何结构字段。
+/// Shift notBefore back one day so a slightly slow phone clock won't judge it "not yet valid".
+/// This only moves time, not any structural field the phone can see.
 constexpr long        kBackdateSeconds = 24 * 60 * 60;
 
 std::string opensslError()
@@ -52,12 +52,12 @@ std::string opensslError()
         if (!out.empty()) out += " / ";
         out += buf;
     }
-    return out.empty() ? "（OpenSSL 没给错误码）" : out;
+    return out.empty() ? "(OpenSSL provided no error code)" : out;
 }
 
 bool fail(std::string* err, const std::string& what)
 {
-    if (err != nullptr) *err = what + "：" + opensslError();
+    if (err != nullptr) *err = what + ": " + opensslError();
     return false;
 }
 
@@ -72,22 +72,22 @@ EVP_PKEY* genRsa(int bits, std::string* err)
 {
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
     if (ctx == nullptr) {
-        fail(err, "建 RSA 密钥上下文失败");
+        fail(err, "Failed to create RSA key context");
         return nullptr;
     }
     EVP_PKEY* key = nullptr;
     if (EVP_PKEY_keygen_init(ctx) <= 0 || EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0 ||
         EVP_PKEY_keygen(ctx, &key) <= 0) {
         EVP_PKEY_CTX_free(ctx);
-        fail(err, "生成 RSA 密钥失败");
+        fail(err, "Failed to generate RSA key");
         return nullptr;
     }
     EVP_PKEY_CTX_free(ctx);
     return key;
 }
 
-/// 出错时把开头几个字节带上 —— 这一段全是字节级约定，"解不开"这三个字本身没有
-/// 任何信息量，而头 16 字节立刻能分出是 DER（0x30）、PEM 文本（'-'）还是别的。
+/// Include the first few bytes on error — this section is all byte-level conventions; "can't decode"
+/// alone carries no information, while the first 16 bytes immediately tell DER (0x30), PEM text ('-'), or something else.
 std::string hexPreview(const std::vector<uint8_t>& v, size_t n)
 {
     static const char* kHex = "0123456789abcdef";
@@ -102,25 +102,25 @@ std::string hexPreview(const std::vector<uint8_t>& v, size_t n)
     return s;
 }
 
-/// 把手机给的 DevicePublicKey 解成 EVP_PKEY。
-/// 文档/参照实现都说这里是 **PKCS#1 RSAPublicKey DER**，但真机实测拿到的是 **PEM 文本**
-/// （431 字节），所以三种形态都试：PEM 文本、PKCS#1、SubjectPublicKeyInfo。
+/// Decode the phone-supplied DevicePublicKey into an EVP_PKEY.
+/// Docs/reference implementations say **PKCS#1 RSAPublicKey DER**, but the real device gives **PEM text**
+/// (431 bytes), so try all three forms: PEM text, PKCS#1, SubjectPublicKeyInfo.
 EVP_PKEY* parseDevicePublicKey(const std::vector<uint8_t>& der, std::string* err)
 {
     if (der.empty()) {
-        if (err != nullptr) *err = "手机给的 DevicePublicKey 是空的";
+        if (err != nullptr) *err = "DevicePublicKey from the phone is empty";
         return nullptr;
     }
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     struct Candidate {
         const char* inputType;
-        const char* structure;  ///< nullptr = 让解码器自己认
+        const char* structure;  ///< nullptr = let the decoder detect it
     };
-    // 顺序按可能性排。PEM 那条放最前面是因为成本只有一次字符串比较。
+    // Ordered by likelihood. PEM comes first because it only costs one string comparison.
     const Candidate kCandidates[] = {
-        {"PEM", nullptr},              // 万一是 PEM 文本（<data> 里塞 PEM 并非没有先例）
-        {"DER", "type-specific"},      // 文档说的 PKCS#1 RSAPublicKey
+        {"PEM", nullptr},              // in case it is PEM text (PEM inside <data> is not unheard of)
+        {"DER", "type-specific"},      // the documented PKCS#1 RSAPublicKey
         {"DER", "SubjectPublicKeyInfo"},
     };
     for (const Candidate& c : kCandidates) {
@@ -133,8 +133,8 @@ EVP_PKEY* parseDevicePublicKey(const std::vector<uint8_t>& der, std::string* err
         const int            ok = OSSL_DECODER_from_data(dctx, &p, &len);
         OSSL_DECODER_CTX_free(dctx);
         if (ok == 1 && pkey != nullptr) {
-            LOG_INFO("[%s] DevicePublicKey 按 %s/%s 解出来了", kTag, c.inputType,
-                     c.structure != nullptr ? c.structure : "自动");
+            LOG_INFO("[%s] Decoded DevicePublicKey as %s/%s", kTag, c.inputType,
+                     c.structure != nullptr ? c.structure : "auto");
             return pkey;
         }
         EVP_PKEY_free(pkey);
@@ -151,7 +151,7 @@ EVP_PKEY* parseDevicePublicKey(const std::vector<uint8_t>& der, std::string* err
     RSA* rsa = d2i_RSAPublicKey(nullptr, &p, long(der.size()));
     if (rsa == nullptr) {
         p = der.data();
-        rsa = d2i_RSA_PUBKEY(nullptr, &p, long(der.size()));  // 退而求其次：SPKI
+        rsa = d2i_RSA_PUBKEY(nullptr, &p, long(der.size()));  // fallback: SPKI
     }
     if (rsa != nullptr) {
         EVP_PKEY* pkey = EVP_PKEY_new();
@@ -162,47 +162,47 @@ EVP_PKEY* parseDevicePublicKey(const std::vector<uint8_t>& der, std::string* err
 #endif
 
     if (err != nullptr) {
-        *err = "手机给的 DevicePublicKey 解不开（" + std::to_string(der.size()) + " 字节，开头 " +
-               hexPreview(der, 16) + "）：" + opensslError();
+        *err = "Cannot decode DevicePublicKey from the phone (" + std::to_string(der.size()) + " bytes, starts with " +
+               hexPreview(der, 16) + "): " + opensslError();
     }
     return nullptr;
 }
 
-/// 加一条扩展。value 用的是 openssl.cnf 里那套写法（"critical,CA:TRUE" 这种）。
+/// Add an extension. value uses the openssl.cnf syntax (like "critical,CA:TRUE").
 bool addExt(X509* x, X509V3_CTX* v3, int nid, const char* value, std::string* err)
 {
     X509_EXTENSION* ext = X509V3_EXT_conf_nid(nullptr, v3, nid, const_cast<char*>(value));
-    if (ext == nullptr) return fail(err, std::string("造扩展 ") + value + " 失败");
+    if (ext == nullptr) return fail(err, std::string("Failed to build extension ") + value);
     const int rc = X509_add_ext(x, ext, -1);
     X509_EXTENSION_free(ext);
-    if (rc != 1) return fail(err, std::string("挂扩展 ") + value + " 失败");
+    if (rc != 1) return fail(err, std::string("Failed to add extension ") + value);
     return true;
 }
 
-/// 签一张证书。subjectKey 是"证书里写的公钥"——device 证书传的是手机那把。
+/// Sign one certificate. subjectKey is "the public key written into the certificate" — for the device cert, the phone's key.
 X509* makeCert(EVP_PKEY* subjectKey, EVP_PKEY* signKey, bool isCa, bool withSki, std::string* err)
 {
     X509* x = X509_new();
     if (x == nullptr) {
-        fail(err, "X509_new 失败");
+        fail(err, "X509_new failed");
         return nullptr;
     }
-    X509_set_version(x, 2);  // v3：不加扩展的手机可能不认
-    ASN1_INTEGER_set(X509_get_serialNumber(x), 0);  // 恒 0，照抄 DiPlay
-    // 整段窗口往前平移一天（notBefore 与 notAfter 一起挪），这样**跨度仍是整整 10 年**
+    X509_set_version(x, 2);  // v3: the phone may reject certs without extensions
+    ASN1_INTEGER_set(X509_get_serialNumber(x), 0);  // always 0, copied from DiPlay
+    // Shift the whole window back one day (notBefore and notAfter together) so the **span is still exactly 10 years**
     X509_gmtime_adj(X509_getm_notBefore(x), -kBackdateSeconds);
     X509_gmtime_adj(X509_getm_notAfter(x), kValiditySeconds - kBackdateSeconds);
     if (X509_set_pubkey(x, subjectKey) != 1) {
         X509_free(x);
-        fail(err, "X509_set_pubkey 失败");
+        fail(err, "X509_set_pubkey failed");
         return nullptr;
     }
 
-    // 空 DN：issuer 与 subject 都是空 NAME（不是"没设"）
+    // Empty DN: both issuer and subject are empty NAMEs (not "unset")
     X509_NAME* empty = X509_NAME_new();
     if (empty == nullptr) {
         X509_free(x);
-        fail(err, "X509_NAME_new 失败");
+        fail(err, "X509_NAME_new failed");
         return nullptr;
     }
     const int s1 = X509_set_subject_name(x, empty);
@@ -210,13 +210,13 @@ X509* makeCert(EVP_PKEY* subjectKey, EVP_PKEY* signKey, bool isCa, bool withSki,
     X509_NAME_free(empty);
     if (s1 != 1 || s2 != 1) {
         X509_free(x);
-        fail(err, "设空 DN 失败");
+        fail(err, "Failed to set the empty DN");
         return nullptr;
     }
 
     X509V3_CTX v3;
     X509V3_set_ctx_nodb(&v3);
-    // x 要传进去：subjectKeyIdentifier 的 "hash" 得拿证书里的公钥现算
+    // x must be passed in: subjectKeyIdentifier's "hash" is computed from the certificate's public key
     X509V3_set_ctx(&v3, nullptr, x, nullptr, nullptr, 0);
 
     if (!addExt(x, &v3, NID_basic_constraints, isCa ? "critical,CA:TRUE" : "critical,CA:FALSE",
@@ -225,14 +225,14 @@ X509* makeCert(EVP_PKEY* subjectKey, EVP_PKEY* signKey, bool isCa, bool withSki,
         return nullptr;
     }
     if (!isCa) {
-        // 叶子证书的 keyUsage：digitalSignature + keyEncipherment（编码出来正好是 0xA0/5）
+        // Leaf certificate keyUsage: digitalSignature + keyEncipherment (encodes to exactly 0xA0/5)
         if (!addExt(x, &v3, NID_key_usage, "critical,digitalSignature,keyEncipherment", err)) {
             X509_free(x);
             return nullptr;
         }
     }
     if (withSki) {
-        // 只有 device 证书有这条，且**不是 critical**。"hash" = 公钥 PKCS#1 的 SHA-1
+        // Only the device cert has this, and it is **not critical**. "hash" = SHA-1 of the public key PKCS#1
         if (!addExt(x, &v3, NID_subject_key_identifier, "hash", err)) {
             X509_free(x);
             return nullptr;
@@ -241,7 +241,7 @@ X509* makeCert(EVP_PKEY* subjectKey, EVP_PKEY* signKey, bool isCa, bool withSki,
 
     if (X509_sign(x, signKey, EVP_sha256()) <= 0) {
         X509_free(x);
-        fail(err, "X509_sign 失败");
+        fail(err, "X509_sign failed");
         return nullptr;
     }
     return x;
@@ -257,8 +257,8 @@ std::string certToPem(X509* x)
     return out;
 }
 
-/// PKCS#8（"-----BEGIN PRIVATE KEY-----"）。**不能用传统 PKCS#1 的 "RSA PRIVATE KEY"**，
-/// DiPlay 那边就是 PKCS#8，手机对这两者未必一视同仁。
+/// PKCS#8 ("-----BEGIN PRIVATE KEY-----"). **Do not use traditional PKCS#1 "RSA PRIVATE KEY"**;
+/// DiPlay uses PKCS#8, and the phone may not treat the two alike.
 std::string keyToPem(EVP_PKEY* k)
 {
     BIO* b = BIO_new(BIO_s_mem());
@@ -275,13 +275,13 @@ std::string makeUuidUpper()
 {
     uint8_t b[16] = {};
     if (RAND_bytes(b, int(sizeof b)) != 1) {
-        // 理论上到不了这儿。真到了也别返回空串——空 HostID 手机会直接拒。
-        LOG_WARN("[%s] RAND_bytes 失败，HostID 退化（%s）", kTag, opensslError().c_str());
+        // Should never get here. If it does, don't return an empty string — the phone rejects an empty HostID outright.
+        LOG_WARN("[%s] RAND_bytes failed; HostID degraded (%s)", kTag, opensslError().c_str());
         const uint64_t t = uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
         std::memcpy(b, &t, sizeof t);
         std::memcpy(b + 8, &t, sizeof t);
     }
-    b[6] = uint8_t((b[6] & 0x0f) | 0x40);  // 版本 4
+    b[6] = uint8_t((b[6] & 0x0f) | 0x40);  // version 4
     b[8] = uint8_t((b[8] & 0x3f) | 0x80);  // variant
 
     static const char* kHex = "0123456789ABCDEF";
@@ -300,7 +300,7 @@ bool makeWiredPairIdentity(const std::vector<uint8_t>& devicePublicKey, const st
                            std::string* err)
 {
     if (out == nullptr) {
-        if (err != nullptr) *err = "out 是空的";
+        if (err != nullptr) *err = "out is null";
         return false;
     }
 
@@ -320,7 +320,7 @@ bool makeWiredPairIdentity(const std::vector<uint8_t>& devicePublicKey, const st
     std::unique_ptr<X509, decltype(&X509_free)> hostCert(
         makeCert(hostKey.get(), rootKey.get(), /*isCa=*/false, /*withSki=*/false, err), X509_free);
     if (hostCert == nullptr) return false;
-    // device 证书：公钥是手机的，签名者还是我们的 root，只有它带 SKI
+    // device certificate: public key is the phone's, signer is still our root; only it carries a SKI
     std::unique_ptr<X509, decltype(&X509_free)> devCert(
         makeCert(devKey.get(), rootKey.get(), /*isCa=*/false, /*withSki=*/true, err), X509_free);
     if (devCert == nullptr) return false;
@@ -336,24 +336,24 @@ bool makeWiredPairIdentity(const std::vector<uint8_t>& devicePublicKey, const st
 
     if (id.rootCertPem.empty() || id.rootKeyPem.empty() || id.hostCertPem.empty() ||
         id.hostKeyPem.empty() || id.deviceCertPem.empty()) {
-        if (err != nullptr) *err = "证书转 PEM 出来是空的";
+        if (err != nullptr) *err = "Certificate-to-PEM conversion produced an empty string";
         return false;
     }
 
-    LOG_INFO("[%s] 证书造好了（RSA-%d，root/host/device 各一），HostID=%s", kTag, kRsaBits,
+    LOG_INFO("[%s] Certificates generated (RSA-%d, one each for root/host/device), HostID=%s", kTag, kRsaBits,
              id.hostId.c_str());
     *out = std::move(id);
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// 落盘 / 复读
+// Persistence / reload
 // ---------------------------------------------------------------------------
 namespace {
 
 namespace fs = std::filesystem;
 
-/// 目录名。序列号本来就只有字母数字，但这是从外部字符串直接拼路径，还是过一道。
+/// Directory name. The serial is alphanumeric anyway, but it is an external string used directly in a path, so sanitize it.
 std::string safeKey(const std::string& key)
 {
     std::string s;
@@ -367,7 +367,7 @@ std::string safeKey(const std::string& key)
     return s;
 }
 
-/// 手机公钥的指纹。**只用来判断"还是不是同一台手机"**，不进任何报文、不影响配对结果。
+/// Fingerprint of the phone public key. **Used only to tell whether it is still the same phone**; never in any packet, never affects pairing.
 std::string deviceFingerprint(const std::vector<uint8_t>& pk)
 {
     unsigned char md[EVP_MAX_MD_SIZE] = {};
@@ -408,7 +408,7 @@ bool writeWholeFile(const std::string& p, const std::string& data, bool secret)
     if (std::fclose(f) != 0) return false;
     if (!ok) return false;
     if (secret) {
-        // 尽力而为：设不上权限不影响功能（这是我们自己造的密钥，不是 Apple 发的凭据）
+        // Best effort: failing to set permissions does not affect functionality (this is our own key, not an Apple-issued credential)
         std::error_code ec;
         fs::permissions(p, fs::perms::owner_read | fs::perms::owner_write,
                         fs::perm_options::replace, ec);
@@ -440,24 +440,24 @@ bool loadWiredPairIdentity(const std::string& stateDir, const std::string& key,
 {
     if (found != nullptr) *found = false;
     if (out == nullptr) {
-        if (err != nullptr) *err = "out 是空的";
+        if (err != nullptr) *err = "out is null";
         return false;
     }
 
     const std::string dir = pairDir(stateDir, key);
 
-    // 指纹：记录里存的手机公钥跟这次读到的是不是同一把。对不上就是另一台手机
-    // （或这台手机重装过）—— 那份记录对它无效，当没有，重新配。
+    // Fingerprint: whether the stored phone public key matches the one read now. A mismatch means another phone
+    // (or this phone was reinstalled) — the record is invalid for it, treat as absent and re-pair.
     std::string storedFp;
-    if (!readWholeFile((fs::path(dir) / "device.fp").string(), &storedFp)) return true;  // 没存过
-    // 写的时候末尾带了个换行（便于 cat 看），比较前得去掉 —— 不然 "abc\n" != "abc"，
-    // 指纹永远对不上，等于没存。
+    if (!readWholeFile((fs::path(dir) / "device.fp").string(), &storedFp)) return true;  // never stored
+    // Written with a trailing newline (easier to cat); strip it before comparing — otherwise "abc\n" != "abc"
+    // and the fingerprint never matches, as if nothing was stored.
     while (!storedFp.empty() && (storedFp.back() == '\n' || storedFp.back() == '\r'))
         storedFp.pop_back();
 
     const std::string wantFp = deviceFingerprint(devicePublicKey);
     if (wantFp.empty() || storedFp != wantFp) {
-        LOG_INFO("[%s] 存的配对材料不是这台手机的（公钥指纹对不上），重新配一套", kTag);
+        LOG_INFO("[%s] Stored pairing material does not belong to this phone (public key fingerprint mismatch); generating a new set", kTag);
         return true;
     }
 
@@ -478,7 +478,7 @@ bool loadWiredPairCerts(const std::string& stateDir, const std::string& key, Wir
 {
     if (found != nullptr) *found = false;
     if (out == nullptr) {
-        if (err != nullptr) *err = "out 是空的";
+        if (err != nullptr) *err = "out is null";
         return false;
     }
 
@@ -493,8 +493,8 @@ bool loadWiredPairCerts(const std::string& stateDir, const std::string& key, Wir
         readWholeFile((fs::path(dir) / "device.crt").string(), &id.deviceCertPem);
     if (!ok || id.rootCertPem.empty() || id.rootKeyPem.empty() || id.hostCertPem.empty() ||
         id.hostKeyPem.empty() || id.deviceCertPem.empty()) {
-        // 残缺的记录比没有更糟（会拿半套材料去开会话），当没有处理，让上层重造覆盖。
-        LOG_WARN("[%s] %s 下的配对材料读不全，当没有", kTag, dir.c_str());
+        // A partial record is worse than none (it would open a session with half a set); treat as absent so the caller regenerates and overwrites.
+        LOG_WARN("[%s] Pairing material under %s is incomplete; treating it as absent", kTag, dir.c_str());
         return true;
     }
 
@@ -509,14 +509,14 @@ bool markWiredPairTrusted(const std::string& stateDir, const std::string& key, s
     std::error_code   ec;
     fs::create_directories(dir, ec);
     if (ec) {
-        if (err != nullptr) *err = "建配对材料目录失败：" + dir + "（" + ec.message() + "）";
+        if (err != nullptr) *err = "Failed to create pairing material directory: " + dir + " (" + ec.message() + ")";
         return false;
     }
-    // 内容只是给人看的（什么时候配成功的），判据是"文件在不在"。
+    // The content is only for humans (when pairing succeeded); the criterion is "does the file exist".
     const auto  now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     const std::string stamp = std::to_string(now) + "\n";
     if (!writeWholeFile((fs::path(dir) / "paired").string(), stamp, false)) {
-        if (err != nullptr) *err = "写 paired 印记失败：" + dir;
+        if (err != nullptr) *err = "Failed to write the paired marker: " + dir;
         return false;
     }
     return true;
@@ -537,15 +537,15 @@ bool saveWiredPairIdentity(const std::string& stateDir, const std::string& key,
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) {
-        if (err != nullptr) *err = "建配对材料目录失败：" + dir + "（" + ec.message() + "）";
+        if (err != nullptr) *err = "Failed to create pairing material directory: " + dir + " (" + ec.message() + ")";
         return false;
     }
 
     const auto f = [&dir](const char* n) { return (fs::path(dir) / n).string(); };
     const std::string fp = deviceFingerprint(devicePublicKey);
 
-    // ids.txt 先写：它里面是 HostID / SystemBUID，下一轮 SetValue(UntrustedHostBUID)
-    // 就靠它。私钥那两个文件单独标 0600。
+    // Write ids.txt first: it holds HostID / SystemBUID, which the next round's SetValue(UntrustedHostBUID)
+    // relies on. The two private key files are marked 0600 individually.
     const bool ok = !fp.empty() && writeWholeFile(f("ids.txt"), id.hostId + "\n" + id.systemBuid + "\n", false) &&
                     writeWholeFile(f("device.fp"), fp + "\n", false) &&
                     writeWholeFile(f("root.crt"), id.rootCertPem, false) &&
@@ -554,10 +554,10 @@ bool saveWiredPairIdentity(const std::string& stateDir, const std::string& key,
                     writeWholeFile(f("host.key"), id.hostKeyPem, true) &&
                     writeWholeFile(f("device.crt"), id.deviceCertPem, false);
     if (!ok) {
-        if (err != nullptr) *err = "写配对材料失败：" + dir;
+        if (err != nullptr) *err = "Failed to write pairing material: " + dir;
         return false;
     }
-    LOG_INFO("[%s] 配对材料已存到 %s —— 下次同一台手机不再弹信任框", kTag, dir.c_str());
+    LOG_INFO("[%s] Pairing material saved to %s - the same phone will not prompt for trust next time", kTag, dir.c_str());
     return true;
 }
 

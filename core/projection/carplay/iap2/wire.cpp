@@ -71,7 +71,7 @@ Params& Params::u32(uint16_t id, uint32_t v)
 Params& Params::str(uint16_t id, const std::string& v)
 {
     std::vector<uint8_t> b(v.begin(), v.end());
-    b.push_back(0);   // NUL 结尾（长度含它）
+    b.push_back(0);   // trailing NUL (included in the length)
     items_.emplace_back(id, std::move(b));
     return *this;
 }
@@ -107,7 +107,7 @@ std::vector<uint8_t> Params::encode() const
 }
 
 // ---------------------------------------------------------------------------
-// 解析
+// Parsing
 // ---------------------------------------------------------------------------
 
 bool parseParams(const uint8_t* p, size_t n, std::vector<Param>* out)
@@ -181,14 +181,14 @@ void CsmFramer::feed(const uint8_t* p, size_t n)
 
 bool CsmFramer::next(uint16_t* msgId, std::vector<uint8_t>* body)
 {
-    // 找 0x4040（丢弃前面的垃圾）
+    // find 0x4040 (discard preceding junk)
     size_t off = 0;
     while (buf_.size() - off >= 2 && !(buf_[off] == 0x40 && buf_[off + 1] == 0x40)) ++off;
     if (off > 0) buf_.erase(buf_.begin(), buf_.begin() + off);
     if (buf_.size() < 6) return false;
 
     const uint16_t len = readU16(buf_.data() + 2);
-    if (len < 6) {                     // 非法长度：丢 1 字节重新对齐
+    if (len < 6) {                     // invalid length: drop 1 byte and realign
         buf_.erase(buf_.begin());
         return next(msgId, body);
     }

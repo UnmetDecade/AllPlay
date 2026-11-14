@@ -1,9 +1,9 @@
 // ============================================================================
-// host/windows_main.cpp —— Windows 桌面宿主（1280×720 Win32 窗口）
+// host/windows_main.cpp -- Windows desktop host (1280x720 Win32 window)
 // ============================================================================
-// 启动 Receiver（RTSP + 屏幕流/音频流网络层），并绘制与安卓一致的启动页：
-// 白底 + AllPlay 双色 logo + 蓝色蓝牙徽标(水纹) + 状态文字。
-// 视频解码/上屏待接 ffmpeg；当前 video/audio 输出用桩（只统计，不渲染）。
+// Starts the Receiver (RTSP + screen-stream/audio-stream network layer) and draws the same launcher page as Android:
+// white background + two-tone AllPlay logo + blue Bluetooth badge (ripple) + status text.
+// Video decode/presentation still needs ffmpeg wired in; video/audio output currently uses stubs (count only, no rendering).
 #ifndef UNICODE
 #  define UNICODE
 #endif
@@ -33,23 +33,23 @@ constexpr int kWinH = 720;
 core::airplay::Receiver* g_receiver = nullptr;
 std::atomic<bool>       g_running{true};
 
-// 水纹动画进度 0..1（定时器驱动）
+// Ripple animation progress 0..1 (timer-driven)
 double g_ripple = 0.0;
 
 // ---------------------------------------------------------------------------
-// 视频/音频桩：让屏幕流(TCP)、音频流(UDP)真正建立，但不解码渲染
+// Video/audio stubs: let the screen stream (TCP) and audio stream (UDP) actually establish, but do not decode or render
 // ---------------------------------------------------------------------------
 class StubVideo : public core::IVideoOutput {
 public:
     void configure(core::VideoCodec, int w, int h, const std::vector<uint8_t>&) override
     {
-        LOG_INFO("视频输出桩：配置 %dx%d", w, h);
+        LOG_INFO("Video output stub: configure %dx%d", w, h);
     }
     bool feedAnnexB(const uint8_t*, size_t n) override
     {
         static std::atomic<uint64_t> frames{0};
         const uint64_t f = ++frames;
-        if (f == 1 || f % 300 == 0) LOG_INFO("视频输出桩：第 %llu 帧 %zu 字节", (unsigned long long)f, n);
+        if (f == 1 || f % 300 == 0) LOG_INFO("Video output stub: frame %llu, %zu bytes", (unsigned long long)f, n);
         return true;
     }
     void reset() override {}
@@ -60,13 +60,13 @@ class StubAudio : public core::IAudioOutput {
 public:
     void configure(core::AudioCodec c, int rate, int ch) override
     {
-        LOG_INFO("音频输出桩：配置 codec=%d %dHz %dch", int(c), rate, ch);
+        LOG_INFO("Audio output stub: configure codec=%d %dHz %dch", int(c), rate, ch);
     }
     void feed(const uint8_t*, size_t n, uint32_t) override
     {
         static std::atomic<uint64_t> pkts{0};
         const uint64_t p = ++pkts;
-        if (p == 1 || p % 500 == 0) LOG_INFO("音频输出桩：第 %llu 包 %zu 字节", (unsigned long long)p, n);
+        if (p == 1 || p % 500 == 0) LOG_INFO("Audio output stub: packet %llu, %zu bytes", (unsigned long long)p, n);
     }
     void reset() override {}
 };
@@ -75,7 +75,7 @@ StubVideo g_video;
 StubAudio g_audio;
 
 // ---------------------------------------------------------------------------
-// 绘制
+// Drawing
 // ---------------------------------------------------------------------------
 void drawCenteredText(HDC dc, const std::string& text, int cx, int cy, COLORREF color,
                       int height, int weight)
@@ -94,7 +94,7 @@ void drawCenteredText(HDC dc, const std::string& text, int cx, int cy, COLORREF 
 
 void drawLauncher(HDC dc)
 {
-    // 白底
+    // White background
     HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
     RECT full{0, 0, kWinW, kWinH};
     FillRect(dc, &full, white);
@@ -106,10 +106,10 @@ void drawLauncher(HDC dc)
     const int badgeCy = 360;
     const int badgeR = 42;
 
-    // AllPlay 双色 logo：先画 "All" 深色，再画 "Play" 蓝色（简单起见用两次 TextOut）
+    // Two-tone AllPlay logo: draw "All" dark first, then "Play" blue (two TextOut calls, for simplicity)
     drawCenteredText(dc, "AllPlay", cx, titleY, RGB(30, 30, 30), 40, FW_BOLD);
 
-    // 水纹环（两圈，扩散渐隐）
+    // Ripple rings (two rings, expanding and fading)
     HPEN ringPen = CreatePen(PS_SOLID, 3, RGB(47, 124, 246));
     HPEN oldPen = static_cast<HPEN>(SelectObject(dc, ringPen));
     HBRUSH hollow = static_cast<HBRUSH>(GetStockObject(NULL_BRUSH));
@@ -124,7 +124,7 @@ void drawLauncher(HDC dc)
     SelectObject(dc, oldBrush);
     DeleteObject(ringPen);
 
-    // 蓝色圆底 + 白色蓝牙符号
+    // Blue circle + white Bluetooth symbol
     HBRUSH blue = CreateSolidBrush(RGB(47, 124, 246));
     oldBrush = static_cast<HBRUSH>(SelectObject(dc, blue));
     HPEN noPen = CreatePen(PS_NULL, 0, 0);
@@ -136,10 +136,10 @@ void drawLauncher(HDC dc)
     DeleteObject(blue);
     drawCenteredText(dc, "B", badgeCx, badgeCy, RGB(255, 255, 255), 36, FW_BOLD);
 
-    // 状态文字
-    std::string status = "等待连接";
-    if (g_receiver && g_receiver->sessionActive()) status = "已连接";
-    else if (g_receiver && g_receiver->connecting()) status = "连接中…";
+    // Status text
+    std::string status = "Waiting for connection";
+    if (g_receiver && g_receiver->sessionActive()) status = "Connected";
+    else if (g_receiver && g_receiver->connecting()) status = "Connecting…";
     drawCenteredText(dc, status, cx, 470, RGB(102, 102, 102), 20, FW_NORMAL);
 }
 
@@ -154,10 +154,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_TIMER:
-        if (wp == 1) {           // 水纹动画
+        if (wp == 1) {           // ripple animation
             g_ripple += 0.016;
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (wp == 2) {    // 状态刷新
+        } else if (wp == 2) {    // status refresh
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -174,11 +174,11 @@ int main()
 {
     std::string err;
     if (!allplay::windows::initWinsock(&err)) {
-        LOG_ERROR("Winsock 初始化失败：%s", err.c_str());
+        LOG_ERROR("Winsock initialization failed: %s", err.c_str());
         return 1;
     }
 
-    // 组合根：Windows 平台能力
+    // Composition root: Windows platform capabilities
     auto services = allplay::windows::makePlatformServices();
 
     core::airplay::ReceiverConfig cfg;
@@ -187,21 +187,21 @@ int main()
     cfg.height    = 720;
     cfg.fps       = 60;
     cfg.stateDir  = ".";
-    cfg.mfiDir    = "identity";      // 相对 cwd；可改成绝对路径
+    cfg.mfiDir    = "identity";      // relative to cwd; may be changed to an absolute path
     cfg.btMac     = "";
     cfg.video     = &g_video;
     cfg.audio     = &g_audio;
-    cfg.enableAvahi = false;         // mDNS 桩，关掉避免噪音
+    cfg.enableAvahi = false;         // mDNS stub; disabled to avoid noise
 
     core::airplay::Receiver receiver;
     if (!receiver.start(cfg, services, &err)) {
-        LOG_ERROR("Receiver 启动失败：%s", err.c_str());
+        LOG_ERROR("Receiver failed to start: %s", err.c_str());
         return 1;
     }
     g_receiver = &receiver;
-    LOG_INFO("AllPlay Windows 宿主已启动：RTSP 端口 %u，IP %s", receiver.port(), receiver.ip().c_str());
+    LOG_INFO("AllPlay Windows host started: RTSP port %u, IP %s", receiver.port(), receiver.ip().c_str());
 
-    // 窗口
+    // Window
     WNDCLASSW wc{};
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = GetModuleHandleW(nullptr);
@@ -215,12 +215,12 @@ int main()
     HWND hwnd = CreateWindowW(L"AllPlayHost", L"AllPlay", WS_OVERLAPPEDWINDOW,
                               CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
                               nullptr, nullptr, wc.hInstance, nullptr);
-    if (!hwnd) { LOG_ERROR("窗口创建失败"); return 1; }
+    if (!hwnd) { LOG_ERROR("Window creation failed"); return 1; }
     ShowWindow(hwnd, SW_SHOW);
-    SetTimer(hwnd, 1, 33, nullptr);    // 水纹 ~30fps
-    SetTimer(hwnd, 2, 500, nullptr);   // 状态 500ms
+    SetTimer(hwnd, 1, 33, nullptr);    // ripple ~30fps
+    SetTimer(hwnd, 2, 500, nullptr);   // status 500ms
 
-    // 消息循环
+    // Message loop
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
         TranslateMessage(&m);

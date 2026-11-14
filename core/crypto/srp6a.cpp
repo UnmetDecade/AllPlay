@@ -11,7 +11,7 @@ namespace core::crypto {
 
 namespace {
 
-// RFC 5054 3072-bit prime（group 15）。与 RFC 5054 的 group 15 素数逐字节一致。
+// RFC 5054 3072-bit prime (group 15). Byte-for-byte identical to the RFC 5054 group 15 prime.
 const char* const kNHex =
     "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74"
     "020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1437"
@@ -48,7 +48,7 @@ std::vector<uint8_t> bytesOf(const std::string& s)
     return std::vector<uint8_t>(s.begin(), s.end());
 }
 
-/// BIGNUM → 最短大端字节（协议要求：去前导符号 0）。
+/// BIGNUM → minimal big-endian bytes (protocol requirement: strip the leading sign 0).
 std::vector<uint8_t> minimalBytes(const BIGNUM* v)
 {
     int n = BN_num_bytes(v);
@@ -57,7 +57,7 @@ std::vector<uint8_t> minimalBytes(const BIGNUM* v)
     return out;
 }
 
-/// BIGNUM → 384 字节左补零（协议要求）。
+/// BIGNUM → 384 bytes, left-zero-padded (protocol requirement).
 std::vector<uint8_t> pad384(const BIGNUM* v)
 {
     int n = BN_num_bytes(v);
@@ -94,14 +94,14 @@ void Srp6aServer::init(const uint8_t* salt, const uint8_t* b)
 
     // k = SHA512(toBytes(N) ‖ pad384(g))
     {
-        std::vector<uint8_t> in = nbytes;               // toBytes(N) = 384 字节
+        std::vector<uint8_t> in = nbytes;               // toBytes(N) = 384 bytes
         std::vector<uint8_t> pg = pad384(g_);
         in.insert(in.end(), pg.begin(), pg.end());
         auto kh = sha512(in);
         k_ = BN_bin2bn(kh.data(), int(kh.size()), nullptr);
     }
 
-    // 盐 s = 16 字节（随机或固定）
+    // Salt s = 16 bytes (random or fixed)
     salt_.resize(16);
     if (salt) std::memcpy(salt_.data(), salt, 16);
     else RAND_bytes(salt_.data(), 16);
@@ -121,7 +121,7 @@ void Srp6aServer::init(const uint8_t* salt, const uint8_t* b)
     BN_mod_exp(v_, g_, x, n_, ctx);
     BN_free(x);
 
-    // b = 32 字节（随机或固定，无符号解释）
+    // b = 32 bytes (random or fixed, interpreted unsigned)
     {
         uint8_t bb[32];
         if (b) std::memcpy(bb, b, 32);
@@ -165,7 +165,7 @@ bool Srp6aServer::verify(const uint8_t* A, size_t aLen,
     BIGNUM *tmp = nullptr, *u = nullptr, *vu = nullptr, *S = nullptr;
 
     do {
-        // A mod N == 0 → 拒绝
+        // A mod N == 0 → reject
         tmp = BN_new();
         BN_nnmod(tmp, a, n_, ctx);
         if (BN_is_zero(tmp)) break;
@@ -189,13 +189,13 @@ bool Srp6aServer::verify(const uint8_t* A, size_t aLen,
         // K = SHA512(toBytes(S))
         auto Kh = sha512(minimalBytes(S));
 
-        // hashN = SHA512(toBytes(N))，hashG = SHA512(toBytes(g))
+        // hashN = SHA512(toBytes(N)), hashG = SHA512(toBytes(g))
         auto hashN = sha512(minimalBytes(n_));
         auto hashG = sha512(minimalBytes(g_));
         std::vector<uint8_t> hashXor(64);
         for (int i = 0; i < 64; ++i) hashXor[i] = hashN[i] ^ hashG[i];
 
-        // 期望 M1 = SHA512(hashXor ‖ SHA512("Pair-Setup") ‖ salt ‖ pad(A) ‖ pad(B) ‖ K)
+        // Expected M1 = SHA512(hashXor ‖ SHA512("Pair-Setup") ‖ salt ‖ pad(A) ‖ pad(B) ‖ K)
         auto hUser = sha512(bytesOf("Pair-Setup"));
         std::vector<uint8_t> e = hashXor;
         e.insert(e.end(), hUser.begin(), hUser.end());

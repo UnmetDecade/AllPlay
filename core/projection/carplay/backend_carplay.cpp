@@ -1,6 +1,6 @@
 /**
  * @file   backend_carplay.cpp
- * @brief  CarPlay 后端：有线（usbmux + iAP2 + Receiver）与无线（bt_trigger + Receiver）
+ * @brief  CarPlay backend: wired (usbmux + iAP2 + Receiver) and wireless (bt_trigger + Receiver)
  */
 
 #include "projection/carplay/backend_carplay.h"
@@ -28,7 +28,7 @@ namespace {
 using namespace std::chrono_literals;
 
 // ---------------------------------------------------------------------------
-// 媒体桥：把 CarPlay 协议栈的 IVideoOutput / IAudioOutput 转成协议中立的 Sink
+// Media bridge: adapts the CarPlay stack's IVideoOutput / IAudioOutput to a protocol-neutral Sink
 // ---------------------------------------------------------------------------
 class VideoBridge final : public core::IVideoOutput {
 public:
@@ -81,7 +81,7 @@ private:
     IProjectionSink& sink_;
 };
 
-/// 状态去重：同一个状态不重复上报；回调在锁外发，避免 Sink 反手调 stop() 时死锁。
+/// State dedup: the same state is not reported twice; the callback runs outside the lock so a Sink calling stop() back does not deadlock.
 class StateGate {
 public:
     explicit StateGate(IProjectionSink& sink) : sink_(sink) {}
@@ -102,7 +102,7 @@ private:
     SessionState     state_ = SessionState::Idle;
 };
 
-/// 可被 stop_ 打断的 sleep。
+/// sleep() that can be interrupted by stop_.
 bool waitFor(const std::atomic<bool>& stop, std::chrono::milliseconds ms)
 {
     const auto end = std::chrono::steady_clock::now() + ms;
@@ -114,7 +114,7 @@ bool waitFor(const std::atomic<bool>& stop, std::chrono::milliseconds ms)
 }
 
 // ---------------------------------------------------------------------------
-// 有线会话：USB → lockdown/TLS → iAP2 → MFi → 0x4300/0x4301 → AirPlay
+// Wired session: USB -> lockdown/TLS -> iAP2 -> MFi -> 0x4300/0x4301 -> AirPlay
 // ---------------------------------------------------------------------------
 class WiredSession final : public IProjectionSession {
 public:
@@ -130,11 +130,11 @@ public:
     bool start(std::string* err) override
     {
         if (thread_.joinable()) {
-            if (err) *err = "会话已经启动过";
+            if (err) *err = "Session already started";
             return false;
         }
         stop_.store(false);
-        state_.set(SessionState::Connecting, "USB 链路准备中");
+        state_.set(SessionState::Connecting, "Preparing USB link");
         thread_ = std::thread([this] { run(); });
         return true;
     }
@@ -143,7 +143,7 @@ public:
     {
         stop_.store(true);
         if (thread_.joinable()) thread_.join();
-        // 先停媒体面，再拆协议栈：Receiver 的线程还持有 video_/audio_ 指针。
+        // Stop the media path first, then tear down the stack: the Receiver thread still holds video_/audio_ pointers.
         if (rx_) { rx_->stop(); rx_.reset(); }
         link_.reset();
         control_.reset();
@@ -155,11 +155,11 @@ public:
     bool sendInput(const InputEvent& ev, std::string* err) override
     {
         if (!rx_ || !rx_->sessionActive()) {
-            if (err) *err = "会话未到 Running";
+            if (err) *err = "Session is not Running yet";
             return false;
         }
         if (ev.kind != InputKind::Touch) {
-            if (err) *err = "CarPlay 后端暂不支持该输入类型";
+            if (err) *err = "CarPlay backend does not support this input type yet";
             return false;
         }
         std::vector<core::airplay::TouchPoint> pts(1);
@@ -196,54 +196,54 @@ private:
         WiredPhoneInfo info;
         std::string err;
 
-        // ---- ① 传输层：Linux 自开 pipe；macOS 借系统 usbmuxd ----
+        // ---- ① Transport layer: Linux opens its own pipe; macOS borrows the system usbmuxd ----
         if (opt_.wired.openMux) {
             auto mux = opt_.wired.openMux(&info, &err);
-            if (!mux) return fail("接上系统 usbmuxd 失败：" + err);
+            if (!mux) return fail("Failed to attach to the system usbmuxd: " + err);
             control_ = std::make_unique<core::usb::WiredControl>(std::move(mux));
         } else if (opt_.wired.openPipe) {
             pipe_ = opt_.wired.openPipe(opt_.productId, opt_.switchWaitMs, &info, &err);
-            if (!pipe_) return fail("打开 USB 失败：" + err);
+            if (!pipe_) return fail("Failed to open USB: " + err);
             control_ = std::make_unique<core::usb::WiredControl>(*pipe_);
         } else {
-            return fail("这个构建没有有线传输层");
+            return fail("This build has no wired transport layer");
         }
 
-        // ---- ② lockdown → TLS → carkit ----
+        // ---- ② lockdown -> TLS -> carkit ----
         control_->setPairStore(info.serial, opt_.stateDir);
-        if (!control_->connect(&err)) return fail("控制面没跑通：" + err);
+        if (!control_->connect(&err)) return fail("Control plane failed: " + err);
 
-        // ---- ③ iAP2 链路 + 识别 ----
+        // ---- ③ iAP2 link + identification ----
         link_ = std::make_unique<core::iap2::WiredLink>(*control_->service());
-        if (!link_->negotiate(30000, &err)) return fail("iAP2 链路没协商起来：" + err);
+        if (!link_->negotiate(30000, &err)) return fail("iAP2 link negotiation failed: " + err);
 
         core::iap2::WiredConfig wcfg;
         wcfg.name = opt_.name;
         wcfg.carPlayUsbInterfaceNumber = int(info.usbMuxInterface);
-        if (!link_->identify(wcfg, &err)) return fail("识别没通过：" + err);
+        if (!link_->identify(wcfg, &err)) return fail("Identification failed: " + err);
 
         // ---- ④ MFi ----
         std::unique_ptr<core::mfi::CertificateMfiIdentity> ownedMfi;
         const core::mfi::IMfiIdentity* mfi = opt_.mfiIdentity;
         if (!mfi) {
             ownedMfi = core::mfi::CertificateMfiIdentity::load(opt_.mfiDir, &err);
-            if (!ownedMfi) return fail("装不上 MFi 身份（" + opt_.mfiDir + "）：" + err);
+            if (!ownedMfi) return fail("Failed to load MFi identity (" + opt_.mfiDir + "): " + err);
             mfi = ownedMfi.get();
         }
-        if (!link_->authenticate(mfi, 30000, &err)) return fail("MFi 认证没通过：" + err);
+        if (!link_->authenticate(mfi, 30000, &err)) return fail("MFi authentication failed: " + err);
 
         link_->sendPowerSourceUpdate(wcfg.availableCurrentMilliAmps, /*charging=*/true);
         link_->sendSubscriptions();
-        state_.set(SessionState::Negotiating, "iAP2 已识别，等 CarPlay 会话");
+        state_.set(SessionState::Negotiating, "iAP2 identified; waiting for CarPlay session");
 
-        // ---- ⑤ 媒体面网卡 ----
-        if (!opt_.wired.prepareNcm) return fail("这个构建没有有线媒体面");
+        // ---- ⑤ Media-path NIC ----
+        if (!opt_.wired.prepareNcm) return fail("This build has no wired media path");
         WiredNcm ncm;
         if (!opt_.wired.prepareNcm(info, opt_.ncmLinkLocal, &ncm, &err))
-            return fail("有线媒体面起不来：" + err);
-        if (ncm.ipv6.empty()) return fail("NCM 网卡上一个 IPv6 链路本地都没有");
+            return fail("Failed to bring up the wired media path: " + err);
+        if (ncm.ipv6.empty()) return fail("The NCM interface has no IPv6 link-local address");
 
-        // ---- ⑥ AirPlay 接收端 ----
+        // ---- ⑥ AirPlay receiver ----
         core::airplay::ReceiverConfig cfg;
         cfg.name      = opt_.name;
         cfg.ifname    = ncm.ifname;
@@ -258,15 +258,15 @@ private:
         cfg.btMac     = opt_.controllerAddress ? opt_.controllerAddress() : std::string();
         cfg.video     = &video_;
         cfg.audio     = &audio_;
-        cfg.enableAvahi = false;   // 有线不广播：地址由 0x4301 直接告诉手机
+        cfg.enableAvahi = false;   // No advertising on wired: the address is passed to the phone directly via 0x4301
 
         rx_ = std::make_unique<core::airplay::Receiver>();
         if (!rx_->start(cfg, services_, &err)) {
             rx_.reset();
-            return fail("AirPlay 接收端起不来：" + err);
+            return fail("Failed to start AirPlay receiver: " + err);
         }
 
-        // ---- ⑦ 等 0x4300 → 回 0x4301 → 保活 ----
+        // ---- ⑦ Wait for 0x4300 -> reply 0x4301 -> keepalive ----
         core::iap2::WiredCarPlayEndpoint ep;
         ep.ipv6Addresses.push_back(cfg.bindAddr);
         ep.airPlayPort      = rx_->port();
@@ -279,25 +279,25 @@ private:
         while (!stop_.load()) {
             std::vector<core::iap2::WiredLink::Message> msgs;
             if (!link_->pump(200, &msgs)) {
-                if (running) state_.set(SessionState::Disconnected, "iAP2 链路断开");
-                else         state_.set(SessionState::Failed, "iAP2 链路断开");
+                if (running) state_.set(SessionState::Disconnected, "iAP2 link disconnected");
+                else         state_.set(SessionState::Failed, "iAP2 link disconnected");
                 return;
             }
             for (const auto& m : msgs) {
                 if (m.id != 0x4300 || sent) continue;
                 std::string serr;
                 if (!link_->sendCarPlayStartSession(ep, &serr))
-                    return fail("0x4301 发不出去：" + serr);
+                    return fail("Failed to send 0x4301: " + serr);
                 sent = true;
-                state_.set(SessionState::Negotiating, "已回 0x4301，等手机连 AirPlay");
+                state_.set(SessionState::Negotiating, "Replied 0x4301; waiting for the phone to connect AirPlay");
             }
             const bool active = rx_->sessionActive();
             if (!running && active) {
                 running = true;
-                state_.set(SessionState::Running, "投屏中");
+                state_.set(SessionState::Running, "Mirroring");
             } else if (running && !active) {
                 running = false;
-                state_.set(SessionState::Disconnected, "AirPlay 会话结束");
+                state_.set(SessionState::Disconnected, "AirPlay session ended");
                 return;
             }
         }
@@ -309,7 +309,7 @@ private:
     AudioBridge                   audio_;
     StateGate                     state_;
 
-    // 声明顺序 = 依赖顺序；析构/stop 时反向拆（link → control → pipe/mux）。
+    // Declaration order = dependency order; destruct/stop tears down in reverse (link -> control -> pipe/mux).
     std::unique_ptr<core::usb::IMux>          mux_;
     std::unique_ptr<core::IByteStream>        pipe_;
     std::unique_ptr<core::usb::WiredControl>  control_;
@@ -321,7 +321,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 无线会话：Receiver 先起 → 蓝牙触发（0x5703/0x4301）→ 等手机连 AirPlay
+// Wireless session: start Receiver first -> Bluetooth trigger (0x5703/0x4301) -> wait for the phone to connect AirPlay
 // ---------------------------------------------------------------------------
 class WirelessSession final : public IProjectionSession {
 public:
@@ -337,7 +337,7 @@ public:
     bool start(std::string* err) override
     {
         if (thread_.joinable()) {
-            if (err) *err = "会话已经启动过";
+            if (err) *err = "Session already started";
             return false;
         }
         stop_.store(false);
@@ -362,7 +362,7 @@ public:
             rx_.reset();
             return false;
         }
-        state_.set(SessionState::Connecting, "等蓝牙触发");
+        state_.set(SessionState::Connecting, "Waiting for Bluetooth trigger");
 
         thread_ = std::thread([this] { run(); });
         return true;
@@ -371,7 +371,7 @@ public:
     void stop() override
     {
         stop_.store(true);
-        // 让 runBtTrigger 的 100ms 轮询收工
+        // Let runBtTrigger's 100ms polling loop finish
         if (cancel_) cancel_->store(true);
         if (thread_.joinable()) thread_.join();
         if (rx_) { rx_->stop(); rx_.reset(); }
@@ -382,11 +382,11 @@ public:
     bool sendInput(const InputEvent& ev, std::string* err) override
     {
         if (!rx_ || !rx_->sessionActive()) {
-            if (err) *err = "会话未到 Running";
+            if (err) *err = "Session is not Running yet";
             return false;
         }
         if (ev.kind != InputKind::Touch) {
-            if (err) *err = "CarPlay 后端暂不支持该输入类型";
+            if (err) *err = "CarPlay backend does not support this input type yet";
             return false;
         }
         std::vector<core::airplay::TouchPoint> pts(1);
@@ -416,7 +416,7 @@ private:
     void run()
     {
         if (!services_.bluetooth) {
-            state_.set(SessionState::Failed, "平台没有可用的 IBluetooth 实现");
+            state_.set(SessionState::Failed, "The platform has no usable IBluetooth implementation");
             return;
         }
 
@@ -463,19 +463,19 @@ private:
         }
         if (!ok) {
             if (!stop_.load())
-                state_.set(SessionState::Failed, "蓝牙触发失败：" + lastErr);
+                state_.set(SessionState::Failed, "Bluetooth trigger failed: " + lastErr);
             return;
         }
-        state_.set(SessionState::Negotiating, "0x4301 已发，等手机连 AirPlay");
+        state_.set(SessionState::Negotiating, "0x4301 sent; waiting for the phone to connect AirPlay");
 
         bool running = false;
         while (!stop_.load()) {
             const bool active = rx_ && rx_->sessionActive();
             if (!running && active) {
                 running = true;
-                state_.set(SessionState::Running, "投屏中");
+                state_.set(SessionState::Running, "Mirroring");
             } else if (running && !active) {
-                state_.set(SessionState::Disconnected, "AirPlay 会话结束");
+                state_.set(SessionState::Disconnected, "AirPlay session ended");
                 return;
             }
             if (!waitFor(stop_, 200ms)) return;
@@ -506,7 +506,7 @@ std::vector<ProjectionTarget> CarPlayBackend::probe(const core::PlatformServices
 {
     std::vector<ProjectionTarget> out;
 
-    // 有线：插着的 iPhone 优先级最高
+    // Wired: an attached iPhone has the highest priority
     if (opt_.wired.probePhones) {
         std::string e;
         for (const auto& p : opt_.wired.probePhones(&e)) {
@@ -521,7 +521,7 @@ std::vector<ProjectionTarget> CarPlayBackend::probe(const core::PlatformServices
         if (out.empty() && err) *err = e;
     }
 
-    // 无线：已配对的手机就是候选目标（我们主动去连它）
+    // Wireless: already-paired phones are candidate targets (we connect to them proactively)
     if (services.bluetooth) {
         std::string e;
         for (const auto& d : services.bluetooth->pairedDevices(&e)) {
@@ -548,7 +548,7 @@ std::unique_ptr<IProjectionSession> CarPlayBackend::connect(const ProjectionTarg
                                                             std::string* err)
 {
     if (target.protocol != Protocol::CarPlay) {
-        if (err) *err = "不是 CarPlay 目标";
+        if (err) *err = "Not a CarPlay target";
         return nullptr;
     }
 
@@ -557,12 +557,12 @@ std::unique_ptr<IProjectionSession> CarPlayBackend::connect(const ProjectionTarg
         return std::make_unique<WiredSession>(opt, services, sink);
     }
 
-    // 无线：目标里带着选中设备的地址（probe 时放进去的）
+    // Wireless: the target carries the selected device's address (put there during probe)
     if (auto dev = std::static_pointer_cast<core::BtDevice>(target.handle)) {
         if (!dev->address.empty()) opt.deviceAddress = dev->address;
     }
     if (target.transport != "bt") {
-        if (err) *err = "不支持的传输：" + target.transport;
+        if (err) *err = "Unsupported transport: " + target.transport;
         return nullptr;
     }
     return std::make_unique<WirelessSession>(opt, services, sink);

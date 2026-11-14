@@ -15,10 +15,10 @@ namespace allplay {
 
 namespace {
 
-constexpr const char* kTag = "音频";
+constexpr const char* kTag = "audio";
 
-/// AAC-LC 的 AudioSpecificConfig（2 字节）：5 位 objectType=2(LC) | 4 位采样率索引 | 4 位声道
-/// 频率索引表与安卓 AudioSink.kt:151-158 一致 —— 协议固定值，别自己推。
+/// AAC-LC AudioSpecificConfig (2 bytes): 5-bit objectType=2 (LC) | 4-bit sample-rate index | 4-bit channels
+/// The frequency index table matches Android AudioSink.kt:151-158 -- these are fixed protocol values, do not derive them yourself.
 uint16_t aacAsc(int sampleRate, int channels)
 {
     int freqIndex;
@@ -28,22 +28,22 @@ uint16_t aacAsc(int sampleRate, int channels)
     case 32000: freqIndex = 5;  break;
     case 44100: freqIndex = 4;  break;
     case 48000: freqIndex = 3;  break;
-    default:    freqIndex = 4;  break;   // 协议里不会出现别的值
+    default:    freqIndex = 4;  break;   // no other value occurs in the protocol
     }
     const int ch = (channels >= 1 && channels <= 7) ? channels : 2;
     return uint16_t((2 << 11) | (freqIndex << 7) | (ch << 3));
 }
 
-/// 最小 OpusHead（19 字节）：ffmpeg 的 opus 解码器只要求这一颗头，
-/// 真实声道/采样率由包内 TOC 与这里的声道数决定。
+/// Minimal OpusHead (19 bytes): ffmpeg's opus decoder only requires this header,
+/// with the real channels/sample rate determined by the in-packet TOC and the channel count here.
 std::vector<uint8_t> opusHead(int channels)
 {
     std::vector<uint8_t> h(19, 0);
     std::memcpy(h.data(), "OpusHead", 8);
     h[8]  = 1;                                   // version
     h[9]  = uint8_t(channels >= 1 && channels <= 2 ? channels : 2);
-    // [10..11] pre-skip = 0，[12..15] input sample rate，[16..17] gain，[18] mapping family
-    h[12] = 0x80; h[13] = 0xBB;                  // 48000（LE）—— 只是"信息"，不影响解码
+    // [10..11] pre-skip = 0, [12..15] input sample rate, [16..17] gain, [18] mapping family
+    h[12] = 0x80; h[13] = 0xBB;                  // 48000 (LE) -- informational only, does not affect decoding
     return h;
 }
 
@@ -51,7 +51,7 @@ std::vector<uint8_t> opusHead(int channels)
 
 SdlAudioSink::~SdlAudioSink()
 {
-    // 先关设备：SDL_CloseAudioDevice 会等回调跑完，而回调要拿 mu_ —— 所以关之前不能持锁。
+    // Close the device first: SDL_CloseAudioDevice waits for the callback to finish, and the callback takes mu_ -- so do not hold the lock while closing.
     if (dev_) {
         SDL_CloseAudioDevice(dev_);
         dev_ = 0;
@@ -88,18 +88,18 @@ bool SdlAudioSink::openDecoderLocked()
         break;
     case core::AudioCodec::LPCM:
     default:
-        return true;   // LPCM 不解码，不需要解码器
+        return true;   // LPCM is not decoded, no decoder needed
     }
 
     const AVCodec* c = avcodec_find_decoder(id);
     if (!c) {
-        LOG_ERROR("%s：本机 ffmpeg 没编入这个解码器（codec=%d）", kTag, int(cfg_.codec));
+        LOG_ERROR("%s: this ffmpeg build has no such decoder (codec=%d)", kTag, int(cfg_.codec));
         return false;
     }
     dec_ = avcodec_alloc_context3(c);
     if (!dec_) return false;
 
-    // extradata 必须带 AV_INPUT_BUFFER_PADDING_SIZE 的零填充，否则解码器可能越界读。
+    // extradata must be zero-padded by AV_INPUT_BUFFER_PADDING_SIZE, otherwise the decoder may read out of bounds.
     dec_->extradata = static_cast<uint8_t*>(
         av_mallocz(extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
     if (!dec_->extradata) {
@@ -109,12 +109,12 @@ bool SdlAudioSink::openDecoderLocked()
     std::memcpy(dec_->extradata, extradata.data(), extradata.size());
     dec_->extradata_size = int(extradata.size());
 
-    // ⚠️ 故意**不设** channels/ch_layout：新旧 ffmpeg 的字段名与类型都不同
-    //    （见 media/ffmpeg_compat.h），让解码器从码流自己推，我们只读帧里的值。
+    // ⚠️ Deliberately **do not set** channels/ch_layout: old and new ffmpeg differ in field name and type
+    //    (see media/ffmpeg_compat.h); let the decoder infer them from the bitstream and read the values from frames.
 
     const int ret = avcodec_open2(dec_, c, nullptr);
     if (ret < 0) {
-        LOG_ERROR("%s：avcodec_open2 失败（%d）", kTag, ret);
+        LOG_ERROR("%s: avcodec_open2 failed (%d)", kTag, ret);
         closeDecoderLocked();
         return false;
     }
@@ -124,18 +124,18 @@ bool SdlAudioSink::openDecoderLocked()
         closeDecoderLocked();
         return false;
     }
-    LOG_INFO("%s：解码器已配置（codec=%d %dHz %dch，extradata %zu 字节）",
+    LOG_INFO("%s: decoder configured (codec=%d %dHz %dch, extradata %zu bytes)",
              kTag, int(cfg_.codec), cfg_.rate, cfg_.channels, extradata.size());
     return true;
 }
 
 void SdlAudioSink::configure(core::AudioCodec codec, int sampleRate, int channels)
 {
-    // RTSP 线程 —— 这里**不碰 SDL**，只记待办，由主线程的 serviceDevice() 去开关设备。
+    // RTSP thread -- **no SDL here**; just record the pending change, and the main thread's serviceDevice() opens/closes the device.
     std::lock_guard<std::mutex> lk(mu_);
     if (cfg_.valid && cfg_.codec == codec && cfg_.rate == sampleRate &&
         cfg_.channels == channels)
-        return;   // 同一套协商值重复 SETUP，别把正在放的声音打断
+        return;   // same negotiated values on a repeated SETUP; do not interrupt audio that is playing
 
     cfg_.codec    = codec;
     cfg_.rate     = sampleRate > 0 ? sampleRate : 48000;
@@ -152,9 +152,9 @@ void SdlAudioSink::configure(core::AudioCodec codec, int sampleRate, int channel
     startSamples_ = size_t(kStartChunks) * size_t(kChunkFrames) * size_t(cfg_.channels);
 
     closeDecoderLocked();
-    openDecoderLocked();   // 失败也不致命：feed() 会退化成丢包，不会崩
+    openDecoderLocked();   // failure is not fatal: feed() degrades to dropping packets, no crash
 
-    LOG_INFO("%s：configure codec=%d %dHz %dch", kTag, int(codec), cfg_.rate, cfg_.channels);
+    LOG_INFO("%s: configure codec=%d %dHz %dch", kTag, int(codec), cfg_.rate, cfg_.channels);
 }
 
 void SdlAudioSink::reset()
@@ -169,12 +169,12 @@ void SdlAudioSink::pushLocked(const int16_t* d, size_t n)
 {
     const size_t cap = ring_.size();
     if (cap == 0 || n == 0) return;
-    if (n > cap) {                    // 来的一坨比整个缓冲还大：只留最新的
+    if (n > cap) {                    // incoming block larger than the whole buffer: keep only the newest
         d += (n - cap);
         n = cap;
     }
     bool over = false;
-    while (size_ + n > cap) {         // 丢最旧 —— 堆缓冲等于加延迟
+    while (size_ + n > cap) {         // drop the oldest -- extra buffering just adds latency
         head_ = (head_ + 1) % cap;
         --size_;
         over = true;
@@ -206,31 +206,31 @@ void SdlAudioSink::appendFrameLocked(const AVFrame* f)
     };
 
     switch (fmt) {
-    case AV_SAMPLE_FMT_FLTP:   // 平面 float（AAC/Opus 软解的常规输出）
+    case AV_SAMPLE_FMT_FLTP:   // planar float (the usual output of AAC/Opus software decoding)
         for (int c = 0; c < ch; ++c) {
             const float* src = reinterpret_cast<const float*>(f->data[c]);
             if (!src) continue;
             for (int i = 0; i < n; ++i) out[size_t(i) * ch + c] = f2s(src[i]);
         }
         break;
-    case AV_SAMPLE_FMT_FLT: {  // 交织 float
+    case AV_SAMPLE_FMT_FLT: {  // interleaved float
         const float* src = reinterpret_cast<const float*>(f->data[0]);
         for (size_t i = 0; i < size_t(n) * ch; ++i) out[i] = f2s(src[i]);
         break;
     }
-    case AV_SAMPLE_FMT_S16P:   // 平面 s16
+    case AV_SAMPLE_FMT_S16P:   // planar s16
         for (int c = 0; c < ch; ++c) {
             const int16_t* src = reinterpret_cast<const int16_t*>(f->data[c]);
             if (!src) continue;
             for (int i = 0; i < n; ++i) out[size_t(i) * ch + c] = src[i];
         }
         break;
-    case AV_SAMPLE_FMT_S16:    // 交织 s16，直接用
+    case AV_SAMPLE_FMT_S16:    // interleaved s16, use directly
         pushLocked(reinterpret_cast<const int16_t*>(f->data[0]), size_t(n) * ch);
         return;
     default:
-        // 真出现别的格式再补 —— 记一次日志免得静默丢声音
-        LOG_WARN("%s：不支持的样本格式 %d，丢弃", kTag, int(fmt));
+        // Add support if other formats actually show up -- log once so audio is not dropped silently
+        LOG_WARN("%s: unsupported sample format %d, dropping", kTag, int(fmt));
         return;
     }
     pushLocked(out, size_t(n) * ch);
@@ -240,7 +240,7 @@ void SdlAudioSink::decodeLocked(const uint8_t* payload, size_t len)
 {
     if (!dec_ || !pkt_ || !frame_) return;
 
-    // 先把上一轮攒的输出取干净，免得下面 send 撞 EAGAIN
+    // Drain the output accumulated in the previous round first, so the send below does not hit EAGAIN
     while (avcodec_receive_frame(dec_, frame_) == 0) {
         appendFrameLocked(frame_);
         av_frame_unref(frame_);
@@ -261,16 +261,16 @@ void SdlAudioSink::decodeLocked(const uint8_t* payload, size_t len)
 
 void SdlAudioSink::feed(const uint8_t* payload, size_t len, uint32_t sample)
 {
-    (void)sample;   // core 已经按 RTP 序号重排好了，时间戳这里用不上
+    (void)sample;   // core has already reordered by RTP sequence; the timestamp is not needed here
     if (!payload || len == 0) return;
 
     std::lock_guard<std::mutex> lk(mu_);
     if (stop_ || !cfg_.valid) return;
 
     if (cfg_.codec == core::AudioCodec::LPCM) {
-        // 裸 PCM：AirPlay 的 LPCM 是**大端** s16（网络序），SDL 要的是主机序。
-        // 真机实测：不换字节、直接按小端喂进 SDL，出来是满耳噪音（每个样本的高低
-        // 字节颠倒，波形成了类噪声）。这里每个 16 位样本换一下字节；奇数尾巴丢掉。
+        // Raw PCM: AirPlay's LPCM is **big-endian** s16 (network order), while SDL wants host order.
+        // Measured on hardware: feeding it to SDL as little-endian without swapping bytes yields pure noise
+        // (each sample's high and low bytes are reversed, so the waveform becomes noise). Here each 16-bit sample is byte-swapped; an odd trailing byte is dropped.
         const size_t n = len / sizeof(int16_t);
         if (n == 0) return;
         pcmSwap_.resize(n);
@@ -282,7 +282,7 @@ void SdlAudioSink::feed(const uint8_t* payload, size_t len, uint32_t sample)
         return;
     }
 
-    // AAC 的配置小包（≤12 字节）不是音频帧 —— 喂进去解码器会一路报错
+    // AAC config packets (<=12 bytes) are not audio frames -- feeding them makes the decoder error out repeatedly
     if (cfg_.codec == core::AudioCodec::AAC_LC && len <= 12) return;
 
     decodeLocked(payload, len);
@@ -292,7 +292,7 @@ void SdlAudioSink::feed(const uint8_t* payload, size_t len, uint32_t sample)
 void SdlAudioSink::sdlCallback(void* user, Uint8* stream, int len)
 {
     auto* self = static_cast<SdlAudioSink*>(user);
-    std::memset(stream, 0, size_t(len));   // 拿不出数据时放静音，别放上一轮的残留
+    std::memset(stream, 0, size_t(len));   // play silence when there is no data; do not leave the previous round's leftovers
 
     const size_t want = size_t(len) / sizeof(int16_t);
     std::lock_guard<std::mutex> lk(self->mu_);
@@ -312,8 +312,8 @@ void SdlAudioSink::sdlCallback(void* user, Uint8* stream, int len)
 
 void SdlAudioSink::serviceDevice()
 {
-    // 先把"要不要动设备"问清楚，**然后放锁** —— SDL_CloseAudioDevice 会等回调结束，
-    // 而回调要拿 mu_，持锁去关就是死锁。
+    // Decide "whether to touch the device" first, **then release the lock** -- SDL_CloseAudioDevice waits for the callback to finish,
+    // and the callback takes mu_; closing while holding the lock deadlocks.
     Config want;
     bool   reopen = false, unpause = false;
     size_t startSamples = 0;
@@ -322,15 +322,15 @@ void SdlAudioSink::serviceDevice()
         if (deviceDirty_) {
             deviceDirty_ = false;
             want         = cfg_;
-            startSamples = startSamples_;   // 快照：下面打日志时已经放锁了
+            startSamples = startSamples_;   // snapshot: the lock is already released by the time we log below
             reopen       = true;
         } else if (dev_ && !playing_ && size_ >= startSamples_) {
-            playing_ = true;          // 状态在锁里定，SDL 调用放锁外
+            playing_ = true;          // state decided under the lock, SDL calls outside it
             unpause  = true;
         }
     }
     if (unpause) {
-        SDL_PauseAudioDevice(dev_, 0);   // 垫底够了，放行
+        SDL_PauseAudioDevice(dev_, 0);   // enough has accumulated, let it play
         return;
     }
     if (!reopen) return;
@@ -350,16 +350,16 @@ void SdlAudioSink::serviceDevice()
     spec.callback = &SdlAudioSink::sdlCallback;
     spec.userdata = this;
 
-    // 不设 SDL_AUDIO_ALLOW_ANY_CHANGE：我们要的就是 44100/48000 × 1/2ch，SDL 都原生支持。
-    // 允许它改反而会让我们按码流算好的交织布局对不上设备。
+    // Do not set SDL_AUDIO_ALLOW_ANY_CHANGE: we want exactly 44100/48000 x 1/2ch, and SDL supports both natively.
+    // Letting it change these would make the interleaving layout computed from the bitstream mismatch the device.
     dev_ = SDL_OpenAudioDevice(nullptr, 0, &spec, nullptr, 0);
     if (!dev_) {
-        LOG_ERROR("%s：SDL_OpenAudioDevice 失败：%s", kTag, SDL_GetError());
+        LOG_ERROR("%s: SDL_OpenAudioDevice failed: %s", kTag, SDL_GetError());
         return;
     }
-    // **故意先不启播**（SDL 开出来的设备默认就是暂停的）：
-    // 等环形缓冲攒到 startSamples_ 再由上面的分支放行 —— 见头文件里 kStartChunks 的说明。
-    LOG_INFO("%s：SDL 音频设备已开（%dHz %dch），等缓冲垫到 %zu 样本再启播",
+    // **Deliberately do not start playback yet** (a device opened by SDL is paused by default):
+    // wait until the ring buffer reaches startSamples_, then the branch above releases it -- see the kStartChunks notes in the header.
+    LOG_INFO("%s: SDL audio device opened (%dHz %dch), waiting for %zu samples of buffer before starting playback",
              kTag, want.rate, want.channels, startSamples);
 }
 

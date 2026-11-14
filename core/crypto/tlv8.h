@@ -1,15 +1,15 @@
 /**
  * @file   tlv8.h
- * @brief  TLV8 编解码（pair-setup / pair-verify 的消息体）
+ * @brief  TLV8 encode/decode (message bodies of pair-setup / pair-verify)
  * @author blt
  */
 
 // ============================================================================
-// core/crypto/tlv8.h —— TLV8 编解码（pair-setup / pair-verify 的消息体）
+// core/crypto/tlv8.h — TLV8 encode/decode (message bodies of pair-setup / pair-verify)
 // ============================================================================
-// 每条 = [type:1][len:1][value:len]。value>255 按 255 分片（每片带 type/len 头）。
-// 相邻两条**条目** type 相同时，中间插分隔符 (0xff, 0x00)。解码时 0xff 无特殊语义，
-// 续段靠"同 type 且上一片 len==255"判断，否则覆盖。
+// Each item = [type:1][len:1][value:len]. value>255 is split into 255-byte chunks (each with its own type/len header).
+// When two adjacent **items** share a type, insert a separator (0xff, 0x00) between them. On decode 0xff has no special meaning;
+// continuation is detected by "same type and previous chunk len==255", otherwise it overwrites.
 #pragma once
 
 #include <cstdint>
@@ -23,13 +23,13 @@ struct Tlv {
     std::vector<uint8_t> value;
 };
 
-/// 编码（按 items 顺序；相邻同 type 插分隔；>255 分片）。
+/// Encode (in items order; insert separator between adjacent same-type items; split >255).
 std::vector<uint8_t> tlv8Encode(const std::vector<Tlv>& items);
 
-/// 解码（分片拼接 + 同 type 覆盖语义）。截断不报错，解出多少算多少。
+/// Decode (concatenate chunks + same-type overwrite semantics). Truncation is not an error; decode as much as possible.
 std::vector<Tlv> tlv8Decode(const uint8_t* data, size_t len);
 
-/// 从解码结果取某 type 的 value；不存在返回 nullptr。
+/// Get the value of a given type from the decode result; returns nullptr if absent.
 const std::vector<uint8_t>* tlv8Get(const std::vector<Tlv>& items, uint8_t type);
 
 }  // namespace core::crypto

@@ -1,18 +1,18 @@
 /**
  * @file   tls.h
- * @brief  Android Auto 的 TLS 1.2 客户端（记录经 AAP SSL_HANDSHAKE 消息搬运）
+ * @brief  Android Auto TLS 1.2 client (records carried over AAP SSL_HANDSHAKE messages)
  * @author blt
  */
 
 // ============================================================================
-// core/projection/androidauto/tls.h —— AA 的 TLS 1.2 客户端
+// core/projection/androidauto/tls.h - AA TLS 1.2 client
 // ============================================================================
-// 与普通 TLS 的差别：TLS 记录**不是**裸字节流，握手阶段每条记录是 AAP 控制通道
-// 0x0003（SSL_HANDSHAKE）消息的 body；握手完成后，每条业务消息单独过一遍
-// SSL_write / SSL_read（aasdk 的做法是 1:1，这里沿用）。
+// Difference from ordinary TLS: records are **not** a raw byte stream. During the handshake each record is the body of an AAP
+// control-channel 0x0003 (SSL_HANDSHAKE) message; after the handshake, each application message goes through
+// SSL_write / SSL_read individually (aasdk does this 1:1, and we follow suit).
 //
-// 证书：运行时自己生成 RSA-2048 自签名证书（CN=AllPlay），不复用任何厂商证书。
-// 固定 TLS 1.2（aasdk 在旧 OpenSSL 路径上也是 TLSv1_2_client_method）。
+// Certificate: a self-signed RSA-2048 certificate (CN=AllPlay) generated at runtime; no vendor certificate is reused.
+// TLS 1.2 is pinned (aasdk also uses TLSv1_2_client_method on the old OpenSSL path).
 #pragma once
 
 #include <cstddef>
@@ -37,7 +37,7 @@ public:
 
     bool init(std::string* err);
 
-    /// 对端数据已 ingest 后调用。NeedMore = 继续等对端记录。
+    /// Call after peer data has been ingested. NeedMore = keep waiting for peer records.
     Handshake handshake(std::string* err);
 
     bool ingest(const uint8_t* data, size_t len);
@@ -45,7 +45,7 @@ public:
 
     bool encrypt(const std::vector<uint8_t>& plain, std::vector<uint8_t>* cipher,
                  std::string* err);
-    /// 解密一帧。对端数据不完整时返回 true 且 plain 为空（等下一帧）。
+    /// Decrypt one frame. Returns true with an empty plain when peer data is incomplete (wait for the next frame).
     bool decrypt(const uint8_t* cipher, size_t len, std::vector<uint8_t>* plain,
                  std::string* err);
 

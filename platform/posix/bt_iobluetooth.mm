@@ -1,12 +1,12 @@
 // ============================================================================
-// platform/posix/bt_iobluetooth.mm —— macOS 传输层（IOBluetooth RFCOMM）
+// platform/posix/bt_iobluetooth.mm -- macOS transport (IOBluetooth RFCOMM)
 // ============================================================================
-// 实测要点：
-//   · macOS 27 起 `pairedDevices`/`isPaired`/SDP 查询对**无蓝牙权限**的进程
-//     静默返回空 —— 必须从桌面会话启动（TCC 归属到 Terminal）。
-//   · RFCOMM 的 delegate 回调走**发起线程的 run loop** —— 打开与收数据都在
-//     一条专用线程上跑 NSRunLoop。
-//   · 本文件按**非 ARC** 编译（CMake 给 -fno-objc-arc），显式 retain/release。
+// Key findings from real hardware:
+//   - Since macOS 27, `pairedDevices`/`isPaired`/SDP queries silently return empty for processes
+//     **without Bluetooth permission** -- the process must be launched from a desktop session (TCC attributed to Terminal).
+//   - RFCOMM delegate callbacks run on the **initiating thread's run loop** -- both opening and
+//     receiving data run an NSRunLoop on a dedicated thread.
+//   - This file is compiled **without ARC** (CMake passes -fno-objc-arc), with explicit retain/release.
 #include "posix/posix.h"
 
 #include "common/log.h"
@@ -25,24 +25,24 @@
 #include <thread>
 
 namespace allplay::posix {
-class MacRfcommStream;   // 前向声明（delegate 的 owner 属性用）
+class MacRfcommStream;   // forward declaration (for the delegate's owner property)
 }
 
 namespace allplay::posix {
-/// 服务端等待：手机连进来时由观察者填 stream（跨线程，用小锁+轮询）
+/// Server-side wait: the observer fills stream when the phone connects (cross-thread, small lock + polling)
 struct ServerWait {
     std::mutex       mu;
     MacRfcommStream* stream = nullptr;
 };
 }
 
-// 入站 RFCOMM 通道的观察者（服务端方向：等手机连我们的 "Wireless iAPv2"）
+// Observer for incoming RFCOMM channels (server side: wait for the phone to connect to our "Wireless iAPv2")
 @interface RfcommServerObserver : NSObject
 @property(nonatomic, assign) allplay::posix::ServerWait* wait;
 @end
 
 // ---------------------------------------------------------------------------
-// delegate：回调转发到 C++ 对象
+// delegate: forwards callbacks to the C++ object
 // ---------------------------------------------------------------------------
 @interface RfcommDelegate : NSObject <IOBluetoothRFCOMMChannelDelegate>
 @property(nonatomic, assign) allplay::posix::MacRfcommStream* owner;
@@ -54,7 +54,7 @@ namespace allplay::posix {
 constexpr int kOpenTimeoutMs = 20000;
 
 // ---------------------------------------------------------------------------
-// RFCOMM 字节流
+// RFCOMM byte stream
 // ---------------------------------------------------------------------------
 class MacRfcommStream : public core::IByteStream {
 public:
@@ -65,7 +65,7 @@ public:
         delegate_.owner = this;
     }
 
-    /// 服务端方向：通道已由入站连接建立（不需要 open()）
+    /// Server side: the channel was established by the inbound connection (no open() needed)
     explicit MacRfcommStream(IOBluetoothRFCOMMChannel* opened)
     {
         channel_ = [opened retain];
@@ -94,16 +94,16 @@ public:
         }
     }
 
-    /// 异步打开 → **边泵 run loop 边等** openComplete（最多 20s）。
-    /// ⚠️ 这里必须泵 run loop：完成回调是通过 run loop 派发的，若在这条线程上
-    ///    阻塞等条件变量，回调永远到不了（症状：RFCOMM 打开超时）。
+    /// Open asynchronously -> **pump the run loop while waiting** for openComplete (up to 20s).
+    /// WARNING: the run loop must be pumped here: the completion callback is dispatched via the run loop, so blocking
+    ///    on a condition variable on this thread means the callback never arrives (symptom: RFCOMM open timeout).
     bool open(std::string* err)
     {
         IOReturn r = [device_ openRFCOMMChannelAsync:&channel_
                                        withChannelID:channelId_
                                             delegate:delegate_];
         if (r != kIOReturnSuccess || !channel_) {
-            if (err) *err = "openRFCOMMChannelAsync 失败（ret=" + std::to_string((int)r) + "）";
+            if (err) *err = "openRFCOMMChannelAsync failed (ret=" + std::to_string((int)r) + ")";
             return false;
         }
         [channel_ retain];
@@ -117,11 +117,11 @@ public:
             }
         }
         if (!openDone_) {
-            if (err) *err = "RFCOMM 打开超时";
+            if (err) *err = "RFCOMM open timed out";
             return false;
         }
         if (!openedOk_) {
-            if (err) *err = "RFCOMM 打开被拒绝（对端不接受？）";
+            if (err) *err = "RFCOMM open rejected (peer refused?)";
             return false;
         }
         return true;
@@ -132,9 +132,9 @@ public:
         std::unique_lock<std::mutex> lk(mu_);
         if (!cvData_.wait_for(lk, std::chrono::milliseconds(timeoutMs),
                               [&] { return !queue_.empty() || closed_; })) {
-            return 0;   // 超时
+            return 0;   // timeout
         }
-        if (queue_.empty()) return -1;   // 关闭
+        if (queue_.empty()) return -1;   // closed
         const size_t take = std::min(n, queue_.size());
         for (size_t i = 0; i < take; ++i) {
             buf[i] = queue_.front();
@@ -172,7 +172,7 @@ public:
         cvOpen_.notify_all();
     }
 
-    // ---- delegate 回调入口 ----
+    // ---- delegate callback entry points ----
     void onData(const void* data, size_t len)
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -241,8 +241,8 @@ public:
             }
         }
         if (out.empty() && err) {
-            *err = "已配对设备列表为空（macOS 27：本进程可能没有蓝牙权限 —— "
-                   "要从桌面会话的 Terminal 启动，别走 ssh）";
+            *err = "paired device list is empty (macOS 27: this process may lack Bluetooth permission -- "
+                   "launch it from Terminal in the desktop session, not over ssh)";
         }
         return out;
     }
@@ -250,7 +250,7 @@ public:
     core::IByteStream* connectRFCOMM(const std::string& address, const std::string& uuid,
                                     std::string* err) override
     {
-        // UUID 字符串 → 16 字节
+        // UUID string -> 16 bytes
         uint8_t raw[16] = {0};
         int bi = 0;
         for (size_t i = 0; i < uuid.size() && bi < 16;) {
@@ -259,7 +259,7 @@ public:
             i += 2;
         }
         if (bi != 16) {
-            if (err) *err = "UUID 形态不对（要 8-4-4-4-12）";
+            if (err) *err = "malformed UUID (expected 8-4-4-4-12)";
             return nullptr;
         }
 
@@ -272,7 +272,7 @@ public:
         std::mutex              mu;
         std::condition_variable cv;
 
-        // IOBluetooth 打开+回调都要 run loop → 放专用线程
+        // IOBluetooth open and callbacks both need a run loop -> use a dedicated thread
         std::thread worker([res, &address, raw, &mu, &cv] {
             @autoreleasepool {
                 NSString* addr = [NSString stringWithUTF8String:address.c_str()];
@@ -281,14 +281,14 @@ public:
                 MacRfcommStream* stream = nullptr;
 
                 if (!device) {
-                    res->err = "deviceWithAddressString 失败（地址形态？）";
+                    res->err = "deviceWithAddressString failed (bad address format?)";
                 } else {
                     IOBluetoothSDPServiceRecord* record = [device getServiceRecordForUUID:u];
                     BluetoothRFCOMMChannelID chid = 0;
                     if (!record) {
-                        res->err = "SDP 查不到 iAP2 SPP 服务（未配对/无权限/手机没广播）";
+                        res->err = "SDP lookup found no iAP2 SPP service (not paired / no permission / phone not advertising)";
                     } else if ([record getRFCOMMChannelID:&chid] != kIOReturnSuccess) {
-                        res->err = "取 RFCOMM channel 号失败";
+                        res->err = "failed to get RFCOMM channel number";
                     } else {
                         stream = new MacRfcommStream(device, chid);
                         if (!stream->open(&res->err)) {
@@ -305,7 +305,7 @@ public:
                 cv.notify_all();
 
                 if (stream) {
-                    // 常驻：跑 run loop 收数据；通道关闭后退出
+                    // Stay resident: run the run loop to receive data; exit once the channel closes
                     while (!stream->closed()) {
                         [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
@@ -318,14 +318,14 @@ public:
         if (!cv.wait_for(lk, std::chrono::milliseconds(kOpenTimeoutMs + 5000),
                          [&] { return res->done; })) {
             worker.detach();
-            if (err) *err = "连接流程超时";
+            if (err) *err = "connection flow timed out";
             return nullptr;
         }
         lk.unlock();
-        worker.detach();   // 线程继续服务该通道（对象生命周期=进程）
+        worker.detach();   // the thread keeps serving this channel (object lifetime = process)
 
         if (!res->stream) {
-            if (err) *err = res->err.empty() ? "连接失败" : res->err;
+            if (err) *err = res->err.empty() ? "connection failed" : res->err;
             return nullptr;
         }
         return res->stream;
@@ -334,7 +334,7 @@ public:
     core::IByteStream* waitForPhoneConnection(int timeoutMs, std::string* err) override
     {
         @autoreleasepool {
-            // UUID → 16 字节
+            // UUID -> 16 bytes
             uint8_t raw[16] = {0};
             const std::string uuid = core::kWirelessIapUuid;
             int bi = 0;
@@ -351,21 +351,21 @@ public:
                 @"ServiceClassList" : @[ @{@"UUID" : u} ],
                 @"RFCOMMChannelID" : @(chid),
             };
-            // macOS 27：发布本地 SDP 记录用 publishedServiceRecordWithDictionary
-            // （老的 IOBluetoothAddServiceDict 已被删除）
+            // macOS 27: publishing a local SDP record uses publishedServiceRecordWithDictionary
+            // (the old IOBluetoothAddServiceDict has been removed)
             IOBluetoothSDPServiceRecord* record =
                 [IOBluetoothSDPServiceRecord publishedServiceRecordWithDictionary:svc];
             if (!record) {
-                if (err) *err = "发布会话 SDP 'Wireless iAPv2' 失败（字典格式？权限？）";
+                if (err) *err = "failed to publish SDP 'Wireless iAPv2' (dictionary format? permission?)";
                 return nullptr;
             }
-            static IOBluetoothSDPServiceRecord* keepRecord = nil;   // 非 ARC：要持有
+            static IOBluetoothSDPServiceRecord* keepRecord = nil;   // non-ARC: must be retained
             keepRecord = [record retain];
-            LOG_INFO("[bt] 已注册 SDP 'Wireless iAPv2'（UUID %s，RFCOMM ch%d），等手机连接…",
+            LOG_INFO("[bt] registered SDP 'Wireless iAPv2' (UUID %s, RFCOMM ch%d), waiting for phone to connect...",
                      core::kWirelessIapUuid, chid);
 
-            static ServerWait wait;                    // 进程生命周期
-            static RfcommServerObserver* obs = nil;    // 保持注册
+            static ServerWait wait;                    // process lifetime
+            static RfcommServerObserver* obs = nil;    // keeps the registration alive
             static IOBluetoothUserNotification* note = nil;
             obs = [[RfcommServerObserver alloc] init];
             obs.wait = &wait;
@@ -375,7 +375,7 @@ public:
                                                withChannelID:chid
                                                    direction:kIOBluetoothUserNotificationChannelDirectionIncoming];
             if (!note) {
-                if (err) *err = "注册入站通道通知失败";
+                if (err) *err = "failed to register inbound channel notification";
                 return nullptr;
             }
 
@@ -391,7 +391,7 @@ public:
                                              beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
                 }
             }
-            if (err) *err = "等待手机连接超时（手机上把本机重新配对一次？或 iPhone 未把它当车）";
+            if (err) *err = "timed out waiting for phone to connect (re-pair this host on the phone? or the iPhone doesn't treat it as a car)";
             return nullptr;
         }
     }
@@ -418,7 +418,7 @@ std::string currentSSID()
     @autoreleasepool {
         CWInterface* iface = [[CWWiFiClient sharedWiFiClient] interface];
         const char* s = [[iface ssid] UTF8String];
-        return s ? s : "";   // macOS 27 常拿不到（系统打码）→ 用 --ssid
+        return s ? s : "";   // often unavailable on macOS 27 (masked by the system) -> use --ssid
     }
 }
 
@@ -433,7 +433,7 @@ std::string bluetoothAdapterName()
 
 }  // namespace allplay::posix
 
-// delegate 实现要放在 MacRfcommStream 完整定义之后（成员调用需要完整类型）
+// The delegate implementation must come after MacRfcommStream's full definition (member calls need the complete type)
 @implementation RfcommDelegate
 - (void)rfcommChannelData:(IOBluetoothRFCOMMChannel*)channel
                      data:(void*)dataPointer
@@ -454,7 +454,7 @@ std::string bluetoothAdapterName()
 }
 @end
 
-// 入站通道观察者实现（要放在 MacRfcommStream 完整定义之后）
+// Incoming-channel observer implementation (must come after MacRfcommStream's full definition)
 @implementation RfcommServerObserver
 - (void)newRFCOMMChannelOpened:(IOBluetoothUserNotification*)notification
                        channel:(IOBluetoothRFCOMMChannel*)newChannel

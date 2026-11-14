@@ -1,13 +1,13 @@
 /**
  * @file   udp.h
- * @brief  UDP socket 抽象（CarPlay 音频走 RTP/RTCP over UDP）
+ * @brief  UDP socket abstraction (CarPlay audio uses RTP/RTCP over UDP)
  * @author blt
  */
 
 // ============================================================================
-// core/port/udp.h —— UDP socket 抽象（CarPlay 音频走 RTP/RTCP over UDP）
+// core/port/udp.h — UDP socket abstraction (CarPlay audio uses RTP/RTCP over UDP)
 // ============================================================================
-// 与 ITcpListener 对称：协议层只吃这个接口，底层由 posix/Android 各自实现。
+// Symmetric with ITcpListener: the protocol layer consumes only this interface; posix/Android each provide the backend.
 #pragma once
 
 #include <cstdint>
@@ -16,16 +16,16 @@
 
 namespace core {
 
-/// 一个已绑定的 UDP socket（数据报）。
+/// A bound UDP socket (datagrams).
 class IUdpSocket {
 public:
     virtual ~IUdpSocket() = default;
 
-    /// 绑定本地端口（port=0 由内核选，用 port() 读回）。失败返回 false 并写 err。
+    /// Bind a local port (port=0 lets the kernel choose; read it back with port()). Returns false and sets err on failure.
     virtual bool bind(uint16_t port, std::string* err) = 0;
-    /// 接收一个数据报。>0 = 字节数；0 = 超时；<0 = 已关闭/错误。
+    /// Receive one datagram. >0 = byte count; 0 = timeout; <0 = closed/error.
     virtual int recv(uint8_t* buf, size_t n, int timeoutMs) = 0;
-    /// 把数据报回给最近一次 recv 的来源地址（NTP/RTCP 响应用）。
+    /// Send a datagram back to the source of the last recv (for NTP/RTCP responses).
     virtual bool send(const uint8_t* buf, size_t n) = 0;
     virtual uint16_t port() const = 0;
     virtual void close() = 0;

@@ -1,23 +1,23 @@
 # ============================================================================
-# AllPlay Android 原生层：core（平台无关）+ POSIX 网卡/TCP + JNI 桥
+# AllPlay Android native layer: core (platform-independent) + POSIX NIC/TCP + JNI bridge
 # ============================================================================
-# 依赖说明（唯一三方 = OpenSSL）：core 需要 OpenSSL。Android 无系统 OpenSSL，
-# 需为 arm64-v8a / armeabi-v7a / x86_64 交叉编译一份（如 openssl-3.x NDK 构建），
-# 并在 gradle 的 externalNativeBuild.cmake.arguments 里传：
+# Dependencies (the only third-party lib is OpenSSL): core needs OpenSSL. Android has no system OpenSSL,
+# so cross-compile one for arm64-v8a / armeabi-v7a / x86_64 (e.g. an openssl-3.x NDK build)
+# and pass it in gradle's externalNativeBuild.cmake.arguments:
 #   -DOPENSSL_ROOT_DIR=<openssl-install-prefix>
-# 蓝牙 / mDNS / 视频解码不走 C++ 库，经 JNI 调系统 API（BluetoothSocket / NsdManager / MediaCodec）。
+# Bluetooth / mDNS / video decode do not use C++ libs; they call system APIs via JNI (BluetoothSocket / NsdManager / MediaCodec).
 cmake_minimum_required(VERSION 3.22)
 project(allplay_jni LANGUAGES CXX)
 
-# core 用 std::filesystem / 嵌套 namespace 等 C++17 特性；桌面顶层已设，安卓顶层也要设
+# core uses C++17 features such as std::filesystem / nested namespaces; the desktop top level sets this, so the Android top level must too
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 项目根（android/app/src/main/cpp 上溯 5 层）
+# Project root (5 levels up from android/app/src/main/cpp)
 get_filename_component(ALLPLAY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
 
-# OpenSSL 按 ABI 分目录交叉编译：<OPENSSL_BASE_DIR>/openssl-arm64 与 openssl-arm。
-# 在 add_subdirectory(core)（内部 find_package(OpenSSL)）之前算好 OPENSSL_ROOT_DIR。
+# Cross-compile OpenSSL into per-ABI dirs: <OPENSSL_BASE_DIR>/openssl-arm64 and openssl-arm.
+# Set OPENSSL_ROOT_DIR before add_subdirectory(core) (which runs find_package(OpenSSL) internally).
 if(ANDROID AND DEFINED OPENSSL_BASE_DIR)
     if(ANDROID_ABI STREQUAL "armeabi-v7a")
         set(OPENSSL_ROOT_DIR "${OPENSSL_BASE_DIR}/openssl-arm")
@@ -28,17 +28,17 @@ if(ANDROID AND DEFINED OPENSSL_BASE_DIR)
     endif()
 endif()
 
-# core（平台无关；含 find_package(OpenSSL/Threads)）
+# core (platform-independent; includes find_package(OpenSSL/Threads))
 add_subdirectory("${ALLPLAY_ROOT}/core" core)
 
-# POSIX TCP/网卡（NDK 提供 POSIX socket + getifaddrs）
+# POSIX TCP/NIC (the NDK provides POSIX sockets + getifaddrs)
 add_library(allplay_posix_net STATIC
     "${ALLPLAY_ROOT}/platform/posix/net_posix.cpp")
 target_include_directories(allplay_posix_net PUBLIC
     "${ALLPLAY_ROOT}/core"
     "${ALLPLAY_ROOT}/platform")
 
-# JNI 桥：把 core::port 接口实现成对 Kotlin 服务对象的下调
+# JNI bridge: implements the core::port interfaces as downcalls to Kotlin service objects
 add_library(allplay_jni SHARED jni_bridge.cpp stdio_compat.cpp)
 target_include_directories(allplay_jni PRIVATE
     "${ALLPLAY_ROOT}/core"

@@ -1,10 +1,10 @@
 // ============================================================================
-// tools/core_selftest.cpp —— core 自检（M1 验收用，不依赖 SDL/显示）
+// tools/core_selftest.cpp -- core self-test (for M1 acceptance, no SDL/display dependency)
 // ============================================================================
-// 用法：
+// Usage:
 //   core_selftest [--port 7000] [--ifname eth0] [--name "AllPlay"]
 //                 [--screen 1280x720] [--state-dir DIR] [--no-avahi] [--duration S]
-// 退出：Ctrl-C / SIGTERM / --duration 到点。
+// Exit: Ctrl-C / SIGTERM / --duration elapsed.
 #include "airplay/server.h"
 #include "bt/bt_trigger.h"
 #include "common/log.h"
@@ -38,9 +38,9 @@ int main(int argc, char** argv)
     core::airplay::ReceiverConfig cfg;
     int durationSec = 0;
 
-    // M2：蓝牙触发选项
+    // M2: Bluetooth trigger options
     bool        btEnabled = false;
-    bool        btServerMode = true;      // 默认服务端：注册 SDP 等手机连
+    bool        btServerMode = true;      // default is server: register SDP and wait for the phone to connect
     std::string btDevice = "iPhone";
     std::string btAddr;
     std::string btSsid;
@@ -50,7 +50,7 @@ int main(int argc, char** argv)
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         auto next = [&]() -> const char* {
-            if (i + 1 >= argc) { std::fprintf(stderr, "参数 %s 缺取值\n", a); std::exit(2); }
+            if (i + 1 >= argc) { std::fprintf(stderr, "argument %s is missing a value\n", a); std::exit(2); }
             return argv[++i];
         };
         if (!std::strcmp(a, "--port")) cfg.port = uint16_t(std::atoi(next()));
@@ -64,7 +64,7 @@ int main(int argc, char** argv)
             const char* m = next();
             btServerMode = !std::strcmp(m, "server");
             if (std::strcmp(m, "server") && std::strcmp(m, "client")) {
-                std::fprintf(stderr, "--bt-mode 要 server 或 client\n");
+                std::fprintf(stderr, "--bt-mode must be server or client\n");
                 return 2;
             }
         }
@@ -75,18 +75,18 @@ int main(int argc, char** argv)
         else if (!std::strcmp(a, "--identity")) identityDir = next();
         else if (!std::strcmp(a, "--screen")) {
             if (!parseScreen(next(), &cfg.width, &cfg.height)) {
-                std::fprintf(stderr, "--screen 要 WxH\n");
+                std::fprintf(stderr, "--screen requires WxH\n");
                 return 2;
             }
         } else {
             std::fprintf(stderr,
-                         "用法: %s [--port N] [--ifname X] [--name S] [--screen WxH]\n"
+                         "Usage: %s [--port N] [--ifname X] [--name S] [--screen WxH]\n"
                          "        [--state-dir DIR] [--no-avahi] [--duration S]\n"
-                         "        [--bt] [--bt-mode server|client] [--bt-device 名字]\n"
+                         "        [--bt] [--bt-mode server|client] [--bt-device NAME]\n"
                          "        [--bt-addr AA-BB-..]\n"
-                         "        [--ssid WiFi名] [--wifi-pass 密码] [--identity 目录]\n"
-                         "  --bt-mode 默认 server；Linux/macOS 上真机可用的都是 **client**\n"
-                         "            （我们主动连手机的 iAP2 SPP 服务）\n", argv[0]);
+                         "        [--ssid WIFI_NAME] [--wifi-pass PASSWORD] [--identity DIR]\n"
+                         "  --bt-mode defaults to server; on Linux/macOS only **client** works with a real phone\n"
+                         "            (we actively connect to the phone's iAP2 SPP service)\n", argv[0]);
             return 2;
         }
     }
@@ -98,7 +98,7 @@ int main(int argc, char** argv)
     auto services = allplay::posix::makePlatformServices();
     std::string err;
     if (!rx.start(cfg, services, &err)) {
-        std::fprintf(stderr, "[selftest] 启动失败：%s\n", err.c_str());
+        std::fprintf(stderr, "[selftest] start failed: %s\n", err.c_str());
         return 1;
     }
 
@@ -106,19 +106,19 @@ int main(int argc, char** argv)
                 rx.ifname().c_str(), rx.ip().c_str(), rx.info().deviceId.c_str());
     std::printf("[selftest] identity: pi=%s pk=%s\n",
                 rx.info().pi.c_str(), rx.info().pkHex.c_str());
-    std::printf("[selftest] RTSP :%u   /info 就绪\n", rx.port());
+    std::printf("[selftest] RTSP :%u   /info ready\n", rx.port());
     if (cfg.enableAvahi) {
         if (rx.avahiError().empty())
-            std::printf("[selftest] Bonjour: 已广播 _airplay._tcp\n");
+            std::printf("[selftest] Bonjour: advertising _airplay._tcp\n");
         else
-            std::printf("[selftest] Bonjour: 不可用（%s）\n", rx.avahiError().c_str());
+            std::printf("[selftest] Bonjour: unavailable (%s)\n", rx.avahiError().c_str());
     } else {
-        std::printf("[selftest] Bonjour: 关闭（--no-avahi）\n");
+        std::printf("[selftest] Bonjour: disabled (--no-avahi)\n");
     }
     std::printf("[selftest] READY\n");
     std::fflush(stdout);
 
-    // ---- M2：蓝牙触发（可选）----
+    // ---- M2: Bluetooth trigger (optional) ----
     if (btEnabled) {
         core::bt::BtTriggerParams bp;
         bp.deviceName = btDevice;
@@ -143,13 +143,13 @@ int main(int argc, char** argv)
         c.mfiDir       = identityDir;
         c.timeoutMs    = 90000;
 
-        // 0x4301 发出后这条 iAP2 链路就是无线 CarPlay 的心跳线，runBtTrigger 会一直读到
-        // 手机离开（见 wireless_client.cpp 的 kSessionKeepAliveMs）。所以这里放到线程里跑，
-        // 主线程只等 Ctrl-C —— 否则按了 Ctrl-C 也得等手机断链才退得出去。
+        // After 0x4301 is sent, this iAP2 link is the wireless CarPlay heartbeat, and runBtTrigger keeps reading until
+        // the phone leaves (see kSessionKeepAliveMs in wireless_client.cpp). So run it on a thread and let the
+        // main thread only wait for Ctrl-C -- otherwise Ctrl-C would still have to wait for the phone to disconnect.
         std::atomic<bool> btCancel{false};
         c.cancel = &btCancel;
 
-        std::printf("[selftest] 蓝牙：btMac=%s ssid=%s ip=%s port=%u\n",
+        std::printf("[selftest] Bluetooth: btMac=%s ssid=%s ip=%s port=%u\n",
                     c.btMac.c_str(), c.ssid.c_str(),
                     c.ipAddresses.empty() ? "?" : c.ipAddresses[0].c_str(), rx.port());
         std::fflush(stdout);
@@ -166,10 +166,10 @@ int main(int argc, char** argv)
         });
         while (!btDone.load() && !g_stop)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        btCancel.store(true);   // Ctrl-C（或手机已离开）：让链路收工
+        btCancel.store(true);   // Ctrl-C (or phone already gone): let the link wind down
         btThread.join();
-        std::printf("[selftest] 蓝牙触发：%s%s%s\n", r.ok ? "成功" : "失败",
-                    r.ok ? "" : "：", r.ok ? "" : r.error.c_str());
+        std::printf("[selftest] Bluetooth trigger: %s%s%s\n", r.ok ? "succeeded" : "failed",
+                    r.ok ? "" : ": ", r.ok ? "" : r.error.c_str());
         std::fflush(stdout);
     }
 
@@ -181,6 +181,6 @@ int main(int argc, char** argv)
     }
 
     rx.stop();
-    std::printf("[selftest] 已退出\n");
+    std::printf("[selftest] exited\n");
     return 0;
 }

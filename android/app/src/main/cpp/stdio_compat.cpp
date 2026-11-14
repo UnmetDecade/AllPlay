@@ -1,6 +1,6 @@
-// Android API < 23 的 bionic 不导出 stdin/stdout/stderr 符号（只导出 __sF，见 <stdio.h>）。
-// 但 NDK 预编译的 libc++（iostream.o，std::cin/cout/cerr 的缓冲实现）直接引用这三个符号，
-// 用 <fstream> 会把它拉进链接 → undefined symbol。这里按 bionic 老命名定义别名，指向 __sF。
+// bionic on Android API < 23 does not export the stdin/stdout/stderr symbols (only __sF; see <stdio.h>).
+// But the NDK's prebuilt libc++ (iostream.o, which implements the std::cin/cout/cerr buffers) references these three symbols directly,
+// so including <fstream> pulls it into the link → undefined symbol. Define aliases with the legacy bionic names here, pointing at __sF.
 #if defined(__ANDROID__) && __ANDROID_API__ < 23
 #include <cstdio>
 

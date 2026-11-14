@@ -1,17 +1,17 @@
 /**
  * @file   rtsp.h
- * @brief  极简 RTSP 服务器（平台无关，吃 core::ITcpListener）
+ * @brief  Minimal RTSP server (platform-independent, consumes core::ITcpListener)
  * @author blt
  */
 
 // ============================================================================
-// core/airplay/rtsp.h —— 极简 RTSP 服务器（平台无关，吃 core::ITcpListener）
+// core/airplay/rtsp.h - Minimal RTSP server (platform-independent, consumes core::ITcpListener)
 // ============================================================================
-// AirPlay 的控制通道就是 "RTSP over TCP"：请求行 + 头 + Content-Length 体，
-// 语义和 HTTP 几乎一致（CSeq 头、keep-alive）。这里不引任何 HTTP 库，手写解析。
+// The AirPlay control channel is just "RTSP over TCP": request line + headers + Content-Length body,
+// with semantics almost identical to HTTP (CSeq header, keep-alive). No HTTP library is used; parsing is hand-written.
 //
-// 线程模型：一条 accept 线程 + 每连接一条线程（连接数很少：手机 1~2 条）。
-// 底层 TCP 来自注入的 core::ITcpListener（POSIX / Android 各自实现）。
+// Threading: one accept thread + one thread per connection (very few connections: 1-2 from the phone).
+// The underlying TCP comes from an injected core::ITcpListener (implemented per platform: POSIX / Android).
 #pragma once
 
 #include "airplay/control_cipher.h"
@@ -31,12 +31,12 @@ namespace core::airplay {
 
 struct RtspRequest {
     std::string method;    ///< OPTIONS / GET / POST / SETUP / RECORD / ...
-    std::string uri;       ///< "/info" 等
+    std::string uri;       ///< "/info" etc.
     std::string version;   ///< "RTSP/1.0"
     std::vector<std::pair<std::string, std::string>> headers;
     std::vector<uint8_t> body;
 
-    /// 头查找（大小写不敏感）；没有返回空串
+    /// Header lookup (case-insensitive); returns an empty string if absent
     std::string header(const std::string& name) const;
 };
 
@@ -61,21 +61,21 @@ public:
 
     ~RtspServer();
 
-    /// listener 需已绑定成功（start() 返回 true）；这里接管所有权并开始 accept。
+    /// listener must already be bound (start() returned true); this takes ownership and starts accepting.
     void start(std::unique_ptr<core::ITcpListener> listener, Handler handler);
     void stop();
     uint16_t port() const { return listener_ ? listener_->port() : 0; }
 
-    /// pair-verify 完成后由组合根装入控制通道加密（null=明文）。
+    /// After pair-verify completes, the composition root installs control channel encryption (null = plaintext).
     void setCipher(std::shared_ptr<ControlCipher> c) { cipher_ = std::move(c); }
-    /// 每写完一条响应回调一次（组合根用它做"M4 写完后才启加密"）。
+    /// Called once after each response is written (the composition root uses it for "enable encryption only after M4 is written").
     void setAfterResponse(std::function<void()> f) { afterResponse_ = std::move(f); }
-    /// 控制连接断开时回调（组合根用它把会话状态复位，UI 回到启动页）。
+    /// Called when the control connection drops (the composition root uses it to reset session state so the UI returns to the splash screen).
     void setOnDisconnect(std::function<void()> f) { onDisconnect_ = std::move(f); }
 
-    /// 连接闸门（双通道互斥用）：accept 到新连接时先问一句，返回 false 就直接关掉。
-    /// 组合根用它实现"先连上的赢" —— 有线正在用就把 Wi-Fi 来的连接挡住，反之亦然。
-    /// 不设闸门（默认）时一切照旧。
+    /// Connection gate (for dual-channel mutual exclusion): asked on each new accepted connection; false means close it immediately.
+    /// The composition root uses it to implement "first to connect wins" — block Wi-Fi connections while wired is in use, and vice versa.
+    /// With no gate set (the default), behavior is unchanged.
     void setConnectionGate(std::function<bool()> g) { gate_ = std::move(g); }
 
 private:
@@ -85,12 +85,12 @@ private:
     std::unique_ptr<core::ITcpListener> listener_;
     Handler handler_;
 
-    // 单手机场景：一条 keep-alive 控制连接。cipher_ 由该连接线程在 pair-verify 后装入，
-    // 同一线程随后读写——故无需跨线程同步。
+    // Single-phone scenario: one keep-alive control connection. cipher_ is installed by that connection thread after pair-verify,
+    // and the same thread then reads and writes — so no cross-thread synchronization is needed.
     std::shared_ptr<ControlCipher> cipher_;
     std::function<void()>          afterResponse_;
     std::function<void()>          onDisconnect_;
-    std::function<bool()>          gate_;          ///< 双通道互斥：false = 不接这条连接
+    std::function<bool()>          gate_;          ///< dual-channel exclusion: false = reject this connection
 
     std::atomic<bool>       stop_{false};
     std::thread             acceptThread_;

@@ -1,11 +1,11 @@
 // ============================================================================
-// platform/posix/mdns_dns_sd.cpp —— macOS 后端：系统自带 mDNSResponder（dns_sd.h）
+// platform/posix/mdns_dns_sd.cpp -- macOS backend: system-provided mDNSResponder (dns_sd.h)
 // ============================================================================
-// macOS 上 mDNSResponder 常驻系统，dns_sd 直接可用，不需要 avahi 这类服务，
-// 也不需要密码/权限。TXT 记录用 TXTRecord* API 正经编码（length-prefixed）。
+// On macOS mDNSResponder is always running, so dns_sd is directly usable: no avahi-like service is
+// needed, nor any password/permissions. TXT records are properly encoded with the TXTRecord* API (length-prefixed).
 //
-// 事件循环：DNSServiceRefSockFD 拿到 fd + select 超时轮询跑 DNSServiceProcessResult。
-// （不用 DNSServiceSetDispatchQueue，省掉 libdispatch 依赖。）
+// Event loop: get the fd from DNSServiceRefSockFD and poll it with select, calling DNSServiceProcessResult on timeout.
+// (DNSServiceSetDispatchQueue is not used, avoiding a libdispatch dependency.)
 #include "posix/posix.h"
 
 #include "common/log.h"
@@ -30,7 +30,7 @@ public:
     bool start(const std::string& name, uint16_t port,
                const std::vector<std::string>& txt, std::string* err) override
     {
-        // "k=v" → TXT（v 里允许含 '='，只按第一个 '=' 切）
+        // "k=v" -> TXT (v may contain '=', split only on the first '=')
         TXTRecordRef rec;
         TXTRecordCreate(&rec, 0, nullptr);
         for (const auto& kv : txt) {
@@ -50,15 +50,15 @@ public:
         TXTRecordDeallocate(&rec);
 
         if (e != kDNSServiceErr_NoError) {
-            // dns_sd 没有公开的 error→string；打错误码即可
-            if (err) *err = "DNSServiceRegister 失败：errno=" + std::to_string(int(e));
+            // dns_sd has no public error->string; logging the error code is enough
+            if (err) *err = "DNSServiceRegister failed: errno=" + std::to_string(int(e));
             ref_ = nullptr;
             return false;
         }
 
         fd_ = DNSServiceRefSockFD(ref_);
         if (fd_ < 0) {
-            if (err) *err = "DNSServiceRefSockFD 失败";
+            if (err) *err = "DNSServiceRefSockFD failed";
             DNSServiceRefDeallocate(ref_);
             ref_ = nullptr;
             return false;
@@ -68,7 +68,7 @@ public:
         port_ = port;
         stop_.store(false);
         thread_ = std::thread([this] { loop(); });
-        LOG_INFO("Bonjour 已广播（dns_sd）：%s._airplay._tcp :%u", name_.c_str(), port_);
+        LOG_INFO("Bonjour advertised (dns_sd): %s._airplay._tcp :%u", name_.c_str(), port_);
         return true;
     }
 

@@ -1,19 +1,19 @@
 /**
  * @file   annexb.h
- * @brief  裸 H.264 基本流的解析与 avcC/AVCC 互转（video_probe 与 fake_phone 共用）
+ * @brief  Raw H.264 elementary stream parsing and avcC/AVCC conversion (shared by video_probe and fake_phone)
  * @author blt
  */
 
 // ============================================================================
-// tools/annexb.h —— AnnexB 解析 + avcC 合成 + AnnexB→AVCC
+// tools/annexb.h -- AnnexB parsing + avcC synthesis + AnnexB->AVCC
 // ============================================================================
-// **为什么让两个工具共用同一份**：video_probe 的全部价值在于"二分"——
-//   出画面 → 问题在协议侧（RTSP / 加密 / 分帧 / 配置帧顺序）
-//   不出画面 → 问题在解码侧（extradata / 像素格式 / 纹理）
-// 这条二分线成立的前提是两边**对同一段码流做出完全相同的解释**：同样的 AU 切法、
-// 同样的 avcC。各自抄一份迟早会分叉，那时"probe 有画面、真机黑屏"就说明不了任何事。
+// **Why both tools share one copy**: all of video_probe's value is in the "bisection":
+//   Picture appears -> problem is on the protocol side (RTSP / encryption / framing / config-frame order)
+//   No picture -> problem is on the decode side (extradata / pixel format / textures)
+// The bisection only holds if both sides **interpret the same stream identically**: same AU splitting,
+// same avcC. Separate copies will inevitably diverge, and then "probe shows a picture, real device is black" proves nothing.
 //
-// 只做解析，不碰 ffmpeg —— 所以 fake_phone 不需要链任何解码库。
+// Parsing only, no ffmpeg -- so fake_phone needs no decoder library linked.
 #pragma once
 
 #include <cstddef>
@@ -25,16 +25,16 @@
 namespace allplay::annexb {
 
 struct NalRef {
-    size_t scStart;   ///< 起始码首字节下标
-    size_t payload;   ///< NAL 首字节（已跳过起始码）
-    size_t end;       ///< NAL 末尾（已剥掉尾部 0x00）
-    int    type;      ///< nal_unit_type（H.264 低 5 位）
+    size_t scStart;   ///< index of the first start-code byte
+    size_t payload;   ///< first NAL byte (start code skipped)
+    size_t end;       ///< NAL end (trailing 0x00 stripped)
+    int    type;      ///< nal_unit_type (low 5 bits for H.264)
 };
 
 inline bool isVcl(int t) { return t >= 1 && t <= 5; }
 
-/// 扫出全部 NAL。3/4 字节起始码都能认：4 字节码的前导 0 会被算作上一段的
-/// 尾部 0x00，正好被剥掉（规范里 NAL 尾部的 0x00 本来就是 trailing_zero_8bits）。
+/// Scan out all NALs. Both 3- and 4-byte start codes are recognized: a 4-byte code's leading 0 counts as the previous segment's
+/// trailing 0x00 and is stripped (per spec, a trailing 0x00 on a NAL is trailing_zero_8bits anyway).
 inline std::vector<NalRef> scanNals(const std::vector<uint8_t>& b)
 {
     std::vector<NalRef> out;
@@ -66,8 +66,8 @@ inline std::vector<NalRef> scanNals(const std::vector<uint8_t>& b)
     return out;
 }
 
-/// 切访问单元：VCL 之后再来一个 NAL，都算新 AU 开始。
-/// 返回每个 AU 在原缓冲里的 [begin, end) —— 含起始码。
+/// Split access units: any NAL after a VCL NAL starts a new AU.
+/// Returns each AU's [begin, end) in the original buffer, including the start code.
 inline std::vector<std::pair<size_t, size_t>> splitAus(const std::vector<uint8_t>& b,
                                                        const std::vector<NalRef>& nals)
 {
@@ -78,7 +78,7 @@ inline std::vector<std::pair<size_t, size_t>> splitAus(const std::vector<uint8_t
     bool   auHasVcl = isVcl(nals[0].type);
     for (size_t i = 1; i < nals.size(); ++i) {
         const bool vcl = isVcl(nals[i].type);
-        if (auHasVcl) {   // 本 AU 已有 VCL 片，后面任何 NAL 都归属下一个 AU
+        if (auHasVcl) {   // this AU already has a VCL slice, so any following NAL belongs to the next AU
             aus.push_back({auStart, nals[i].scStart});
             auStart = nals[i].scStart;
         }
@@ -88,9 +88,9 @@ inline std::vector<std::pair<size_t, size_t>> splitAus(const std::vector<uint8_t
     return aus;
 }
 
-/// 用文件里的 SPS/PPS 合成 avcC 记录体（首字节 0x01）。
-/// **故意绕这么一圈**：core 交给解码器的就是 avcC，本地冒烟必须走同一条路，
-/// 否则测不出 extradata 那个坑（见 host/media/ffmpeg_decoder.h 的注释）。
+/// Build an avcC record body from the file's SPS/PPS (first byte 0x01).
+/// **Deliberately done the long way**: core hands the decoder avcC, and a local smoke test must take the same path,
+/// otherwise the extradata pitfall stays untested (see the comment in host/media/ffmpeg_decoder.h).
 inline bool buildAvcC(const std::vector<uint8_t>& b, const std::vector<NalRef>& nals,
                       std::vector<uint8_t>* out, std::string* err)
 {
@@ -101,12 +101,12 @@ inline bool buildAvcC(const std::vector<uint8_t>& b, const std::vector<NalRef>& 
         else if (r.type == 8 && ppss.size() < 255) ppss.push_back(&r);
     }
     if (!sps || ppss.empty()) {
-        *err = "文件里没有 SPS/PPS —— 大概不是 AnnexB 裸流；"
-               "用 ffmpeg -i in.mp4 -c:v libx264 -bsf:v h264_mp4toannexb -an out.h264 重转一次";
+        *err = "No SPS/PPS in the file -- probably not a raw AnnexB stream; "
+               "re-encode it with ffmpeg -i in.mp4 -c:v libx264 -bsf:v h264_mp4toannexb -an out.h264";
         return false;
     }
     if (sps->end - sps->payload < 4) {
-        *err = "SPS 短得不像话";
+        *err = "SPS is implausibly short";
         return false;
     }
 
@@ -120,8 +120,8 @@ inline bool buildAvcC(const std::vector<uint8_t>& b, const std::vector<NalRef>& 
     out->push_back(b[sps->payload + 1]);            // profile_idc
     out->push_back(b[sps->payload + 2]);            // constraint flags
     out->push_back(b[sps->payload + 3]);            // level_idc
-    out->push_back(0xff);                           // 长度前缀恒为 4 字节
-    out->push_back(0xe0 | uint8_t(1));              // 保留位 | SPS 个数 = 1
+    out->push_back(0xff);                           // length prefix is always 4 bytes
+    out->push_back(0xe0 | uint8_t(1));              // reserved bits | SPS count = 1
     put16(sps->end - sps->payload);
     out->insert(out->end(), b.begin() + sps->payload, b.begin() + sps->end);
     out->push_back(uint8_t(ppss.size()));
@@ -132,10 +132,10 @@ inline bool buildAvcC(const std::vector<uint8_t>& b, const std::vector<NalRef>& 
     return true;
 }
 
-/// 一个 AnnexB 访问单元 → AVCC（每个 NALU 前加 4 字节大端长度）。
-/// 这是**推流方向**的转换：CarPlay 屏幕流里跑的就是 AVCC（因为配置帧给的是 avcC），
-/// core 收到后会自己 avccToAnnexB（core/airplay/video_stream.cpp:170）。
-/// 返回空 = 这段不是合法的 AnnexB。
+/// One AnnexB access unit -> AVCC (4-byte big-endian length before each NALU).
+/// This is the **streaming-direction** conversion: CarPlay's screen stream carries AVCC (because the config frame gives avcC),
+/// and core converts back with avccToAnnexB (core/airplay/video_stream.cpp:170).
+/// Empty return = not valid AnnexB.
 inline std::vector<uint8_t> toAvcc(const std::vector<uint8_t>& b)
 {
     const auto nals = scanNals(b);

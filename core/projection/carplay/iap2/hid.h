@@ -1,23 +1,23 @@
 /**
  * @file   hid.h
- * @brief  方控按键 → iAP2 HID 报表
+ * @brief  Steering-wheel buttons -> iAP2 HID report
  * @author blt
  */
 
 // ============================================================================
-// core/iap2/hid.h —— 方控按键 → iAP2 HID 报表
+// core/iap2/hid.h - Steering-wheel buttons -> iAP2 HID report
 // ============================================================================
-// 方控在 iAP2 上是"配件发 HID 报表"：车机按键 → HID 消费者/电话页的 usage →
-// 一条 HID 报表 → 0x4E0x 报文发给手机。手机侧把 usage 翻成媒体控制。
+// Steering-wheel controls on iAP2 work as "accessory sends HID reports": head-unit button -> HID Consumer/Telephony page usage ->
+// one HID report -> 0x4E0x message sent to the phone. The phone translates the usage into media control.
 //
-// 报文里的报表格式是**我们和报表描述符之间的约定**（描述符还没声明，属于
-// 上层/驱动那一半）。这里定成：
+// The report format in the message is **an agreement between us and the report descriptor** (the descriptor is not declared yet; that belongs to
+// the upper/driver layer). It is defined here as:
 //   [reportId?] [usagePage LE u16] [usage LE u16]
-// 抬起 = usage 0（HID 的惯例：按下报 usage，松手报 0）。
-// reportId 传 0 表示描述符里没声明报表 ID，报文里就不带这一字节。
+// Release = usage 0 (HID convention: report the usage on press, 0 on release).
+// Passing reportId 0 means the descriptor declares no report ID, so that byte is omitted from the message.
 //
-// 消息号见下面的常量：**这一族还没在真机上核验过**。本模块先把编码、队列、
-// 发送路径立起来，真机接进来时用抓包对一遍；要改只有一处。
+// Message numbers are in the constants below: **this family has not been verified on a real device yet**. This module first establishes the encoding, queue,
+// and send path; when a real device is hooked up, verify with a packet capture; there is only one place to change.
 #pragma once
 
 #include "port/control.h"
@@ -28,25 +28,25 @@
 namespace core::iap2 {
 
 struct HidUsage {
-    uint16_t page = 0;   ///< HID usage page（0x0C=Consumer，0x0B=Telephony）
-    uint16_t id   = 0;   ///< usage id；0 表示"没有按键"
+    uint16_t page = 0;   ///< HID usage page (0x0C=Consumer, 0x0B=Telephony)
+    uint16_t id   = 0;   ///< usage id; 0 means "no button"
 };
 
-/// 按键 → HID usage。没有对应项时返回 {0,0}（等同抬起）。
+/// Button -> HID usage. Returns {0,0} when there is no mapping (same as release).
 HidUsage mediaKeyUsage(core::MediaKey key);
 
-/// 一次按键的报表字节（见文件头的格式说明）。
+/// Report bytes for one button press (see the format description at the top of the file).
 std::vector<uint8_t> hidReport(core::MediaKey key, bool down, uint8_t reportId = 0);
 
-/// iAP2 HID 组件族的消息号（未核验，见文件头）
+/// Message numbers for the iAP2 HID component family (unverified, see the top of the file)
 constexpr uint16_t kStartHidUpdates    = 0x4e00;
 constexpr uint16_t kStopHidUpdates     = 0x4e01;
 constexpr uint16_t kAccessoryHidReport = 0x4e02;
 
-/// 把报表包成一条 CSM 报文（未分片，调用方按对端可承载大小切）
+/// Wrap a report as one CSM message (not fragmented; the caller splits to the peer's capacity)
 std::vector<uint8_t> hidReportMessage(const std::vector<uint8_t>& report);
 
-/// 一条完整的"按下/抬起"报文，便于上层或自测直接用
+/// One complete "press/release" message, convenient for upper layers or self-tests
 std::vector<uint8_t> hidReportMessage(core::MediaKey key, bool down, uint8_t reportId = 0);
 
 }  // namespace core::iap2

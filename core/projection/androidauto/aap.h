@@ -1,20 +1,20 @@
 /**
  * @file   aap.h
- * @brief  Android Auto 协议（AAP）帧格式：通道号、消息号、分帧与拼帧
+ * @brief  Android Auto (AAP) frame format: channel id, message id, framing and deframing
  * @author blt
  */
 
 // ============================================================================
-// core/projection/androidauto/aap.h —— AAP 帧格式
+// core/projection/androidauto/aap.h - AAP frame format
 // ============================================================================
-// 每个 USB bulk 传输单元 = 一个 AAP 帧：
+// Each USB bulk transfer unit = one AAP frame:
 //   byte0 = channel id
 //   byte1 = flags: bit0 FIRST | bit1 LAST | bit2 CONTROL | bit3 ENCRYPTED
-//   之后是长度（大端）：普通帧 2 字节；FIRST 帧 6 字节（u16 本帧长度 + u32 明文总长）
-//   payload = [2 字节大端消息号] + body（加密时整段都在 TLS 里）
+//   followed by a length (big-endian): 2 bytes for ordinary frames; 6 bytes for FIRST frames (u16 frame length + u32 total plaintext length)
+//   payload = [2-byte big-endian message id] + body (encrypted: the whole segment is inside TLS)
 //
-// 一条消息 > 0x4000 字节时拆成 FIRST/MIDDLE.../LAST；每个 chunk 单独过一次 TLS，
-// 所以加密帧的长度字段是**密文长度**，只有 FIRST 的 total 是明文总长。
+// A message larger than 0x4000 bytes is split into FIRST/MIDDLE.../LAST; each chunk passes through TLS separately,
+// so an encrypted frame's length field is the **ciphertext length**; only the FIRST total is the plaintext total.
 #pragma once
 
 #include <cstddef>
@@ -36,7 +36,7 @@ enum class Channel : uint8_t {
     None        = 0xFF,
 };
 
-// ---- control channel 消息号 ----
+// ---- control channel message ids ----
 constexpr uint16_t kMsgVersionRequest       = 0x0001;
 constexpr uint16_t kMsgVersionResponse      = 0x0002;
 constexpr uint16_t kMsgSslHandshake         = 0x0003;
@@ -54,7 +54,7 @@ constexpr uint16_t kMsgShutdownResponse     = 0x0010;
 constexpr uint16_t kMsgAudioFocusRequest    = 0x0012;
 constexpr uint16_t kMsgAudioFocusResponse   = 0x0013;
 
-// ---- AV / 媒体通道消息号 ----
+// ---- AV / media channel message ids ----
 constexpr uint16_t kMsgAvMediaWithTimestamp = 0x0000;
 constexpr uint16_t kMsgAvMedia              = 0x0001;
 constexpr uint16_t kMsgAvSetupRequest       = 0x8000;
@@ -75,7 +75,7 @@ constexpr uint16_t kMsgSensorEvent       = 0x8003;
 
 constexpr size_t   kMaxFramePayload = 0x4000;
 
-// ---- protobuf 枚举值（见 AASDK 的 *Enum.proto）----
+// ---- protobuf enum values (see *Enum.proto in AASDK) ----
 enum : uint32_t {
     kAvStreamAudio = 1,
     kAvStreamVideo = 3,
@@ -97,15 +97,15 @@ struct Frame {
     bool                 last      = false;
     bool                 encrypted = false;
     bool                 control   = false;
-    uint32_t             totalSize = 0;   ///< FIRST 帧的明文总长；其它帧为 0
+    uint32_t             totalSize = 0;   ///< Plaintext total length for FIRST frames; 0 for other frames
     std::vector<uint8_t> payload;
 };
 
-/// 把 USB 读到的字节流切成 AAP 帧（允许一次读到多帧 / 半帧）。
+/// Split the USB byte stream into AAP frames (a read may contain multiple frames / a partial frame).
 class FrameParser {
 public:
     void feed(const uint8_t* data, size_t len);
-    /// 取下一帧；数据不够返回 false（剩下的留在缓冲里等下次）。
+    /// Get the next frame; returns false when there is not enough data (the rest stays buffered for next time).
     bool next(Frame* out);
     void reset();
 
@@ -116,7 +116,7 @@ private:
     size_t               off_ = 0;
 };
 
-/// 编一个 AAP 帧（不含分帧逻辑；调用方按 chunk 调）。
+/// Encode one AAP frame (no framing logic; the caller invokes it per chunk).
 std::vector<uint8_t> encodeFrame(Channel ch, bool encrypted, bool control,
                                  const uint8_t* payload, size_t len,
                                  bool first, bool last, uint32_t totalPlain);

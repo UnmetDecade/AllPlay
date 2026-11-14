@@ -1,6 +1,6 @@
 /**
  * @file   aap.cpp
- * @brief  AAP 分帧 / 拼帧
+ * @brief  AAP framing / deframing
  */
 
 #include "projection/androidauto/aap.h"
@@ -48,7 +48,7 @@ bool FrameParser::next(Frame* out)
     const bool control   = (chFlags & kFlagControl) != 0;
     const bool encrypted = (chFlags & kFlagEncrypted) != 0;
 
-    // FIRST（且不是单帧 BULK）带 6 字节长度：u16 本帧长度 + u32 明文总长
+    // FIRST (and not a single-frame BULK) carries a 6-byte length: u16 frame length + u32 total plaintext length
     const bool extended = first && !last;
     const size_t sizeLen = extended ? 6 : 2;
     if (avail < 2 + sizeLen) return false;

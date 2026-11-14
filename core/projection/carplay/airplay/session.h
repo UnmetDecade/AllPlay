@@ -1,16 +1,16 @@
 /**
  * @file   session.h
- * @brief  AirPlay 会话状态机（M3：pair-setup/verify、auth-setup、SETUP）
+ * @brief  AirPlay session state machine (M3: pair-setup/verify, auth-setup, SETUP)
  * @author blt
  */
 
 // ============================================================================
-// core/airplay/session.h —— AirPlay 会话状态机（M3：pair-setup/verify、auth-setup、SETUP）
+// core/airplay/session.h - AirPlay session state machine (M3: pair-setup/verify, auth-setup, SETUP)
 // ============================================================================
-// 每个手机连接一个 Session（本实现单手机：Receiver 持有一个）。
-// 端点顺序（真机行为）：/info → /pair-setup → /pair-verify（此后控制通道加密）
-// → /auth-setup → SETUP（第一批/第二批）→ RECORD（会话活跃）。
-// 参照 AirPlay 协议（pair-setup / pair-verify / auth-setup / SETUP 流程）。
+// One Session per phone connection (this implementation is single-phone: Receiver holds one).
+// Endpoint order (real-device behavior): /info -> /pair-setup -> /pair-verify (control channel encrypted afterwards)
+// -> /auth-setup -> SETUP (batch 1 / batch 2) -> RECORD (session active).
+// Per the AirPlay protocol (pair-setup / pair-verify / auth-setup / SETUP flow).
 #pragma once
 
 #include "airplay/audio_stream.h"
@@ -37,17 +37,17 @@
 namespace core::airplay {
 
 struct SessionConfig {
-    const core::DeviceIdentity* identity = nullptr;   ///< 本机 Ed25519 身份
-    const DeviceInfo*           info = nullptr;       ///< /info 用
-    std::string                 stateDir;             ///< 配对存储目录
-    std::string                 mfiDir;               ///< MFi 身份目录（identity/）
-    /// 外部注入的 MFi 身份（鸿蒙从 HAP rawfile 读进来，磁盘上没有 identity/ 目录）。
-    /// 非空时优先于 mfiDir；调用方保证它比 Session 活得久。
+    const core::DeviceIdentity* identity = nullptr;   ///< local Ed25519 identity
+    const DeviceInfo*           info = nullptr;       ///< used for /info
+    std::string                 stateDir;             ///< pairing storage directory
+    std::string                 mfiDir;               ///< MFi identity directory (identity/)
+    /// Externally injected MFi identity (HarmonyOS reads it from HAP rawfile; there is no identity/ directory on disk).
+    /// Takes precedence over mfiDir when non-null; the caller guarantees it outlives the Session.
     const core::mfi::IMfiIdentity* mfiIdentity = nullptr;
-    const core::PlatformServices* services = nullptr;   ///< 建 TCP 监听器（屏幕流 dataPort）
-    core::IVideoOutput*         video = nullptr;      ///< 视频输出（解码+上屏）
-    core::IAudioOutput*         audio = nullptr;      ///< 音频输出（解码+播放）
-    int                         width = 1280;         ///< 协商分辨率
+    const core::PlatformServices* services = nullptr;   ///< creates TCP listeners (screen stream dataPort)
+    core::IVideoOutput*         video = nullptr;      ///< video output (decode + display)
+    core::IAudioOutput*         audio = nullptr;      ///< audio output (decode + playback)
+    int                         width = 1280;         ///< negotiated resolution
     int                         height = 720;
 };
 
@@ -61,22 +61,22 @@ public:
 
     RtspResponse handle(const RtspRequest& req);
 
-    /// pair-verify M4 之后控制密钥就绪；调用方在**写完该响应后**取走并安装 cipher。
+    /// The control key is ready after pair-verify M4; the caller takes it and installs the cipher **after writing that response**.
     bool        controlKeysReady() const { return controlKeysReady_; }
     ControlKeys takeControlKeys() { controlKeysReady_ = false; return controlKeys_; }
 
     bool sessionActive() const { return sessionActive_; }
 
-    /// 连接中：已收到 iPhone 的 RTSP 请求（配对/验证/协商），但还没到 RECORD（会话未完全建立）。
+    /// Connecting: an RTSP request from the iPhone has been received (pairing/verification/negotiation), but RECORD has not been reached yet (session not fully established).
     bool connecting() const { return connecting_ && !sessionActive_; }
 
-    /// 发触摸（归一化坐标）到事件通道；事件通道未就绪返回 false。
+    /// Send a touch (normalized coordinates) to the event channel; returns false if the event channel is not ready.
     bool sendTouch(const std::vector<TouchPoint>& contacts);
 
-    /// 立即向 iPhone 请求一个关键帧（不限频）。回前台 Surface 重建后调用，让画面尽快恢复。
+    /// Request a keyframe from the iPhone immediately (unthrottled). Called after the surface is recreated on returning to foreground, to restore the picture promptly.
     void requestKeyFrameNow();
 
-    /// 连接断开/会话结束：复位 active/connecting 状态（UI 回到启动页）。
+    /// Connection dropped / session ended: reset the active/connecting state (UI returns to the splash screen).
     void markDisconnected();
 
 private:
@@ -91,16 +91,16 @@ private:
     RtspResponse tlv8Response(const std::vector<uint8_t>& body);
     RtspResponse pairErr(int state);
 
-    void openEventChannel();   ///< 开事件通道（SETUP 第一批时调）
-    void openNtp();            ///< 开 NTP 时序端口（音频 RTP 时钟同步）
-    void openKeepAlive();      ///< 开 keep-alive UDP 端口（iPhone 请求 keepAliveLowPower 时）
-    void requestKeyFrame();    ///< 经事件通道向 iPhone 请求关键帧（重置参考链）
+    void openEventChannel();   ///< open the event channel (called during SETUP batch 1)
+    void openNtp();            ///< open the NTP timing port (audio RTP clock sync)
+    void openKeepAlive();      ///< open the keep-alive UDP port (when the iPhone requests keepAliveLowPower)
+    void requestKeyFrame();    ///< request a keyframe from the iPhone via the event channel (resets the reference chain)
 
     const core::DeviceIdentity* identity_ = nullptr;
     const DeviceInfo*           info_ = nullptr;
     std::string                 stateDir_;
-    const mfi::IMfiIdentity* mfi_ = nullptr;                   ///< 非空即可用（注入或自有）
-    std::unique_ptr<mfi::CertificateMfiIdentity> ownedMfi_;    ///< 从 mfiDir 加载时的持有者
+    const mfi::IMfiIdentity* mfi_ = nullptr;                   ///< usable when non-null (injected or owned)
+    std::unique_ptr<mfi::CertificateMfiIdentity> ownedMfi_;    ///< owner when loaded from mfiDir
     PairingStore                pairings_;
     const core::PlatformServices* services_ = nullptr;
     core::IVideoOutput*         video_ = nullptr;
@@ -121,10 +121,10 @@ private:
 
     ControlKeys controlKeys_;
     bool controlKeysReady_ = false;
-    // 由处理 RTSP 的连接线程写、主线程读；双通道下还会被**另一条通道**的
-    // accept 线程读（互斥闸门），所以必须是原子的，不能是裸 bool。
+    // Written by the RTSP connection thread and read by the main thread; with dual channels it is also read by the
+    // accept thread of **the other channel** (mutual exclusion gate), so it must be atomic, not a bare bool.
     std::atomic<bool> sessionActive_{false};
-    std::atomic<bool> connecting_{false};   ///< 已收到过 RTSP 请求（表示 iPhone 正在连接）
+    std::atomic<bool> connecting_{false};   ///< an RTSP request has been received (the iPhone is connecting)
 
     std::unique_ptr<EventChannel> eventChannel_;
 
@@ -138,7 +138,7 @@ private:
 
     std::thread       keyframeThread_;
     std::atomic<bool> stopKeyframe_{false};
-    std::chrono::steady_clock::time_point lastKeyframeRequest_{};   // forceKeyFrame 限频（1/s）
+    std::chrono::steady_clock::time_point lastKeyframeRequest_{};   // forceKeyFrame throttle (1/s)
 };
 
 }  // namespace core::airplay

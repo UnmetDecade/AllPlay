@@ -1,14 +1,14 @@
 /**
  * @file   stream.h
- * @brief  抽象字节流（协议层唯一依赖的"流"形态）
+ * @brief  Abstract byte stream (the only "stream" shape the protocol layer depends on)
  * @author blt
  */
 
 // ============================================================================
-// core/port/stream.h —— 抽象字节流（协议层唯一依赖的"流"形态）
+// core/port/stream.h — abstract byte stream (the only "stream" shape the protocol layer depends on)
 // ============================================================================
-// 平台实现：POSIX socket / RFCOMM / 内存管道（测试）… 各自给出 read/write/close。
-// core 里的 iAP2、RTSP、屏幕流都只吃这个接口，不关心底层是 socket 还是蓝牙。
+// Platform implementations: POSIX socket / RFCOMM / in-memory pipe (tests) … each provides read/write/close.
+// iAP2, RTSP and screen streams in core consume only this interface and do not care whether the transport is a socket or Bluetooth.
 #pragma once
 
 #include <cstddef>
@@ -20,11 +20,11 @@ class IByteStream {
 public:
     virtual ~IByteStream() = default;
 
-    /// 读 n 字节。返回 >0 = 实际读到；0 = 超时；<0 = 断开/错误。
+    /// Read n bytes. Returns >0 = bytes actually read; 0 = timeout; <0 = disconnect/error.
     virtual int  read(uint8_t* buf, size_t n, int timeoutMs) = 0;
-    /// 全量写（失败返回 false）。
+    /// Write all bytes (returns false on failure).
     virtual bool writeAll(const uint8_t* buf, size_t n) = 0;
-    /// 主动关闭（默认空操作；平台实现可覆写）。
+    /// Actively close (no-op by default; platform implementations may override).
     virtual void close() {}
 };
 

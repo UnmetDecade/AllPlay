@@ -1,6 +1,6 @@
 /**
  * @file   backend_androidauto.cpp
- * @brief  Android Auto 有线后端：AOAP → AAP → TLS → 服务发现 → 音视频/输入
+ * @brief  Android Auto wired backend: AOAP -> AAP -> TLS -> service discovery -> audio/video/input
  */
 
 #include "projection/androidauto/backend_androidauto.h"
@@ -26,7 +26,7 @@ namespace {
 using namespace std::chrono_literals;
 
 // ---------------------------------------------------------------------------
-// 小工具
+// Small helpers
 // ---------------------------------------------------------------------------
 uint64_t readU64BE(const uint8_t* p)
 {
@@ -36,7 +36,7 @@ uint64_t readU64BE(const uint8_t* p)
 }
 
 // ---------------------------------------------------------------------------
-// protobuf 消息构造
+// protobuf message construction
 // ---------------------------------------------------------------------------
 std::vector<uint8_t> pbVideoConfig(uint32_t resolution, uint32_t fps)
 {
@@ -59,7 +59,7 @@ std::vector<uint8_t> pbAvVideo(int fps)
 {
     std::vector<uint8_t> a;
     pb::putUInt(a, 1, kAvStreamVideo);
-    // 只报一种分辨率：config_index 就固定是 0，触摸坐标与视频像素一一对应。
+    // Advertise a single resolution: config_index is therefore always 0, and touch coordinates map 1:1 to video pixels.
     pb::putMessage(a, 4, pbVideoConfig(kRes720p, fps >= 60 ? kFps60 : kFps30));
     return a;
 }
@@ -84,7 +84,7 @@ std::vector<uint8_t> pbTouchConfig(int width, int height)
 std::vector<uint8_t> pbInputChannel(int width, int height)
 {
     std::vector<uint8_t> c;
-    // 支持的按键（Android KeyEvent 值，与 AASDK ButtonCodeEnum 一致）：
+    // Supported keys (Android KeyEvent values, matching AASDK ButtonCodeEnum):
     // HOME=3 BACK=4 CALL=5 ENDCALL=6 DPAD_UP/DOWN/LEFT/RIGHT/CENTER=19..23
     for (uint32_t code : {3u, 4u, 5u, 6u, 19u, 20u, 21u, 22u, 23u})
         pb::putUInt(c, 1, code);
@@ -129,12 +129,12 @@ std::vector<uint8_t> pbServiceDiscovery(const AndroidAutoOptions& opt)
     pb::putString(r, 8, opt.model);
     pb::putString(r, 9, "1.0");
     pb::putString(r, 10, "1.0");
-    pb::putBool(r, 6, true);   // 左舵
+    pb::putBool(r, 6, true);   // left-hand drive
     return r;
 }
 
 // ---------------------------------------------------------------------------
-// H.264 参数集：AA 不发 avcC，只有带内 SPS/PPS，解码器需要自己合成
+// H.264 parameter sets: AA sends no avcC, only in-band SPS/PPS, so the decoder must build it itself
 // ---------------------------------------------------------------------------
 bool startCodeAt(const uint8_t* p, size_t avail, size_t* len)
 {
@@ -175,7 +175,7 @@ bool makeAvcC(const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps,
     out->push_back(sps[1]);
     out->push_back(sps[2]);
     out->push_back(sps[3]);
-    out->push_back(0xFF);                 // 4 字节长度前缀 + 1 个 SPS
+    out->push_back(0xFF);                 // 4-byte length prefix + 1 SPS
     out->push_back(0xE1);
     out->push_back(uint8_t(sps.size() >> 8));
     out->push_back(uint8_t(sps.size()));
@@ -188,7 +188,7 @@ bool makeAvcC(const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps,
 }
 
 // ---------------------------------------------------------------------------
-// 会话
+// Session
 // ---------------------------------------------------------------------------
 class AaSession final : public IProjectionSession {
 public:
@@ -196,7 +196,7 @@ public:
               IProjectionSink& sink, std::string deviceId)
         : opt_(std::move(opt)), sink_(sink), deviceId_(std::move(deviceId))
     {
-        (void)services;   // AA 有线不需要平台服务（蓝牙 / 网络）
+        (void)services;   // Wired AA needs no platform services (Bluetooth / network)
     }
 
     ~AaSession() override { stop(); }
@@ -204,11 +204,11 @@ public:
     bool start(std::string* err) override
     {
         if (thread_.joinable()) {
-            if (err) *err = "会话已经启动过";
+            if (err) *err = "Session has already been started";
             return false;
         }
         stop_.store(false);
-        sink_.onState(SessionState::Connecting, "AOAP 配件模式");
+        sink_.onState(SessionState::Connecting, "AOAP accessory mode");
         thread_ = std::thread([this] { run(); });
         return true;
     }
@@ -223,11 +223,11 @@ public:
     bool sendInput(const InputEvent& ev, std::string* err) override
     {
         if (ev.kind != InputKind::Touch) {
-            if (err) *err = "Android Auto 暂只支持触摸输入";
+            if (err) *err = "Android Auto currently supports touch input only";
             return false;
         }
         if (!running_.load()) {
-            if (err) *err = "会话尚未进入 Running";
+            if (err) *err = "Session has not reached Running yet";
             return false;
         }
 
@@ -252,7 +252,7 @@ public:
         pb::putUInt(touch, 3, action);
 
         std::vector<uint8_t> body;
-        // AA 的时间戳单位是微秒；用单调时钟，手机只拿它算手势时序。
+        // AA timestamps are in microseconds; use a monotonic clock, since the phone only uses it to time gestures.
         const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::steady_clock::now().time_since_epoch())
                                .count();
@@ -265,7 +265,7 @@ public:
                            /*control=*/false, /*encrypted=*/true, err);
     }
 
-    void requestKeyFrame() override {}   // AA 没有关键帧请求消息
+    void requestKeyFrame() override {}   // AA has no key frame request message
 
     Capabilities capabilities() const override
     {
@@ -290,26 +290,26 @@ private:
     {
         std::string err;
 
-        // ---- ① AOAP：版本查询 → 六条字符串 → START → 等重枚举 ----
+        // ---- ① AOAP: version query -> six strings -> START -> wait for re-enumeration ----
         if (!openAoap(&err)) return fail(err);
 
-        // ---- ② AAP 版本 ----
-        sink_.onState(SessionState::Negotiating, "AAP 版本协商");
+        // ---- ② AAP version ----
+        sink_.onState(SessionState::Negotiating, "AAP version negotiation");
         if (!sendVersionRequest(&err)) return fail(err);
         stage_ = Stage::Version;
         const auto versionDeadline = std::chrono::steady_clock::now() + 10s;
         while (!stop_.load() && stage_ == Stage::Version) {
             if (!readOnce(500, &err)) return fail(err);
             if (std::chrono::steady_clock::now() > versionDeadline)
-                return fail("等待 VERSION_RESPONSE 超时");
+                return fail("Timed out waiting for VERSION_RESPONSE");
         }
         if (stop_.load()) return;
 
-        // ---- ③ TLS（记录装在 0x0003 里）----
-        if (!tls_.init(&err)) return fail("TLS 初始化失败：" + err);
+        // ---- ③ TLS (records wrapped in 0x0003) ----
+        if (!tls_.init(&err)) return fail("TLS init failed: " + err);
         if (!driveHandshake(&err)) return fail(err);
 
-        // ---- ④ 主循环 ----
+        // ---- ④ Main loop ----
         while (!stop_.load()) {
             if (!readOnce(500, &err)) return fail(err);
         }
@@ -317,17 +317,17 @@ private:
 
     bool openAoap(std::string* err)
     {
-        if (!opt_.usb.open) { if (err) *err = "这个构建没有 Android Auto USB 传输层"; return false; }
+        if (!opt_.usb.open) { if (err) *err = "This build has no Android Auto USB transport"; return false; }
         dev_ = opt_.usb.open(deviceId_, err);
         if (!dev_) return false;
 
         uint8_t ver[2] = {0, 0};
         if (!dev_->controlTransfer(0xC0, 51, 0, 0, ver, 2, 1000, err)) {
-            if (err) *err = "AOAP GET_PROTOCOL 失败：" + *err;
+            if (err) *err = "AOAP GET_PROTOCOL failed: " + *err;
             return false;
         }
         const uint16_t protocol = uint16_t(ver[0] | (ver[1] << 8));
-        if (protocol < 1) { if (err) *err = "手机不支持 AOAP"; return false; }
+        if (protocol < 1) { if (err) *err = "The phone does not support AOAP"; return false; }
 
         const std::string strings[6] = {
             opt_.manufacturer, opt_.model, "Android Auto", "2.0",
@@ -351,7 +351,7 @@ private:
 
     bool sendVersionRequest(std::string* err)
     {
-        // control channel / SPECIFIC / PLAIN：major=1 minor=1
+        // control channel / SPECIFIC / PLAIN: major=1 minor=1
         const std::vector<uint8_t> body = {0x00, 0x01, 0x00, 0x01};
         return sendMessage(Channel::Control, kMsgVersionRequest, body,
                            /*control=*/false, /*encrypted=*/false, err);
@@ -373,7 +373,7 @@ private:
         if (hs == Tls12Client::Handshake::Failed) return false;
         if (hs == Tls12Client::Handshake::Done) {
             stage_ = Stage::Discovery;
-            // aasdk 在 AUTH_COMPLETE 上仍标 PLAIN；先照做（风险见 docs）。
+            // aasdk still marks AUTH_COMPLETE as PLAIN; follow suit for now (risks in docs).
             std::vector<uint8_t> auth;
             pb::putUInt(auth, 1, kStatusOk);
             if (!sendMessage(Channel::Control, kMsgAuthComplete, auth,
@@ -385,7 +385,7 @@ private:
 
     bool readOnce(int timeoutMs, std::string* err)
     {
-        if (!dev_) { if (err) *err = "USB 设备未就绪"; return false; }
+        if (!dev_) { if (err) *err = "USB device is not ready"; return false; }
         uint8_t buf[64 * 1024];
         const int n = dev_->readBulk(buf, sizeof buf, timeoutMs, err);
         if (n < 0) return false;
@@ -407,7 +407,7 @@ private:
                 if (!tls_.decrypt(f.payload.data(), f.payload.size(), &plain, err))
                     return false;
             }
-            if (plain.empty()) return true;   // 记录还不完整，等下一帧
+            if (plain.empty()) return true;   // incomplete record; wait for the next frame
         } else {
             plain = f.payload;
         }
@@ -433,7 +433,7 @@ private:
     bool handleMessage(Channel ch, uint16_t msgId, const std::vector<uint8_t>& body,
                        std::string* err)
     {
-        // TLS 握手记录：任何时候都可能来
+        // TLS handshake records: may arrive at any time
         if (ch == Channel::Control && msgId == kMsgSslHandshake) {
             {
                 std::lock_guard<std::mutex> lk(tlsMu_);
@@ -442,14 +442,14 @@ private:
             return driveHandshake(err);
         }
 
-        // 版本应答
+        // Version response
         if (ch == Channel::Control && msgId == kMsgVersionResponse &&
             stage_ == Stage::Version) {
-            if (body.size() < 6) { if (err) *err = "VERSION_RESPONSE 太短"; return false; }
+            if (body.size() < 6) { if (err) *err = "VERSION_RESPONSE is too short"; return false; }
             const uint16_t statusBE = uint16_t((uint16_t(body[4]) << 8) | body[5]);
             const uint16_t statusLE = uint16_t((uint16_t(body[5]) << 8) | body[4]);
             if (statusBE != 0 && statusLE != 0) {
-                if (err) *err = "手机拒绝 AAP 版本（MISMATCH）";
+                if (err) *err = "The phone rejected the AAP version (MISMATCH)";
                 return false;
             }
             stage_ = Stage::Tls;
@@ -462,7 +462,7 @@ private:
                                    pbServiceDiscovery(opt_), true, true, err);
             }
             if (msgId == kMsgPingRequest) {
-                // 照 aasdk：PING 仍用 PLAIN
+                // as in aasdk: PING still uses PLAIN
                 return sendMessage(Channel::Control, kMsgPingResponse, body, true, false, err);
             }
             if (msgId == kMsgAudioFocusRequest) {
@@ -482,7 +482,7 @@ private:
                 pb::putUInt(rsp, 1, kStatusOk);
                 return sendMessage(Channel(id), kMsgChannelOpenResponse, rsp, true, true, err);
             }
-            return true;   // 其余控制消息忽略
+            return true;   // ignore other control messages
         }
 
         if (ch == Channel::Video) {
@@ -585,7 +585,7 @@ private:
         std::vector<uint8_t> rsp;
         pb::putUInt(rsp, 1, kSetupStatusOk);
         pb::putUInt(rsp, 2, 2);            // max_unacked
-        pb::putUInt(rsp, 3, configIndex);  // 接受手机选的那份配置
+        pb::putUInt(rsp, 3, configIndex);  // accept the config chosen by the phone
         return sendMessage(ch, kMsgAvSetupResponse, rsp, false, true, err);
     }
 
@@ -618,7 +618,7 @@ private:
             }
         }
         if (!sink_.onVideoFrame(data, len)) {
-            // 宿主没能入队：让它重新等关键帧。AA 没有关键帧请求，只能等下一帧 IDR。
+            // The host could not enqueue: have it wait for a key frame again. AA has no key frame request, so we can only wait for the next IDR.
         }
         if (!sendMediaAck(ch, err)) return false;
         markRunning();
@@ -639,8 +639,8 @@ private:
         }
         if (len == 0) return true;
 
-        // AA 的 PCM 是小端；宿主的 LPCM 通道按 AirPlay 约定（大端）处理，
-        // 这里先转成大端，宿主那边统一换回主机序。
+        // AA PCM is little-endian; the host's LPCM path follows the AirPlay convention (big-endian),
+        // so convert to big-endian here and let the host convert back to host order uniformly.
         audioSwap_.resize(len & ~size_t(1));
         for (size_t i = 0; i + 1 < len; i += 2) {
             audioSwap_[i]     = data[i + 1];
@@ -652,12 +652,12 @@ private:
         return true;
     }
 
-    /// 我们声明了 max_unacked=2；不回 ACK 手机发两帧就停。
+    /// We advertised max_unacked=2; without ACKs the phone stops after two frames.
     bool sendMediaAck(Channel ch, std::string* err)
     {
         std::vector<uint8_t> ack;
         pb::putUInt(ack, 1, 0);   // session
-        pb::putUInt(ack, 2, 1);   // 一帧一确认
+        pb::putUInt(ack, 2, 1);   // one ACK per frame
         return sendMessage(ch, kMsgAvMediaAck, ack, /*control=*/false,
                            /*encrypted=*/true, err);
     }
@@ -665,7 +665,7 @@ private:
     void markRunning()
     {
         if (running_.exchange(true)) return;
-        sink_.onState(SessionState::Running, "投屏中");
+        sink_.onState(SessionState::Running, "Mirroring");
     }
 
     bool writeAll(const std::vector<uint8_t>& data, std::string* err)
@@ -682,7 +682,7 @@ private:
     bool sendMessage(Channel ch, uint16_t msgId, const std::vector<uint8_t>& body,
                      bool control, bool encrypted, std::string* err)
     {
-        if (!dev_) { if (err) *err = "USB 设备未就绪"; return false; }
+        if (!dev_) { if (err) *err = "USB device is not ready"; return false; }
 
         std::vector<uint8_t> plain;
         plain.reserve(2 + body.size());
@@ -690,7 +690,7 @@ private:
         plain.push_back(uint8_t(msgId));
         plain.insert(plain.end(), body.begin(), body.end());
 
-        // 加密时按 0x4000 明文分片，每片单独过 TLS（aasdk 的约定）
+        // When encrypting, split into 0x4000 plaintext chunks and run each through TLS separately (aasdk convention)
         std::vector<uint8_t> out;
         bool first = true;
         size_t off = 0;
@@ -756,7 +756,7 @@ std::vector<ProjectionTarget> AndroidAutoBackend::probe(
 {
     std::vector<ProjectionTarget> out;
     if (!opt_.usb.probeDevices) {
-        if (err) *err = "这个构建没有 Android Auto USB 传输层";
+        if (err) *err = "This build has no Android Auto USB transport";
         return out;
     }
     std::string e;
@@ -777,11 +777,11 @@ std::unique_ptr<IProjectionSession> AndroidAutoBackend::connect(
     IProjectionSink& sink, std::string* err)
 {
     if (target.protocol != Protocol::AndroidAuto) {
-        if (err) *err = "不是 Android Auto 目标";
+        if (err) *err = "Not an Android Auto target";
         return nullptr;
     }
     if (!opt_.usb.open) {
-        if (err) *err = "这个构建没有 Android Auto USB 传输层";
+        if (err) *err = "This build has no Android Auto USB transport";
         return nullptr;
     }
     return std::make_unique<AaSession>(opt_, services, sink, target.id);

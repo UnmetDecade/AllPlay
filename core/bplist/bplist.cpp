@@ -6,7 +6,7 @@
 namespace core::bplist {
 
 // ---------------------------------------------------------------------------
-// 值模型
+// Value model
 // ---------------------------------------------------------------------------
 class Value {
 public:
@@ -40,16 +40,16 @@ Ptr dict(std::vector<std::pair<std::string, Ptr>> v)
 }
 
 // ---------------------------------------------------------------------------
-// 序列化
+// Serialization
 // ---------------------------------------------------------------------------
-// bplist 结构：magic + 对象表（互相用"对象引用"连接）+ 偏移表 + 32 字节 trailer。
-// 关键点：引用宽度（refSize）取决于对象总数、偏移宽度（offsetSize）取决于最大偏移，
-// 所以先把整棵树**扁平化成对象数组**，再写。
+// bplist layout: magic + object table (objects linked by "object references") + offset table + 32-byte trailer.
+// Key point: reference width (refSize) depends on the total object count, offset width (offsetSize) on the largest offset,
+// so flatten the whole tree into an **object array** first, then write.
 //
-// "长容器/长串"（长度 >= 15）：标记写 0x?F，后面跟一个**内联的整数 token**
-// （0x10|log2(size) + 大端数值），不是"引用一个独立的计数对象"——
-// 这一点写错的症状是解析器报 Invalid file（plistlib/CoreFoundation 都按内联读）。
-// 引用与偏移表都是**大端**。
+// "Long containers/strings" (length >= 15): marker 0x?F followed by an **inline integer token**
+// (0x10|log2(size) plus a big-endian value), not "reference a separate count object" —
+// getting this wrong makes parsers report Invalid file (plistlib/CoreFoundation both read it inline).
+// References and the offset table are **big-endian**.
 namespace {
 
 class Writer {
@@ -69,15 +69,15 @@ public:
             writeObject(v, out);
         }
 
-        // 偏移表 + trailer
+        // Offset table + trailer
         const uint64_t numObjects = objs_.size();
         const uint64_t maxOffset  = offsets_.back();
         const int      offsetSize = intSize(maxOffset);
         const int      refSize    = intSize(numObjects - 1);
         const uint64_t tableOff   = out.size();
-        for (uint64_t off : offsets_) writeBE(out, off, offsetSize);   // 大端
+        for (uint64_t off : offsets_) writeBE(out, off, offsetSize);   // big-endian
 
-        // trailer：6 字节未用 + 1 字节 offsetSize + 1 字节 refSize + 3 个 u64
+        // trailer: 6 unused bytes + 1 byte offsetSize + 1 byte refSize + 3 u64s
         out.insert(out.end(), 6, 0);
         out.push_back(uint8_t(offsetSize));
         out.push_back(uint8_t(refSize));
@@ -88,9 +88,9 @@ public:
     }
 
 private:
-    std::vector<const Value*>          objs_;        // index → 对象
-    std::map<const Value*, uint32_t>   index_;       // 对象 → index
-    std::vector<Ptr>                   extra_;       // 合成的对象（字典 key 串）
+    std::vector<const Value*>          objs_;        // index → object
+    std::map<const Value*, uint32_t>   index_;       // object → index
+    std::vector<Ptr>                   extra_;       // synthesized objects (dict key strings)
     std::vector<uint64_t>              offsets_;
 
     static int intSize(uint64_t v)
@@ -106,7 +106,7 @@ private:
         for (int k = bytes - 1; k >= 0; --k) out.push_back(uint8_t(v >> (8 * k)));
     }
 
-    /// 合成对象（字典 key 串）也要进对象表
+    /// Synthesized objects (dict key strings) also go into the object table
     void addExtra(const Ptr& v) { extra_.push_back(v); }
 
     uint32_t collect(const Value* v, bool top = false)
@@ -125,25 +125,25 @@ private:
             break;
         case Value::Type::Dict:
             for (const auto& kv : v->m) {
-                auto key = str(kv.first);          // key 是独立字符串对象
+                auto key = str(kv.first);          // key is a standalone string object
                 addExtra(key);
                 collect(key.get());
                 collect(kv.second.get());
             }
             break;
-        default: break;   // 叶子（含长串/长 data）没有子对象；计数是内联的
+        default: break;   // leaf (including long strings/data) has no children; count is inline
         }
         return idx;
     }
 
     void writeRef(std::vector<uint8_t>& out, uint32_t objIndex) const
     {
-        // bplist 的引用与偏移表都是**大端**（写错了的症状是解析器报 "Invalid file"）
+        // bplist references and the offset table are **big-endian** (wrong endianness makes parsers report "Invalid file")
         const int refSize = intSize(objs_.size() - 1);
         writeBE(out, objIndex, refSize);
     }
 
-    /// 长度 <15：直接编进标记；>=15：标记 0x?F + **内联整数 token**（不是引用！）
+    /// Length <15: encoded in the marker; >=15: marker 0x?F + **inline integer token** (not a reference!)
     void writeCountOrInline(std::vector<uint8_t>& out, size_t count,
                             uint8_t shortMarker) const
     {
@@ -172,7 +172,7 @@ private:
             break;
         }
         case Value::Type::Int:
-            // 负数/负数场景很少用；统一按 8 字节有符号写（bplist 允许）
+            // Negative numbers are rarely used; write them uniformly as signed 8-byte (bplist allows it)
             out.push_back(0x13);
             writeBE(out, uint64_t(v->i), 8);
             break;
@@ -184,7 +184,7 @@ private:
             break;
         }
         case Value::Type::Str: {
-            // 只处理纯 ASCII（我们生成的字符串都是）；非 ASCII 走 UTF-16BE
+            // Handle pure ASCII only (all strings we generate are); non-ASCII goes to UTF-16BE
             bool ascii = true;
             for (unsigned char c : v->s) if (c >= 0x80) { ascii = false; break; }
             if (ascii) {
@@ -193,7 +193,7 @@ private:
             } else {
                 std::vector<uint8_t> u16;
                 u16.reserve(v->s.size() * 2);
-                for (unsigned char c : v->s) { u16.push_back(0); u16.push_back(c); }  // 退化：逐字节当 U+00xx
+                for (unsigned char c : v->s) { u16.push_back(0); u16.push_back(c); }  // fallback: treat each byte as U+00xx
                 writeCountOrInline(out, v->s.size(), 0x60);
                 out.insert(out.end(), u16.begin(), u16.end());
             }
@@ -217,18 +217,18 @@ private:
         }
     }
 
-    /// 字典 key 在前面的 collect 里合成过；按字符串内容找回它的 index
+    /// Dict keys were synthesized during collect; recover their index by string content
     uint32_t findKeyObject(const std::string& key) const
     {
-        // key 串对象没有别的引用，这里按"内容相等 + 是 key 串"来找：
-        // collect 时每个 key 都 addExtra 了一份，内容相同即可定位。
+        // Key string objects have no other references, so find them by "equal content + is a key string":
+        // collect adds one extra copy per key, so matching content is enough to locate it.
         for (const auto& ex : extra_) {
             if (ex->type == Value::Type::Str && ex->s == key) {
                 auto it = index_.find(ex.get());
                 if (it != index_.end()) return it->second;
             }
         }
-        return 0;   // 不应发生（dict 的每个 key 都在 collect 里登记过）
+        return 0;   // should not happen (every dict key was registered in collect)
     }
 };
 
@@ -241,7 +241,7 @@ std::vector<uint8_t> serialize(const Ptr& root)
 }
 
 // ---------------------------------------------------------------------------
-// 读侧（解析手机发来的 bplist 请求体）
+// Read side (parse bplist request bodies sent by the phone)
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -287,7 +287,7 @@ private:
         if (it != cache_.end()) return it->second;
 
         auto n = std::make_shared<Node>();
-        cache_[off] = n;                              // 先占位防环
+        cache_[off] = n;                              // placeholder first to break cycles
 
         const uint8_t marker = d_[off];
         const uint8_t type  = marker >> 4;
@@ -299,14 +299,14 @@ private:
             else if (info == 0x09) { n->type = NodeType::Bool; n->b = true; }
             else n->type = NodeType::Null;
             break;
-        case 0x1: { // 整数（1/2/4/8 字节；>8 不支持→退化）
+        case 0x1: { // integer (1/2/4/8 bytes; >8 unsupported → fallback)
             if (info <= 3) {
                 n->type = NodeType::Uint;
                 n->u = readBE(d_ + off + 1, 1 << info);
             }
             break;
         }
-        case 0x2: { // 实数
+        case 0x2: { // real
             n->type = NodeType::Real;
             if (info == 3) {
                 uint64_t bits = readBE(d_ + off + 1, 8);
@@ -327,7 +327,7 @@ private:
             }
             break;
         }
-        case 0x5: { // ASCII 字符串
+        case 0x5: { // ASCII string
             uint64_t cnt; size_t consumed;
             readCount(off, info, &cnt, &consumed);
             size_t start = off + 1 + consumed;
@@ -337,7 +337,7 @@ private:
             }
             break;
         }
-        case 0x6: { // UTF-16BE 字符串
+        case 0x6: { // UTF-16BE string
             uint64_t cnt; size_t consumed;
             readCount(off, info, &cnt, &consumed);
             size_t start = off + 1 + consumed;
@@ -347,7 +347,7 @@ private:
             }
             break;
         }
-        case 0x8: { // UID → 整数
+        case 0x8: { // UID → integer
             n->type = NodeType::Uint;
             n->u = readBE(d_ + off + 1, info + 1);
             break;
@@ -368,7 +368,7 @@ private:
             }
             break;
         }
-        case 0xD: { // dict（key 先、value 后）
+        case 0xD: { // dict (keys first, then values)
             uint64_t cnt; size_t consumed;
             readCount(off, info, &cnt, &consumed);
             n->type = NodeType::Dict;

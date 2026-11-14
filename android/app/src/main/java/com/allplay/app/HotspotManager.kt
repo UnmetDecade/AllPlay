@@ -15,8 +15,8 @@ import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
 /**
- * IHotspot 的 Android 实现。优先建**持久 SoftAP**（反射 WifiManager.setWifiApEnabled，退后台不回收），
- * 失败再退回 startLocalOnlyHotspot（前台可用、后台会被系统回收）。
+ * Android implementation of IHotspot. Prefer a **persistent SoftAP** (reflected WifiManager.setWifiApEnabled; not reclaimed in the background),
+ * falling back to startLocalOnlyHotspot on failure (works in the foreground, reclaimed by the system in the background).
  */
 class HotspotManager(context: Context) {
     @Volatile var ssid: String = ""; private set
@@ -27,23 +27,23 @@ class HotspotManager(context: Context) {
     private val wifiManager: WifiManager =
         context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private val filesDir = context.filesDir
-    // LocalOnlyHotspotReservation 是 API 26；用 Any? 避免 4.4 加载类时引用不存在的类型
+    // LocalOnlyHotspotReservation is API 26; use Any? so 4.4 does not reference a missing type when loading the class
     private var reservation: Any? = null
 
-    /// 开热点（阻塞到就绪/失败）。优先持久 SoftAP，失败退 LocalOnlyHotspot。
+    /// Start the hotspot (blocks until ready/failure). Prefer persistent SoftAP, fall back to LocalOnlyHotspot.
     @SuppressLint("MissingPermission")
     fun start(timeoutMs: Long = 15000): Boolean {
         val (s, p) = stableCredentials()
         if (startPersistentAp(s, p)) {
             ssid = s; passphrase = p; persistent = true
             ip = detectHotspotIp() ?: "192.168.43.1"
-            Log.i("AllPlay", "持久 SoftAP 已开：ssid=$s ip=$ip")
+            Log.i("AllPlay", "Persistent SoftAP opened: ssid=$s ip=$ip")
             return true
         }
         return startLocalOnly(timeoutMs)
     }
 
-    /// 稳定 SSID/口令：files/ap_ssid、files/ap_passphrase 覆盖或首次生成后持久化（iPhone 可免重输自动回连）
+    /// Stable SSID/passphrase: files/ap_ssid and files/ap_passphrase override, or are generated on first use and persisted (so the iPhone can reconnect without re-entering them)
     private fun stableCredentials(): Pair<String, String> {
         val s = readText("ap_ssid").ifBlank {
             "AllPlay-${Random.nextInt(1000, 10000)}".also { writeText("ap_ssid", it) }
@@ -56,16 +56,16 @@ class HotspotManager(context: Context) {
         return s to p
     }
 
-    /// 反射建真 SoftAP（后台不回收）。Android 13+ 用 startSoftAp(SoftApConfiguration)，旧版用 setWifiApEnabled。
+    /// Create a real SoftAP via reflection (not reclaimed in the background). Android 13+ uses startSoftAp(SoftApConfiguration); older versions use setWifiApEnabled.
     @SuppressLint("MissingPermission")
     private fun startPersistentAp(ssid: String, pass: String): Boolean {
-        // Android 13+：startSoftAp(SoftApConfiguration)（隐藏 API，反射）
+        // Android 13+: startSoftAp(SoftApConfiguration) (hidden API, reflected)
         if (Build.VERSION.SDK_INT >= 33) {
             try {
                 val builderClass = Class.forName("android.net.wifi.SoftApConfiguration\$Builder")
                 val builder = builderClass.getConstructor().newInstance()
                 builderClass.getMethod("setSsid", String::class.java).invoke(builder, ssid)
-                // setPassphrase(String, int)：securityType 2 = WPA2_PSK
+                // setPassphrase(String, int): securityType 2 = WPA2_PSK
                 builderClass.getMethod("setPassphrase", String::class.java, Int::class.javaPrimitiveType)
                     .invoke(builder, pass, 2)
                 val config = builderClass.getMethod("build").invoke(builder)
@@ -73,10 +73,10 @@ class HotspotManager(context: Context) {
                 val m = wifiManager.javaClass.getMethod("startSoftAp", configClass)
                 return m.invoke(wifiManager, config) as Boolean
             } catch (e: Exception) {
-                Log.w("AllPlay", "startSoftAp 反射失败：${e.message}")
+                Log.w("AllPlay", "startSoftAp reflection failed: ${e.message}")
             }
         }
-        // Android 10 及以下：setWifiApEnabled(WifiConfiguration, boolean)
+        // Android 10 and below: setWifiApEnabled(WifiConfiguration, boolean)
         return try {
             val cfg = WifiConfiguration().apply {
                 SSID = "\"$ssid\""
@@ -89,12 +89,12 @@ class HotspotManager(context: Context) {
             m.invoke(wifiManager, cfg, true) as Boolean
         } catch (e: Exception) {
             val c = e.cause ?: e
-            Log.w("AllPlay", "setWifiApEnabled 反射失败：${c.javaClass.name}: ${c.message}", c)
+            Log.w("AllPlay", "setWifiApEnabled reflection failed: ${c.javaClass.name}: ${c.message}", c)
             false
         }
     }
 
-    /// 兜底：LocalOnlyHotspot（前台可用，退后台会被系统回收）。API 26 才有，4.4 直接失败。
+    /// Fallback: LocalOnlyHotspot (works in the foreground, reclaimed by the system in the background). API 26+ only; fails outright on 4.4.
     @SuppressLint("MissingPermission")
     private fun startLocalOnly(timeoutMs: Long): Boolean {
         if (Build.VERSION.SDK_INT < 26) return false
@@ -110,7 +110,7 @@ class HotspotManager(context: Context) {
                 ip = detectHotspotIp() ?: "192.168.43.1"
                 persistent = false
                 ok = true
-                Log.i("AllPlay", "LocalOnlyHotspot：ssid=$ssid 密码=$passphrase ip=$ip")
+                Log.i("AllPlay", "LocalOnlyHotspot: ssid=$ssid password=$passphrase ip=$ip")
                 latch.countDown()
             }
             override fun onStopped() { latch.countDown() }
@@ -121,16 +121,16 @@ class HotspotManager(context: Context) {
     }
 
     fun stop() {
-        // reservation 是 API 26 的 LocalOnlyHotspotReservation；用反射 close() 避免 4.4 引用缺失类
+        // reservation is the API 26 LocalOnlyHotspotReservation; call close() via reflection so 4.4 does not reference a missing class
         try {
             reservation?.let { r -> r.javaClass.getMethod("close").invoke(r) }
         } catch (_: Exception) {}
         reservation = null
-        // 持久 SoftAP 不关：退后台/重建服务都保持热点（CarPlay 常驻）
+        // Leave the persistent SoftAP running: keep the hotspot across backgrounding/service recreation (CarPlay stays resident)
     }
 
-    /// 读用户手动开的系统热点的 SSID（Android 11+ getSoftApConfiguration 反射；旧版 getWifiApConfiguration）。
-    /// 返回 null 表示没检测到手动热点。
+    /// Read the SSID of a system hotspot the user turned on manually (Android 11+ getSoftApConfiguration by reflection; older getWifiApConfiguration).
+    /// Returns null when no manual hotspot is detected.
     @SuppressLint("PrivateApi", "MissingPermission")
     fun readManualApSsid(): String? {
         return try {
@@ -145,15 +145,15 @@ class HotspotManager(context: Context) {
             }
         } catch (e: Exception) {
             val c = e.cause ?: e
-            Log.w("AllPlay", "readManualApSsid 失败：${c.javaClass.name}: ${c.message}")
+            Log.w("AllPlay", "readManualApSsid failed: ${c.javaClass.name}: ${c.message}")
             null
         }
     }
 
-    /// 手动热点接口 IP（ap*/softap*）；无则 null
+    /// Manual hotspot interface IP (ap*/softap*); null if none
     fun manualHotspotIp(): String? = detectHotspotIp()
 
-    /// 热点接口（ap*/softap*/wlan1*）上的 IPv4；找不到退回 Android SoftAP 默认网关
+    /// IPv4 on a hotspot interface (ap*/softap*/wlan1*); falls back to the Android SoftAP default gateway if none is found
     private fun detectHotspotIp(): String? {
         return try {
             val ifs = NetworkInterface.getNetworkInterfaces()

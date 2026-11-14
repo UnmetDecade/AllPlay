@@ -8,9 +8,9 @@ import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
- * IVideoOutput 的 Android 实现：MediaCodec 硬件解码 → Surface。
- * 由 core 的屏幕流线程经 JNI 下调 configure/feedAnnexB/reset。
- * 参照协议（AndroidMediaSink 行为）：H264 csd 用 avcC 里拆出的 SPS/PPS，HEVC 用 hvcC。
+ * Android implementation of IVideoOutput: MediaCodec hardware decode → Surface.
+ * The core screen-stream thread downcalls configure/feedAnnexB/reset via JNI.
+ * Follows the protocol (AndroidMediaSink behavior): H264 csd uses SPS/PPS split out of avcC, HEVC uses hvcC.
  */
 class MediaCodecSink {
     private var codec: MediaCodec? = null
@@ -19,29 +19,29 @@ class MediaCodecSink {
     private var height = 720
     private var surface: Surface? = null
 
-    // surface 未就绪时暂存配置，setSurface 后再补配
+    // Stash the config while the surface is not ready; apply it after setSurface
     private var pendingCodecType = 0
     private var pendingCodecData: ByteArray? = null
-    // 最近一次成功配置，用于 Surface 变更时重建解码器
+    // Last successful config, used to rebuild the decoder when the Surface changes
     private var lastCodecType = 0
     private var lastCodecData: ByteArray? = null
-    // configure 失败退避：Surface 抖动时别高频重试，等系统稳定
+    // configure failure backoff: avoid frequent retries while the Surface is flapping; wait for the system to settle
     private var configureFailUntil = 0L
 
-    /// codec: 0=H264, 1=HEVC；codecData = ISO BMFF avcC/hvcC 记录（不含 fourcc）
+    /// codec: 0=H264, 1=HEVC; codecData = ISO BMFF avcC/hvcC record (without the fourcc)
     fun configure(codecType: Int, width: Int, height: Int, codecData: ByteArray) {
         val now = System.currentTimeMillis()
-        // 退避期：只记下最新配置，等退避结束再真正重建
+        // Backoff window: record only the latest config and rebuild for real after it ends
         if (now < configureFailUntil) {
             this.width = width; this.height = height
             lastCodecType = codecType; lastCodecData = codecData
             pendingCodecType = codecType; pendingCodecData = codecData
             return
         }
-        // iPhone 回应 forceKeyFrame 时会重发同一份 avcC；配置没变就别重建解码器，避免周期性黑帧/卡顿
+        // The iPhone re-sends the same avcC in response to forceKeyFrame; if the config is unchanged, do not rebuild the decoder, avoiding periodic black frames/stutter
         if (codec != null && lastCodecType == codecType && this.width == width && this.height == height
             && lastCodecData != null && lastCodecData!!.contentEquals(codecData)) {
-            Log.i("AllPlay", "MediaCodec 配置未变，跳过重建")
+            Log.i("AllPlay", "MediaCodec config unchanged, skipping rebuild")
             return
         }
         this.width = width
@@ -69,19 +69,19 @@ class MediaCodecSink {
             this.codec!!.configure(format, s, null, 0)
             this.codec!!.start()
         } catch (e: Exception) {
-            // 退后台/旋转时 Surface 可能已被释放，configure/start 会失败；
-            // 别让异常经 JNI 传导崩掉原生线程，退避 1s 后重试，暂存配置等新 Surface
-            Log.w("AllPlay", "MediaCodec configure 失败（Surface 可能已释放）：${e.message}")
+            // When backgrounding/rotating, the Surface may already be released and configure/start fail;
+            // do not let the exception cross JNI and crash the native thread. Back off 1s, retry, and stash the config for the new Surface
+            Log.w("AllPlay", "MediaCodec configure failed (Surface may be released): ${e.message}")
             configureFailUntil = System.currentTimeMillis() + 1000
             this.codec = null
             pendingCodecType = codecType
             pendingCodecData = codecData
             return
         }
-        Log.i("AllPlay", "MediaCodec 已配置并启动 mime=$mime ${width}x${height} csd=${csd.size} surface=${s != null}")
+        Log.i("AllPlay", "MediaCodec configured and started mime=$mime ${width}x${height} csd=${csd.size} surface=${s != null}")
     }
 
-    /// 退后台 Surface 销毁时调用：清掉对已释放 Surface 的引用，避免后续 configure 崩溃
+    /// Called when the Surface is destroyed on backgrounding: drop the reference to the released Surface to avoid a later configure crash
     fun releaseSurface() {
         Log.i("AllPlay", "MediaCodec releaseSurface")
         surface = null
@@ -91,18 +91,18 @@ class MediaCodecSink {
     fun setSurface(s: Surface) {
         surface = s
         Log.i("AllPlay", "MediaCodec setSurface surface=${s != null}")
-        // surface 后补：之前因 surface 未就绪而暂存的配置，现在补配
+        // Late surface: apply the config that was stashed earlier because the surface was not ready
         val d = pendingCodecData
         if (d != null) {
             pendingCodecData = null
             configure(pendingCodecType, width, height, d)
             return
         }
-        // 已有解码器但 Surface 变了（后台→前台 Surface 重建）：优先用 setOutputSurface 热切换，
-        // 失败则用最近一次配置重建（参照 setOutputSurface → reconfigure 兜底）
+        // A decoder exists but the Surface changed (background→foreground rebuild): prefer hot-swapping via setOutputSurface,
+        // falling back to rebuilding from the last config (as in setOutputSurface → reconfigure)
         val c = codec
         if (c != null) {
-            // setOutputSurface 是 API 23；4.4 上直接按最近一次配置重建解码器
+            // setOutputSurface is API 23; on 4.4, rebuild the decoder directly from the last config
             if (Build.VERSION.SDK_INT >= 23) {
                 try {
                     c.setOutputSurface(s)
@@ -113,7 +113,7 @@ class MediaCodecSink {
                 lastCodecData?.let { configure(lastCodecType, width, height, it) }
             }
         } else {
-            // 解码器在退后台时因 Surface 销毁被释放；Surface 回来用最近配置重建
+            // The decoder was released when the Surface was destroyed on backgrounding; rebuild it from the last config when the Surface returns
             lastCodecData?.let { configure(lastCodecType, width, height, it) }
         }
     }
@@ -121,9 +121,9 @@ class MediaCodecSink {
     fun feedAnnexB(data: ByteArray): Boolean {
         val c = codec ?: return false
         try {
-            // VideoInputPump：边清输出边等输入缓冲（对照 VideoInputPump 模式）。
-            // 若输出缓冲被占满，输入会被饿死 → dequeueInputBuffer 一直拿不到 → 静默丢帧 → 参考链断裂花屏。
-            // 这里在 500ms 窗口内反复 drain 输出，把输入腾出来，而不是直接丢这一帧。
+            // VideoInputPump: drain output while waiting for an input buffer (mirroring the VideoInputPump mode).
+            // If the output buffers fill up, input starves → dequeueInputBuffer never succeeds → silent frame drops → broken reference chain and artifacts.
+            // So repeatedly drain output within a 500ms window to free up input, rather than dropping this frame outright.
             var idx = -1
             val deadline = System.nanoTime() + 500_000_000L
             while (idx < 0 && System.nanoTime() < deadline) {
@@ -134,17 +134,17 @@ class MediaCodecSink {
             if (idx < 0) return false
             val buf = c.compatInputBuffer(idx) ?: return false
             buf.clear()
-            if (data.size > buf.remaining()) return false   // 超大帧：参考链已断，交给上层重放闸 + 重配
+            if (data.size > buf.remaining()) return false   // oversized frame: the reference chain is broken; let the upper layer gate playback + reconfigure
             buf.put(data)
-            // 时间戳必须单调递增，否则解码器按错序渲染（乱码）。参照协议用 System.nanoTime()/1000
+            // Timestamps must increase monotonically, otherwise the decoder renders out of order (garbage). The protocol uses System.nanoTime()/1000
             c.queueInputBuffer(idx, 0, data.size, System.nanoTime() / 1000, 0)
             drain()
             return true
         } catch (e: Exception) {
-            // 退后台 Surface 销毁会让 MediaCodec 进入非法态，dequeueInput/Output 抛 IllegalStateException；
-            // 若让异常经 JNI 传导会崩掉原生屏幕流线程 → CarPlay 整条断连。这里吞掉、释放解码器、返回 false，
-            // core 会放闸等关键帧，Surface 回来后 setSurface 再用最近配置重建。
-            Log.w("AllPlay", "视频喂帧异常，释放解码器等待 Surface 重建：${e.message}")
+            // Surface destruction on backgrounding puts MediaCodec into an illegal state and dequeueInput/Output throws IllegalStateException;
+            // letting the exception cross JNI would crash the native screen-stream thread → drop all of CarPlay. Swallow it, release the decoder, return false;
+            // core then gates playback until a keyframe, and after the Surface returns setSurface rebuilds from the last config.
+            Log.w("AllPlay", "Video feed error, releasing decoder and waiting for Surface rebuild: ${e.message}")
             release()
             return false
         }
@@ -169,11 +169,11 @@ class MediaCodecSink {
             val out = c.dequeueOutputBuffer(info, 0)
             when {
                 out >= 0 -> {
-                    // Surface 在后台可能已被销毁，render=true 会抛异常；失败则退化为不渲染，
-                    // 避免异常经 JNI 传导弄挂原生线程（退后台后 CarPlay 整条断连的诱因之一）
+                    // The Surface may already be destroyed in the background, so render=true can throw; on failure degrade to not rendering
+                    // to keep the exception from crossing JNI and killing the native thread (one cause of losing all of CarPlay after backgrounding)
                     var rendered = false
                     try {
-                        c.releaseOutputBuffer(out, true)   // 交给 Surface 合成
+                        c.releaseOutputBuffer(out, true)   // hand to the Surface for composition
                         rendered = true
                     } catch (e: Exception) {
                         try { c.releaseOutputBuffer(out, false) } catch (_: Exception) {}
@@ -181,10 +181,10 @@ class MediaCodecSink {
                     if (rendered) renderedFrames++
                     decodedFrames++
                     if (decodedFrames == 1 || decodedFrames % 300 == 0)
-                        Log.i("AllPlay", "MediaCodec 输出帧 #$decodedFrames size=${info.size}")
+                        Log.i("AllPlay", "MediaCodec output frame #$decodedFrames size=${info.size}")
                 }
                 out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
-                    Log.i("AllPlay", "MediaCodec 输出格式变更 ${c.outputFormat}")
+                    Log.i("AllPlay", "MediaCodec output format changed ${c.outputFormat}")
                 out == MediaCodec.INFO_TRY_AGAIN_LATER -> return
                 else -> Unit
             }
@@ -198,10 +198,10 @@ class MediaCodecSink {
         codec = null
     }
 
-    // avcC/hvcC → MediaCodec csd-0/csd-1（AnnexB，带 start code）。参照协议 MediaCodecSupport。
+    // avcC/hvcC → MediaCodec csd-0/csd-1 (AnnexB, with start codes). Per the protocol's MediaCodecSupport.
     private fun buildCsd(codecData: ByteArray): List<ByteArray> {
         if (mime == MediaFormat.MIMETYPE_VIDEO_AVC) {
-            // avcC：SPS 数量在 [5]&0x1f，offset 6 起 u16BE 长度 + SPS；随后 PPS
+            // avcC: SPS count is [5]&0x1f; from offset 6, u16BE length + SPS; then PPS
             if (codecData.size < 7) return emptyList()
             val spsCount = codecData[5].toInt() and 0x1f
             var off = 6
@@ -229,8 +229,8 @@ class MediaCodecSink {
                 ppsList.firstOrNull()?.let { start + it },
             )
         } else {
-            // HEVC hvcC：VPS/SPS/PPS 各数组（array count 在 offset 22）。首版只取第一个 NAL 集。
-            return listOf(byteArrayOf(0, 0, 0, 1) + codecData)   // TODO(真机)：按 hvcC 逐数组拆 VPS/SPS/PPS
+            // HEVC hvcC: separate VPS/SPS/PPS arrays (array count at offset 22). The first version takes only the first NAL set.
+            return listOf(byteArrayOf(0, 0, 0, 1) + codecData)   // TODO(on-device): split VPS/SPS/PPS per array from hvcC
         }
     }
 }

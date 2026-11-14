@@ -1,14 +1,14 @@
 /**
  * @file   aa_wire_test.cpp
- * @brief  Android Auto wire 层自测：AAP 分帧/拼帧 + protobuf 子集
+ * @brief  Android Auto wire-layer self-test: AAP framing/deframing + protobuf subset
  * @author blt
  */
 
 // ============================================================================
-// tools/aa_wire_test.cpp —— 不需要手机的 AA 自测
+// tools/aa_wire_test.cpp -- AA self-test that needs no phone
 // ============================================================================
-// AA 的协议验证最终要真机，但帧格式、长度字段、拼帧和 protobuf 编码可以先在这里
-// 钉死。跑法：./build/aa_wire_test
+// AA protocol verification ultimately needs a real device, but frame format, length fields, deframing and protobuf
+// encoding can be pinned down here first. Run: ./build/aa_wire_test
 #include "projection/androidauto/aap.h"
 #include "projection/androidauto/proto.h"
 
@@ -31,7 +31,7 @@ int failures = 0;
 
 int main()
 {
-    // ---- 1. 单帧往返：control channel / plain / CONTROL ----
+    // ---- 1. Single-frame round trip: control channel / plain / CONTROL ----
     const uint8_t payload[] = {0x00, 0x05, 'h', 'i'};
     auto frame = encodeFrame(Channel::Control, /*encrypted=*/false,
                              /*control=*/true, payload, sizeof payload,
@@ -49,9 +49,9 @@ int main()
     CHECK(out.control && !out.encrypted && out.first && out.last);
     CHECK(out.payload.size() == sizeof payload);
     CHECK(out.payload[1] == 0x05);
-    CHECK(!parser.next(&out));               // 没有第二帧
+    CHECK(!parser.next(&out));               // no second frame
 
-    // ---- 2. 分帧： > 0x4000，FIRST 带 6 字节长度（含明文总长）----
+    // ---- 2. Deframing: > 0x4000, FIRST carries a 6-byte length (total plaintext size) ----
     const std::vector<uint8_t> big(kMaxFramePayload + 100, 0xAB);
     auto first = encodeFrame(Channel::Video, true, false, big.data(),
                              kMaxFramePayload, /*first=*/true, /*last=*/false,
@@ -78,7 +78,7 @@ int main()
     CHECK(a.payload.size() == kMaxFramePayload);
     CHECK(b.payload.size() == 100);
 
-    // ---- 3. 半帧必须等下一次 feed ----
+    // ---- 3. A half frame must wait for the next feed ----
     parser.reset();
     parser.feed(first.data(), 5);
     CHECK(!parser.next(&a));

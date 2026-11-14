@@ -51,8 +51,8 @@ void LinkEngine::appendOutput(const std::vector<uint8_t>& bytes)
 void LinkEngine::writeFrame(uint8_t control, uint8_t seq, uint8_t session,
                             const std::vector<uint8_t>* payload)
 {
-    // 空载荷帧（纯 ACK）**不带**载荷校验字节，长度就是 9 —— 这一点写错会让
-    // 长度字段和实际字节数差 1，整个流从此错位（症状：两端一直重发 SYN/ACK）。
+    // An empty-payload frame (pure ACK) **does not carry** a payload checksum byte; the length is just 9 — getting this wrong makes
+    // the length field differ from the actual byte count by 1 and the whole stream misaligns (symptom: both sides keep resending SYN/ACK).
     const size_t len = kHeaderBytes + (payload ? payload->size() + kChecksumBytes : 0);
     std::vector<uint8_t> f;
     f.reserve(len);
@@ -70,7 +70,7 @@ void LinkEngine::writeFrame(uint8_t control, uint8_t seq, uint8_t session,
         f.push_back(checksumNeg(payload->data(), payload->size()));
     }
     appendOutput(f);
-    pendingAcks_ = 0;   // 出帧即携带了累积确认
+    pendingAcks_ = 0;   // outgoing frame carries the cumulative ACK
 }
 
 void LinkEngine::start(uint64_t nowMs)
@@ -79,12 +79,12 @@ void LinkEngine::start(uint64_t nowMs)
     state_ = State::Detecting;
     appendOutput(std::vector<uint8_t>(kMarker, kMarker + sizeof kMarker));
     markerDeadlineMs_ = nowMs + kMarkerResendMs;
-    // 主动发起（有线）：marker 只发这一次，紧接着自己进协商、开始发 SYN ——
-    // 不等对端 marker。有线这条路上对端不会先开口。
+    // Initiator (wired): send the marker only once, then immediately enter negotiation and start sending SYN —
+    // without waiting for the peer's marker. On the wired path the peer never speaks first.
     if (cfg_.initiator) enterNegotiating(nowMs);
 }
 
-/// 进协商态：停掉 marker 重发，开始发 SYN 并按 kSyncResendMs 重发（在 tick 里）。
+/// Enter negotiation: stop resending the marker, start sending SYN and resend at kSyncResendMs (in tick).
 void LinkEngine::enterNegotiating(uint64_t nowMs)
 {
     if (state_ == State::Dead) return;
@@ -96,7 +96,7 @@ void LinkEngine::enterNegotiating(uint64_t nowMs)
 
 void LinkEngine::sendSynchronization()
 {
-    // SYN 载荷 v1（10 字节固定 + 每会话 3 字节）
+    // SYN payload v1 (10 fixed bytes + 3 bytes per session)
     std::vector<uint8_t> p;
     p.push_back(1);                          // version
     p.push_back(cfg_.maxOutgoing);
@@ -147,10 +147,10 @@ size_t LinkEngine::peerMaxPayload() const
 
 std::string LinkEngine::peerSummary() const
 {
-    if (!peerSyncOk_) return "（还没收到对端 SYN）";
+    if (!peerSyncOk_) return "(peer SYN not received yet)";
     return "maxOutgoing=" + std::to_string(peerMaxOutgoing_) +
            " maxLength=" + std::to_string(peerMaxLength_) +
-           " 重传超时=" + std::to_string(peerRetransTimeoutMs_) + "ms" +
+           " retransTimeout=" + std::to_string(peerRetransTimeoutMs_) + "ms" +
            " maxRetrans=" + std::to_string(peerMaxRetransmissions_) +
            " maxAcks=" + std::to_string(peerMaxAcks_);
 }
@@ -171,7 +171,7 @@ bool LinkEngine::sendControl(const std::vector<uint8_t>& payload, uint64_t nowMs
         return true;
     }
     if (queued_.size() >= kMaxQueuedControl) {
-        die("iAP2 发送队列溢出");
+        die("iAP2 send queue overflow");
         return false;
     }
     OutPacket p;
@@ -197,7 +197,7 @@ void LinkEngine::flushQueued(uint64_t nowMs)
 }
 
 // ---------------------------------------------------------------------------
-// 收方向
+// receive side
 // ---------------------------------------------------------------------------
 
 void LinkEngine::feed(const uint8_t* p, size_t n, uint64_t nowMs)
@@ -216,12 +216,12 @@ bool LinkEngine::parseOne(uint64_t nowMs)
             enterNegotiating(nowMs);
             return true;
         }
-        // 不匹配：找下一个可能的 marker 起点（丢 1 字节重试）
+        // no match: find the next possible marker start (drop 1 byte and retry)
         rx_.erase(rx_.begin());
         return !rx_.empty();
     }
 
-    // 对帧：找 FF 5A
+    // Data frame: find FF 5A
     size_t off = 0;
     while (rx_.size() - off >= 2 && !(rx_[off] == 0xff && rx_[off + 1] == 0x5a)) ++off;
     if (off) rx_.erase(rx_.begin(), rx_.begin() + off);
@@ -229,7 +229,7 @@ bool LinkEngine::parseOne(uint64_t nowMs)
 
     const size_t len = (size_t(rx_[2]) << 8) | rx_[3];
     if (len < kHeaderBytes || len > 0xffff) {
-        rx_.erase(rx_.begin());     // 头不合法：丢 1 字节重新对齐
+        rx_.erase(rx_.begin());     // invalid header: drop 1 byte and realign
         return true;
     }
     if (rx_.size() < len) return false;
@@ -267,14 +267,14 @@ bool LinkEngine::parseOne(uint64_t nowMs)
 void LinkEngine::handleFrame(const Frame& f, uint64_t nowMs)
 {
     if (f.control & kCtrlReset) {
-        die("对端发了 iAP2 reset");
+        die("Peer sent an iAP2 reset");
         return;
     }
     if ((f.control & kCtrlSyn) && f.hasPayload) handleSync(f);
     if (f.control & kCtrlAck) handleAckField(f.ack, nowMs);
     if (f.control == kCtrlAck && f.hasPayload) handleData(f, nowMs);
     else if (f.control == kCtrlAck && !f.hasPayload) {
-        // 纯 ACK：确认到位后可能要冲队列
+        // pure ACK: after the ACK lands, the queue may need flushing
         if (state_ == State::Normal) flushQueued(nowMs);
     }
     (void)kCtrlEak;
@@ -302,7 +302,7 @@ void LinkEngine::handleAckField(uint8_t ack, uint64_t nowMs)
     if (state_ == State::Negotiating) {
         if (!peerSyncOk_ || peerMaxLength_ <= kHeaderBytes + kChecksumBytes ||
             peerMaxOutgoing_ == 0) {
-            die("对端 iAP2 参数不可用");
+            die("Peer iAP2 parameters are unusable");
             return;
         }
         state_ = State::Normal;
@@ -311,11 +311,11 @@ void LinkEngine::handleAckField(uint8_t ack, uint64_t nowMs)
     if (state_ != State::Normal) return;
 
     lastSentAcked_ = ack;
-    // 丢已确认的
+    // drop acknowledged entries
     for (auto it = unacked_.begin(); it != unacked_.end();) {
         const int d = seqDist(it->seq, lastSentAcked_);
         if (d > 0 && d <= peerMaxAcks_ + kAckSlack) {
-            it->deadlineMs = it->deadlineMs;   // 保持
+            it->deadlineMs = it->deadlineMs;   // keep
             ++it;
         } else {
             it = unacked_.erase(it);
@@ -330,19 +330,19 @@ void LinkEngine::handleData(const Frame& f, uint64_t nowMs)
     const int d = haveReceived_ ? seqDist(f.seq, lastReceivedInOrder_)
                                 : 0;
     if (!haveReceived_) {
-        // 本端还没收到过任何数据（可能首个数据帧先于对端 SYN 被吃）：接受为起点
+        // We have not received any data yet (the first data frame may have been consumed before the peer SYN): accept it as the starting point
         lastReceivedInOrder_ = f.seq;
         haveReceived_ = true;
         controlQueue_.push_back(f.payload);
         ++pendingAcks_;
     } else if (d == 0) {
-        sendAckOnly();          // 重复帧：立刻确认
+        sendAckOnly();          // duplicate frame: ACK immediately
         return;
     } else if (d == 1) {
         lastReceivedInOrder_ = f.seq;
         controlQueue_.push_back(f.payload);
         ++pendingAcks_;
-        // 顺带处理缓存里接上的乱序帧
+        // also process out-of-order frames in the cache that now connect
         bool progressed = true;
         while (progressed) {
             progressed = false;
@@ -358,7 +358,7 @@ void LinkEngine::handleData(const Frame& f, uint64_t nowMs)
             }
         }
     } else {
-        // 乱序：缓存（去重），并立刻 ACK 促使对端重传缺口
+        // out of order: cache it (deduplicate) and ACK immediately to prompt the peer to retransmit the gap
         bool dup = false;
         for (const auto& kv : outOfOrder_) if (kv.first == f.seq) { dup = true; break; }
         if (!dup && outOfOrder_.size() < 64) outOfOrder_.emplace_back(f.seq, f.payload);
@@ -372,7 +372,7 @@ void LinkEngine::handleData(const Frame& f, uint64_t nowMs)
 }
 
 // ---------------------------------------------------------------------------
-// 时间推进
+// time advancement
 // ---------------------------------------------------------------------------
 
 void LinkEngine::tick(uint64_t nowMs)
@@ -391,12 +391,12 @@ void LinkEngine::tick(uint64_t nowMs)
     }
 
     if (state_ == State::Normal) {
-        // 重传到期
+        // retransmission due
         for (auto it = unacked_.begin(); it != unacked_.end();) {
             if (nowMs >= it->deadlineMs) {
                 ++it->retransmissions;
                 if (it->retransmissions > peerMaxRetransmissions_) {
-                    die("iAP2 数据帧未被确认（seq " + std::to_string(it->seq) + "）");
+                    die("iAP2 data frame was not acknowledged (seq " + std::to_string(it->seq) + ")");
                     return;
                 }
                 sendData(it->seq, it->session, it->payload);

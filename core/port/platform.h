@@ -1,15 +1,15 @@
 /**
  * @file   platform.h
- * @brief  组合根注入给 core 的平台能力束
+ * @brief  Bundle of platform capabilities injected into core by the composition root
  * @author blt
  */
 
 // ============================================================================
-// core/port/platform.h —— 组合根注入给 core 的平台能力束
+// core/port/platform.h — bundle of platform capabilities injected into core by the composition root
 // ============================================================================
-// core 只依赖这里的接口 + OpenSSL + C++ stdlib，不出现任何平台头。
-// 每个平台的组合根（桌面 app/main.cpp、Android jni_bridge、各 tools）各自装配
-// 这些实现并注入。工厂用 std::function 是因为监听器/广播器需要"每用建一个"。
+// core depends only on the interfaces here + OpenSSL + the C++ stdlib; no platform headers appear.
+// Each platform's composition root (desktop app/main.cpp, Android jni_bridge, the various tools) assembles
+// these implementations and injects them. Factories use std::function because listeners/broadcasters need "one per use".
 #pragma once
 
 #include "port/bluetooth.h"
@@ -24,16 +24,16 @@
 namespace core {
 
 struct PlatformServices {
-    INetworkInfo* network = nullptr;      ///< 网卡 IP/MAC（AirPlay 广播与 0x4301 用）
-    IBluetooth*   bluetooth = nullptr;    ///< 蓝牙触发；不触发可为空
+    INetworkInfo* network = nullptr;      ///< NIC IP/MAC (for AirPlay advertising and 0x4301)
+    IBluetooth*   bluetooth = nullptr;    ///< Bluetooth trigger; may be null if no trigger
 
-    /// 建一个 TCP 监听器（RTSP/数据/事件端口各一个）
+    /// Create a TCP listener (one each for RTSP/data/event ports)
     std::function<std::unique_ptr<ITcpListener>()> makeTcpListener;
 
-    /// 建一个 mDNS 广播器（_airplay._tcp）
+    /// Create an mDNS broadcaster (_airplay._tcp)
     std::function<std::unique_ptr<IMdnsAdvertiser>()> makeMdnsAdvertiser;
 
-    /// 建一个 UDP socket（音频 RTP/RTCP）
+    /// Create a UDP socket (audio RTP/RTCP)
     std::function<std::unique_ptr<IUdpSocket>()> makeUdpSocket;
 };
 

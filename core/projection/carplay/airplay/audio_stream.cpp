@@ -32,7 +32,7 @@ AudioStream::AudioStream(std::function<std::unique_ptr<core::IUdpSocket>()> make
     std::string err;
     dataSock_ = makeUdp();
     if (!dataSock_ || !dataSock_->bind(0, &err)) {
-        LOG_WARN("音频数据 UDP 绑定失败：%s", err.c_str());
+        LOG_WARN("Audio data UDP bind failed: %s", err.c_str());
         return;
     }
     dataPort_ = dataSock_->port();
@@ -43,7 +43,7 @@ AudioStream::AudioStream(std::function<std::unique_ptr<core::IUdpSocket>()> make
 
     stop_.store(false);
     thread_ = std::thread([this] { run(); });
-    LOG_INFO("音频流就绪 dataPort=%u controlPort=%u（codec=%d %dHz %dch）",
+    LOG_INFO("Audio stream ready dataPort=%u controlPort=%u (codec=%d %dHz %dch)",
              dataPort_, controlPort_, int(codec_), sampleRate_, channels_);
 }
 
@@ -60,9 +60,9 @@ void AudioStream::stop()
 void AudioStream::run()
 {
     uint8_t buf[kMaxDatagram];
-    // 收包间隔看门狗：AAC 一帧 ~21ms，连续两帧之间超过 80ms 就是手机那边送不过来
-    // （或者我们这条线程被抢了）。这是"卡顿"最直接的物证 —— 把间隔和序号差打出来，
-    // 就能区分"网络晚到"和"解码/声卡跟不上"。
+    // Receive gap watchdog: an AAC frame is ~21ms, so >80ms between two frames means the phone cannot keep up
+    // (or our thread got preempted). This is the most direct evidence of "stuttering" — log the gap and sequence delta
+    // to distinguish "network arrived late" from "decoding/sound card cannot keep up".
     auto lastRx = std::chrono::steady_clock::now();
     uint16_t lastSeq = 0;
     bool haveLast = false;
@@ -70,33 +70,33 @@ void AudioStream::run()
 
     while (!stop_.load()) {
         const int n = dataSock_->recv(buf, sizeof buf, kTimeoutMs);
-        if (n <= 0) continue;   // 超时/关闭
+        if (n <= 0) continue;   // timeout/closed
 
         const auto now = std::chrono::steady_clock::now();
         const auto gapMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(now - lastRx).count();
         lastRx = now;
 
-        // wire = [12B RTP 头][密文][16B tag][8B nonce]
+        // wire = [12B RTP header][ciphertext][16B tag][8B nonce]
         if (size_t(n) < kRtpHeader + 16 + kNonceTail) continue;
 
         std::array<uint8_t, 12> nonce{};
-        std::memcpy(nonce.data() + 4, buf + n - kNonceTail, kNonceTail);   // 4 零 + 尾部 8B
+        std::memcpy(nonce.data() + 4, buf + n - kNonceTail, kNonceTail);   // 4 zero + trailing 8B
 
-        const size_t ctLen = size_t(n) - kRtpHeader - kNonceTail;          // 密文 + tag
+        const size_t ctLen = size_t(n) - kRtpHeader - kNonceTail;          // ciphertext + tag
         std::vector<uint8_t> pt;
         if (!crypto::chachaOpen(key_.data(), nonce,
-                                buf + 4, 8,             // AAD = 头[4..12]（timestamp+SSRC）
+                                buf + 4, 8,             // AAD = header[4..12] (timestamp+SSRC)
                                 buf + kRtpHeader, ctLen,
                                 &pt))
-            continue;   // 鉴权失败（丢包，非致命）
+            continue;   // authentication failed (drop packet, non-fatal)
 
         const uint32_t sample = (uint32_t(buf[4]) << 24) | (uint32_t(buf[5]) << 16) |
                                 (uint32_t(buf[6]) << 8) | uint32_t(buf[7]);
-        const uint16_t seq = uint16_t((buf[2] << 8) | buf[3]);   // RTP 序号（乱序重排用）
+        const uint16_t seq = uint16_t((buf[2] << 8) | buf[3]);   // RTP sequence number (for reordering)
         if (gapMs > 80 && gapLogs < 40) {
             ++gapLogs;
-            LOG_WARN("音频收包空档 %lldms（seq %u→%u，丢了 %d 个）", (long long)gapMs,
+            LOG_WARN("Audio receive gap %lldms (seq %u->%u, dropped %d)", (long long)gapMs,
                      unsigned(haveLast ? lastSeq : seq), unsigned(seq),
                      haveLast ? int(int16_t(uint16_t(seq - lastSeq)) - 1) : 0);
         }
@@ -109,9 +109,9 @@ void AudioStream::run()
                 char hx[64] = "";
                 for (size_t k = 0; k < pt.size() && k < 16; ++k)
                     std::snprintf(hx + std::strlen(hx), sizeof hx - std::strlen(hx), "%02x", pt[k]);
-                LOG_INFO("音频包 #1 payload=%zuB head=%s", pt.size(), hx);
+                LOG_INFO("Audio packet #1 payload=%zuB head=%s", pt.size(), hx);
             } else if (audioPkts % 500 == 0) {
-                LOG_INFO("音频包 #%llu payload=%zuB sample=%u", (unsigned long long)audioPkts,
+                LOG_INFO("Audio packet #%llu payload=%zuB sample=%u", (unsigned long long)audioPkts,
                          pt.size(), sample);
             }
         }
@@ -121,7 +121,7 @@ void AudioStream::run()
 
 void AudioStream::deliver(const uint8_t* payload, size_t len, uint32_t sample, uint16_t seq)
 {
-    // 16-bit RTP 序号 → 64-bit 扩展序号（有符号增量同时处理回绕与乱序）
+    // 16-bit RTP sequence number -> 64-bit extended sequence number (signed delta handles both wraparound and reordering)
     if (!haveSeq_) {
         haveSeq_ = true;
         nextSeq_ = seq;
@@ -131,11 +131,11 @@ void AudioStream::deliver(const uint8_t* payload, size_t len, uint32_t sample, u
         lastExt_ += int16_t(uint16_t(seq - lastRaw_));
         lastRaw_ = seq;
     }
-    if (lastExt_ < nextSeq_) return;   // 太晚到达（已播放过），丢弃
+    if (lastExt_ < nextSeq_) return;   // arrived too late (already played), drop
 
     pending_[lastExt_] = Pkt{std::vector<uint8_t>(payload, payload + len), sample};
 
-    // 按序吐出连续的包
+    // emit consecutive packets in order
     while (!pending_.empty() && pending_.begin()->first == nextSeq_) {
         auto it = pending_.begin();
         if (output_) output_->feed(it->second.payload.data(), it->second.payload.size(), it->second.sample);
@@ -143,8 +143,8 @@ void AudioStream::deliver(const uint8_t* payload, size_t len, uint32_t sample, u
         ++nextSeq_;
     }
 
-    // 防缓冲无限增长（缺一个包就一直等）：超过阈值强制吐最旧的，接受一次小跳变
-    constexpr size_t kMaxJitter = 8;   // ~170ms（48kHz AAC 每包 21.3ms）
+    // Prevent unbounded buffering (otherwise a single missing packet blocks forever): force-emit the oldest beyond the threshold, accepting one small jump
+    constexpr size_t kMaxJitter = 8;   // ~170ms (21.3ms per packet for 48kHz AAC)
     while (pending_.size() > kMaxJitter) {
         auto it = pending_.begin();
         if (output_) output_->feed(it->second.payload.data(), it->second.payload.size(), it->second.sample);

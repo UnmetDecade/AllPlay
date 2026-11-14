@@ -1,31 +1,31 @@
 /**
  * @file   sdl_audio_sink.h
- * @brief  core::IAudioOutput 的桌面实现：ffmpeg 软解 + SDL 音频设备
+ * @brief  Desktop implementation of core::IAudioOutput: ffmpeg software decode + SDL audio device
  * @author blt
  */
 
 // ============================================================================
-// host/media/sdl_audio_sink.h —— IAudioOutput：ffmpeg 软解 + SDL 音频设备
+// host/media/sdl_audio_sink.h -- IAudioOutput: ffmpeg software decode + SDL audio device
 // ============================================================================
-// 线程（由 core 的调用点决定，必须照做）：
-//   · configure() —— **RTSP 线程**（core/airplay/session.cpp:392，每次 SETUP 音频流）
-//   · feed()      —— AudioStream 线程（core/airplay/audio_stream.cpp:run）
-//   · serviceDevice() —— **主线程**（SDL 只在主线程开/关设备，见 appstate 的约定）
-//   · 音频回调    —— SDL 自己的音频线程（只从环形缓冲取数据）
+// Threads (dictated by the call sites in core, must be followed):
+//   · configure() -- **RTSP thread** (core/airplay/session.cpp:392, on every audio-stream SETUP)
+//   · feed()      -- AudioStream thread (core/airplay/audio_stream.cpp:run)
+//   · serviceDevice() -- **main thread** (SDL opens/closes devices only on the main thread; see the appstate contract)
+//   · audio callback -- SDL's own audio thread (only pulls data from the ring buffer)
 //
-// 乱序不用管：core 的 AudioStream::deliver() 已经按 RTP 序号重排、丢掉太晚到的包，
-// feed() 拿到的永远是按序的。这里只管解码 + 缓冲 + 喂设备。
+// Out-of-order handling is not needed: core's AudioStream::deliver() already reorders by RTP sequence and
+// drops late packets, so feed() always gets them in order. Here we only decode + buffer + feed the device.
 //
-// 三种载荷（core/port/media.h 的 AudioCodec）：
-//   · AAC_LC —— 裸帧，**没有 ADTS 头**，得自己按协商值造 2 字节 ASC 当 extradata；
-//               还会混进 ≤12 字节的配置小包，要忽略（当帧喂会让解码器一直报错）。
-//   · OPUS   —— 裸包，extradata 是最小 19 字节 OpusHead。
-//   · LPCM   —— 不解码，**大端 s16（网络序）转成主机序**后进环形缓冲。
+// Three payload kinds (AudioCodec in core/port/media.h):
+//   · AAC_LC -- raw frames, **no ADTS header**, so build a 2-byte ASC from the negotiated values as extradata;
+//               small <=12-byte config packets also slip in and must be ignored (feeding them as frames makes the decoder error out repeatedly).
+//   · OPUS   -- raw packets, extradata is a minimal 19-byte OpusHead.
+//   · LPCM   -- no decoding; **big-endian s16 (network order) converted to host order** goes into the ring buffer.
 //
-// 不引 swresample：解码器吐的是平面 float（FLTP），"平面 float → 交织 s16" 自己写
-// 三十行就够了，顺带绕开 swresample 那套在 4.4 与 5.1+ 之间签名不同的 channel-layout
-// 参数（见 media/ffmpeg_compat.h 的说明）。采样率不重采样 —— 设备就按协商值打开，
-// CarPlay 只会给 44100/48000，SDL 两个都原生支持。
+// No swresample: the decoder outputs planar float (FLTP), and "planar float -> interleaved s16" takes only
+// about thirty lines to write, which also sidesteps swresample's channel-layout argument, whose signature
+// differs between 4.4 and 5.1+ (see media/ffmpeg_compat.h). Sample rate is not resampled -- the device opens
+// at the negotiated rate, and CarPlay only sends 44100/48000, both natively supported by SDL.
 #pragma once
 
 #include "port/media.h"
@@ -56,75 +56,76 @@ public:
     void feed(const uint8_t* payload, size_t len, uint32_t sample) override;
     void reset() override;
 
-    // ---- 主线程 ----
-    /// 把 configure() 记下的待办开成 SDL 设备。没变化时立即返回，可以每帧调。
+    // ---- Main thread ----
+    /// Open the pending device recorded by configure() as an SDL device. Returns immediately if unchanged, so it can be called every frame.
     void serviceDevice();
 
-    // ---- 统计（任意线程读）----
-    uint64_t decoded() const { return decoded_.load(); }   ///< 解出并写进环形缓冲的帧数
-    uint64_t dropped() const { return dropped_.load(); }   ///< 缓冲溢出、被迫丢最旧的次数
-    /// 回调没能拿满一块的次数。⚠️ 无头跑（SDL_AUDIODRIVER=dummy）时这个数**不可当音质指标**：
-    /// dummy 声卡不按实时节奏回调，抖动全算在它头上。真机上才有参考价值。
+    // ---- Stats (read from any thread) ----
+    uint64_t decoded() const { return decoded_.load(); }   ///< Frames decoded and written into the ring buffer
+    uint64_t dropped() const { return dropped_.load(); }   ///< Times the buffer overflowed and the oldest had to be dropped
+    /// Times the callback could not get a full chunk. ⚠️ When running headless (SDL_AUDIODRIVER=dummy) this number **must not be used as a sound-quality metric**:
+    /// the dummy device does not call back in real time, so all the jitter is attributed to it. Only meaningful on real hardware.
     uint64_t underruns() const { return underruns_.load(); }
 
     bool deviceOpen() const { return dev_ != 0; }
 
 private:
-    /// 环形缓冲能容纳的 s16 样本数（单声道计），约 2 秒。
+    /// Number of s16 samples the ring buffer holds (mono count), about 2 seconds.
     static constexpr size_t kRingSamples = 48000 * 2;
-    /// SDL 每次回调要的帧数（协商采样率下 ≈21ms @48k）。
+    /// Frames SDL requests per callback (about 21 ms @48k at the negotiated rate).
     static constexpr int    kChunkFrames = 1024;
-    /// 攒够这么多块才启播。手机是按**实时速率**发的，一开声卡就放等于从空缓冲起步，
-    /// 前几块必然欠载 —— 垫 ~43ms 上去，同时不至于给音画同步添太多延迟。
-    /// （具体几块是经验值：SDL 的 dummy 声卡本身不精确回调，这个数在无头环境下
-    ///   量不出差别，取值以"够挡住起播那一下"为准。）
+    /// Accumulate this many chunks before starting playback. The phone sends at **real-time rate**, so playing
+    /// as soon as the device opens starts from an empty buffer and the first few chunks inevitably underrun --
+    /// pad about 43 ms in, without adding too much A/V sync latency.
+    /// (The exact chunk count is empirical: SDL's dummy device does not call back precisely, so this number
+    ///   makes no measurable difference headless; the value just needs to cover the startup hiccup.)
     static constexpr int    kStartChunks = 2;
 
     struct Config {
         core::AudioCodec codec = core::AudioCodec::LPCM;
         int rate     = 48000;
         int channels = 2;
-        bool valid   = false;   ///< false = 没有音频流，应关掉设备
+        bool valid   = false;   ///< false = no audio stream, the device should be closed
     };
 
     static void sdlCallback(void* user, Uint8* stream, int len);
 
-    /// feed() 的解码路径：喂一包给解码器，把解出的帧转成 s16 追进环形缓冲。持锁调用。
+    /// feed() decode path: feed one packet to the decoder and append decoded frames as s16 to the ring buffer. Call with the lock held.
     void decodeLocked(const uint8_t* payload, size_t len);
-    /// 把一帧（平面 float 或 s16）转成交织 s16 追进环形缓冲。持锁调用。
+    /// Convert one frame (planar float or s16) to interleaved s16 and append it to the ring buffer. Call with the lock held.
     void appendFrameLocked(const AVFrame* f);
-    /// 环形缓冲写入，溢出丢**最旧**的（保低延迟，同视频队列的思路）。持锁调用。
+    /// Write to the ring buffer, dropping the **oldest** on overflow (keep latency low, same idea as the video queue). Call with the lock held.
     void pushLocked(const int16_t* d, size_t n);
 
     void closeDecoderLocked();
-    /// 按 codec 造解码器（extradata 自己合成）。持锁调用。
+    /// Create the decoder for codec (extradata synthesized here). Call with the lock held.
     bool openDecoderLocked();
 
     mutable std::mutex mu_;
 
-    // —— 受 mu_ 保护 ——
+    // -- Guarded by mu_ --
     Config                     cfg_;
-    bool                       deviceDirty_ = false;   ///< configure() 置位，主线程消费
+    bool                       deviceDirty_ = false;   ///< Set by configure(), consumed by the main thread
     AVCodecContext*            dec_ = nullptr;
     AVPacket*                  pkt_ = nullptr;
     AVFrame*                   frame_ = nullptr;
     std::vector<int16_t>       ring_;
-    std::vector<int16_t>       scratch_;               ///< 解码帧 → 交织 s16 的落脚点
-    std::vector<int16_t>       pcmSwap_;               ///< LPCM 大端 → 主机序的落脚点
-    size_t                     head_ = 0, size_ = 0;   ///< 环形缓冲读位置 / 已存样本数
+    std::vector<int16_t>       scratch_;               ///< Landing buffer for decoded frame -> interleaved s16
+    std::vector<int16_t>       pcmSwap_;               ///< Landing buffer for LPCM big-endian -> host order
+    size_t                     head_ = 0, size_ = 0;   ///< Ring buffer read position / stored sample count
     std::atomic<uint64_t>      decoded_{0};
     std::atomic<uint64_t>      dropped_{0};
     std::atomic<uint64_t>      underruns_{0};
-    bool                       stop_ = false;          ///< 析构时置位，回调让路
+    bool                       stop_ = false;          ///< Set on destruction so the callback steps aside
 
-    /// 启播阈值（样本数 = 块数 × 每块帧数 × 声道），configure 时算好。
+    /// Playback threshold (samples = chunks x frames per chunk x channels), computed at configure time.
     size_t                     startSamples_ = 0;
 
-    // —— 只在主线程碰 ——
+    // -- Touched only on the main thread --
     SDL_AudioDeviceID dev_ = 0;
-    bool              playing_ = false;   ///< 是否已放行回调（攒够垫底才置真）
+    bool              playing_ = false;   ///< Whether the callback is unblocked (true only once enough has accumulated)
 
-    // 只读快照，供调用方无锁读取（configure 时写）
+    // Read-only snapshot for lock-free reads by callers (written at configure time)
     std::atomic<int> outRate_{0};
     std::atomic<int> outChannels_{0};
 };

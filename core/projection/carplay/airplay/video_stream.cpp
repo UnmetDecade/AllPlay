@@ -23,12 +23,12 @@ ScreenStream::ScreenStream(std::unique_ptr<core::ITcpListener> listener,
       onNeedKeyFrame_(std::move(onNeedKeyFrame)), width_(width), height_(height)
 {
     port_ = listener_->port();
-    // 流密钥：salt = "DataStream-Salt" + streamConnectionID(无符号十进制)
+    // Stream key: salt = "DataStream-Salt" + streamConnectionID (unsigned decimal)
     const std::string salt = "DataStream-Salt" + streamConnectionIdDecimal;
     key_ = crypto::hkdfSha512(sharedSecret, salt, "DataStream-Output-Encryption-Key", 32);
     stop_.store(false);
     thread_ = std::thread([this] { run(); });
-    LOG_INFO("屏幕流就绪 :%u（streamConnectionID=%s）", port_, streamConnectionIdDecimal.c_str());
+    LOG_INFO("Screen stream ready :%u (streamConnectionID=%s)", port_, streamConnectionIdDecimal.c_str());
 }
 
 ScreenStream::~ScreenStream() { stop(); }
@@ -51,8 +51,8 @@ void ScreenStream::run()
     while (!stop_.load()) {
         auto stream = listener_->accept(200);
         if (!stream) continue;
-        LOG_INFO("屏幕流：手机连入数据端口 :%u", port_);
-        handleConnection(*stream);   // 单连接，阻塞到断开
+        LOG_INFO("Screen stream: phone connected to data port :%u", port_);
+        handleConnection(*stream);   // single connection, blocks until disconnect
     }
 }
 
@@ -81,64 +81,64 @@ void ScreenStream::handleConnection(core::ITcpStream& stream)
         }
 
         if (opcode == 1) {
-            // 明文配置帧：avcC/hvcC
+            // plaintext config frame: avcC/hvcC
             core::VideoCodec codec;
             std::vector<uint8_t> codecData;
             if (detectConfig(body, &codec, &codecData)) {
                 codec_ = codec;
                 if (video_) video_->configure(codec, width_, height_, codecData);
                 configured_ = true;
-                needsKeyFrame_ = true;   // 换配置后等新关键帧
+                needsKeyFrame_ = true;   // wait for a new keyframe after config change
                 char hx[160] = "";
                 for (size_t k = 0; k < codecData.size() && k < 48; ++k)
                     std::snprintf(hx + strlen(hx), sizeof hx - strlen(hx), "%02x", codecData[k]);
-                LOG_INFO("屏幕流：收到配置帧（%s，%zu 字节）codecData=%s",
+                LOG_INFO("Screen stream: received config frame (%s, %zu bytes) codecData=%s",
                          codec == core::VideoCodec::HEVC ? "hvcC" : "avcC", codecData.size(), hx);
             }
             continue;
         }
 
-        // opcode 0：加密视频帧
+        // opcode 0: encrypted video frame
         std::vector<uint8_t> pt;
         if (body.size() >= 16) {
             if (!crypto::chachaOpen(key_.data(), crypto::nonce64(counter_),
                                     header, kHeaderLen, body.data(), body.size(), &pt))
-                return;   // 鉴权失败 → 断流
+                return;   // authentication failed -> end stream
             ++counter_;
         } else {
-            pt = std::move(body);   // 防御：短 body 当明文（防御性兜底）
+            pt = std::move(body);   // defensive: treat a short body as plaintext (fallback)
         }
 
         if (frames_ == 0) {
             char hx[128] = "";
             for (size_t k = 0; k < pt.size() && k < 24; ++k)
                 std::snprintf(hx + strlen(hx), sizeof hx - strlen(hx), "%02x", pt[k]);
-            LOG_INFO("屏幕流：首个解密帧明文 head=%s", hx);
+            LOG_INFO("Screen stream: first decrypted frame plaintext head=%s", hx);
         }
 
         auto annexb = avccToAnnexB(pt);
-        if (annexb.empty() || !configured_) continue;   // 没配置帧前丢帧
+        if (annexb.empty() || !configured_) continue;   // drop frames until a config frame arrives
 
         const bool ra = isRandomAccess(codec_, annexb.data(), annexb.size());
         ++frames_;
         ++winFrames_;
         winBytes_ += annexb.size();
         if (frames_ <= 5 || frames_ % 300 == 0)
-            LOG_INFO("屏幕流：视频帧 %zuB %s%s", annexb.size(), ra ? "IDR" : "非IDR",
-                     (needsKeyFrame_ && !ra) ? "（闸门拦）" : "→解码");
+            LOG_INFO("Screen stream: video frame %zuB %s%s", annexb.size(), ra ? "IDR" : "non-IDR",
+                     (needsKeyFrame_ && !ra) ? "(gated)" : "->decode");
 
-        // IDR 自含（instant decoder refresh），解码器解到 IDR 会自动重置参考链，无需显式 flush。
-        // 注意：不能在首帧输出前 flush——MediaCodec.flush() 会丢掉 configure 时设的 CSD，导致永久黑屏。
-        if (needsKeyFrame_ && !ra) {                    // 闸门：等关键帧
+        // IDR is self-contained (instant decoder refresh); the decoder resets the reference chain on IDR, so no explicit flush is needed.
+        // NOTE: do not flush before the first frame is output — MediaCodec.flush() drops the CSD set at configure time, causing a permanent black screen.
+        if (needsKeyFrame_ && !ra) {                    // gate: wait for a keyframe
             ++winGated_;
             reportWindow();
             continue;
         }
         if (ra) needsKeyFrame_ = false;
         if (video_ && !video_->feedAnnexB(annexb.data(), annexb.size())) {
-            needsKeyFrame_ = true;            // 入队失败（丢帧）→ 重新放闸，等下一个关键帧
+            needsKeyFrame_ = true;            // enqueue failed (dropped frame) -> re-arm the gate, wait for the next keyframe
             ++winDrop_;
-            if (onNeedKeyFrame_) onNeedKeyFrame_();   // 立刻请关键帧，别等 5s 盲发
+            if (onNeedKeyFrame_) onNeedKeyFrame_();   // request a keyframe immediately instead of waiting 5s
         }
         reportWindow();
     }
@@ -150,7 +150,7 @@ void ScreenStream::reportWindow()
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - winStart_).count();
     if (ms < 5000) return;
     const double sec = double(ms) / 1000.0;
-    LOG_INFO("屏幕流：%.1fs 内 %llu 帧（%.1f fps），%.0f KB/s，闸门拦 %llu，交不出 %llu",
+    LOG_INFO("Screen stream: %.1fs, %llu frames (%.1f fps), %.0f KB/s, gated %llu, failed to deliver %llu",
              sec, (unsigned long long)winFrames_, double(winFrames_) / sec,
              double(winBytes_) / 1024.0 / sec, (unsigned long long)winGated_,
              (unsigned long long)winDrop_);
@@ -161,7 +161,7 @@ void ScreenStream::reportWindow()
 bool ScreenStream::detectConfig(const std::vector<uint8_t>& body, core::VideoCodec* codec,
                                 std::vector<uint8_t>* codecData)
 {
-    // 扫 ASCII "hvcC"/"avcC"（fourcc 之后的字节 = avcC/hvcC 盒体内容）
+    // Scan for ASCII "hvcC"/"avcC" (bytes after the fourcc = avcC/hvcC box body)
     for (size_t i = 0; i + 4 <= body.size(); ++i) {
         if (std::memcmp(body.data() + i, "hvcC", 4) == 0) {
             *codec = core::VideoCodec::HEVC;
@@ -174,7 +174,7 @@ bool ScreenStream::detectConfig(const std::vector<uint8_t>& body, core::VideoCod
             return true;
         }
     }
-    // 兜底：looksLikeAvcC（裸 avcC，无 fourcc）——按协议判定
+    // Fallback: looksLikeAvcC (bare avcC, no fourcc) — decided per the protocol
     if (body.size() >= 9 && (body[5] & 0x1f) >= 1) {
         const uint16_t spsLen = uint16_t((body[6] << 8) | body[7]);
         if (spsLen > 0 && (body[8] & 0x1f) == 7) {
@@ -188,15 +188,15 @@ bool ScreenStream::detectConfig(const std::vector<uint8_t>& body, core::VideoCod
 
 std::vector<uint8_t> ScreenStream::avccToAnnexB(const std::vector<uint8_t>& p)
 {
-    // 已 AnnexB → 短路
+    // already AnnexB -> short-circuit
     if (p.size() >= 4 && p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1) return p;
 
-    // 校验：整段都是 4B 大端长度前缀的 NALU，且恰好填满
+    // Validate: the whole buffer is 4B big-endian length-prefixed NALUs and exactly filled
     size_t off = 0;
     while (off + 4 <= p.size()) {
         const uint32_t n = (uint32_t(p[off]) << 24) | (uint32_t(p[off + 1]) << 16) |
                            (uint32_t(p[off + 2]) << 8) | uint32_t(p[off + 3]);
-        if (n == 0 || off + 4 + n > p.size()) return p;   // 非法 → 原样
+        if (n == 0 || off + 4 + n > p.size()) return p;   // invalid -> return as-is
         off += 4 + n;
     }
     if (off != p.size()) return p;
@@ -216,13 +216,13 @@ std::vector<uint8_t> ScreenStream::avccToAnnexB(const std::vector<uint8_t>& p)
 
 bool ScreenStream::isRandomAccess(core::VideoCodec codec, const uint8_t* d, size_t n)
 {
-    // 必须扫**整个访问单元**，不能只看第一个 NAL：
-    // 关键帧 AU 的常见排布是 [SPS][PPS][IDR]（手机在关键帧处会内联重发参数集），
-    // 只看首个 NAL 就会读到 SPS(7) 而判成"非关键帧"——闸门于是永远打不开，
-    // 症状是"配置帧收到了、解码器也建好了，但一直黑屏"。真机与假手机都会踩。
+    // Must scan the **entire access unit**, not just the first NAL:
+    // A keyframe AU is commonly laid out as [SPS][PPS][IDR] (the phone inlines parameter sets at keyframes),
+    // so looking only at the first NAL reads SPS(7) and classifies it as a "non-keyframe" — the gate then never opens,
+    // with the symptom "config frame received, decoder created, but the screen stays black". Both real and fake phones hit this.
     //
-    // 这样扫是安全的：H.264 载荷有防竞争字节（emulation prevention），
-    // NAL 载荷内部不可能出现 00 00 01，不会把载荷误当成起始码。
+    // Scanning this way is safe: H.264 payloads use emulation prevention bytes,
+    // so 00 00 01 cannot appear inside a NAL payload and payload data is never mistaken for a start code.
     size_t i = 0;
     while (i + 3 <= n) {
         size_t sc = 0;
@@ -232,7 +232,7 @@ bool ScreenStream::isRandomAccess(core::VideoCodec codec, const uint8_t* d, size
         }
         if (sc == 0) { ++i; continue; }
 
-        const size_t h = i + sc;            // NAL 头字节
+        const size_t h = i + sc;            // NAL header byte
         if (h >= n) break;
         if (codec == core::VideoCodec::H264) {
             if ((d[h] & 0x1f) == 5) return true;            // IDR
@@ -240,7 +240,7 @@ bool ScreenStream::isRandomAccess(core::VideoCodec codec, const uint8_t* d, size
             const int type = (d[h] >> 1) & 0x3f;
             if (type >= 16 && type <= 21) return true;      // HEVC IRAP 16..21
         }
-        i = h + 1;                          // 继续找下一个 NAL
+        i = h + 1;                          // continue to the next NAL
     }
     return false;
 }

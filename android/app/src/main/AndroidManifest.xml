@@ -1,27 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 蓝牙（发现/连接 SPP） -->
+    <!-- Bluetooth (discover/connect SPP) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
 
-    <!-- mDNS（NsdManager 广播 _airplay._tcp / 发现 _carplay-ctrl._tcp） -->
+    <!-- mDNS (NsdManager advertises _airplay._tcp / discovers _carplay-ctrl._tcp) -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
 
-    <!-- 网络 + 前台服务 -->
+    <!-- Network + foreground service -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Amlogic 4.4 的 setWifiApEnabled 写系统设置需要 WRITE_SETTINGS（签名级，root 下用 pm grant 授予） -->
+    <!-- Amlogic 4.4's setWifiApEnabled writes system settings, which requires WRITE_SETTINGS (signature-level; grant with pm grant under root) -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
-    <!-- JmDNS 广播需要 MulticastLock -->
+    <!-- JmDNS advertising needs a MulticastLock -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <!-- 后台保活：进程/CPU 不休眠 + 申请电池优化豁免，避免退后台被 Doze 杀进程/断热点 -->
+    <!-- Background keep-alive: keep the process/CPU awake + request a battery optimization exemption so Doze does not kill the process or drop the hotspot in the background -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 

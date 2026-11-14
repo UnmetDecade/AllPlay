@@ -4,7 +4,7 @@ import android.app.Application
 import android.view.Surface
 
 /**
- * 进程级单例：让 MainActivity 能把 Surface 交给常驻服务（避免复杂 Binder）。
+ * Process-level singleton: lets MainActivity hand the Surface to the resident service (avoiding a complex Binder).
  */
 class AllPlayApp : Application() {
     var service: AllPlaySessionService? = null

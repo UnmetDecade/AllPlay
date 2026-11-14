@@ -1,18 +1,18 @@
 /**
  * @file   proto.h
- * @brief  极简 protobuf wire 编解码（只覆盖 AAP 用到的子集，不引 protobuf 库）
+ * @brief  Minimal protobuf wire codec (covers only the subset AAP uses; no protobuf library)
  * @author blt
  */
 
 // ============================================================================
-// core/projection/androidauto/proto.h —— 极简 protobuf wire 编解码
+// core/projection/androidauto/proto.h - Minimal protobuf wire codec
 // ============================================================================
-// Android Auto 的 AAP 消息体是 protobuf。本项目原则是"只依赖系统库"，所以这里
-// 只实现 wire format 的最小子集：
-//   · varint（type 0）—— int32 / int64 / uint32 / uint64 / bool / enum
-//   · length-delimited（type 2）—— string / bytes / 嵌套消息
-// 不生成 .proto、不引 libprotobuf。字段号与类型见 docs/projection-backend.md
-// 引用的 AASDK 定义。
+// Android Auto's AAP message bodies are protobuf. This project only depends on system libraries, so here
+// we implement only the minimal subset of the wire format:
+//   · varint (type 0) -- int32 / int64 / uint32 / uint64 / bool / enum
+//   · length-delimited (type 2) -- string / bytes / nested messages
+// No .proto generation and no libprotobuf. Field numbers and types follow the AASDK definitions
+// referenced by docs/projection-backend.md.
 #pragma once
 
 #include <cstddef>
@@ -46,7 +46,7 @@ inline void putUInt(std::vector<uint8_t>& out, uint32_t field, uint64_t v)
 
 inline void putInt(std::vector<uint8_t>& out, uint32_t field, int64_t v)
 {
-    // 负数按补码的 64 位 varint 编（protobuf 的规定）
+    // Negative numbers are encoded as 64-bit two's complement varints (per the protobuf spec)
     putUInt(out, field, uint64_t(v));
 }
 
@@ -74,12 +74,12 @@ inline void putMessage(std::vector<uint8_t>& out, uint32_t field,
     putBytes(out, field, body.data(), body.size());
 }
 
-/// 顺序读取器：只处理本项目用得到的字段。
+/// Sequential reader: handles only the fields this project needs.
 class Reader {
 public:
     Reader(const uint8_t* data, size_t len) : p_(data), end_(data + len) {}
 
-    /// 读下一个字段。返回 false = 读完 / 数据损坏。
+    /// Read the next field. false = end of data / corrupt data.
     bool next(uint32_t* field, WireType* wt, uint64_t* varint,
               const uint8_t** bytes, size_t* bytesLen)
     {
@@ -114,10 +114,10 @@ public:
             p_ += 4;
             return true;
         }
-        return false;   // 不支持的类型（group 等）—— 当作数据损坏
+        return false;   // Unsupported type (group etc.) -- treat as corrupt data
     }
 
-    /// 取一个 varint 字段（找不到返回 fallback）。
+    /// Get a varint field (returns fallback if not found).
     static uint64_t getVarint(const uint8_t* data, size_t len, uint32_t wanted,
                               uint64_t fallback = 0)
     {

@@ -1,255 +1,357 @@
-# 协议笔记（实现依据）
+# Protocol Notes (Implementation Basis)
 
-> **性质**：这是**协议行为事实**的整理（2026-10-10 核查得出），不是代码。
-> 本项目的实现是**基于 DiPlay / xcertplay（GPL-3.0）的 C++ 重新实现**，逐条对照这里的格式/流程，并在真机上验证。
-> 每条都带"为什么要这样"的语境；实现时如与真机行为冲突，**以真机为准并回来改这份文档**。
+<div align="left"><b>English</b> · <a href="PROTOCOL-NOTES.zh-CN.md">简体中文</a></div>
 
-## 0. 三条链路总览
+> **Nature**: this is an organized record of **protocol behavior facts** (checked
+> 2026-10-10), not code.
+> This project's implementation is a **C++ reimplementation based on DiPlay / xcertplay
+> (GPL-3.0)**, matching the formats/flows here item by item and verified on real devices.
+> Every entry carries the "why it is this way" context; when implementing, if something
+> conflicts with real-device behavior, **the device wins — and come back and fix this
+> document**.
 
-```
-iPhone ──(1) 蓝牙 RFCOMM / iAP2 bootstrap（触发+MFi+推配置）──▶ 我们
-       └─(2) 同一局域网：AirPlay 会话（RTSP + 屏幕流 TCP）────▶ 我们
-       ◀─(3) 事件通道：HID/触摸/命令（加密，POST /command）──  我们
-```
-
-**有线（USB）是另一条独立的接入路径**，走到 (2)(3) 之后与上面完全汇合：
+## 0. Overview of the three paths
 
 ```
-iPhone ──(0) USB：切进 CarPlay 配置，打开 USBMUX 口 ─────────▶ 我们
-       ──(1') usbmux v2 → lockdown 配对 → 原地 TLS → carkit 服务流
-       ──(2') 该服务流上跑 iAP2：主机主动 marker+SYN → 识别 → MFi → 电源/订阅
-       ◀──(3') 0x4300 CarPlayAvailability ──────────────────── 我们
-       ──▶(4') 0x4301 CarPlayStartSession（报本端 IPv6 链路本地 + 端口）
-       ──(5') 手机照该地址连过来 → 汇入 (2)(3)
+iPhone ──(1) Bluetooth RFCOMM / iAP2 bootstrap (trigger + MFi + push config)──▶ us
+       └─(2) same LAN: AirPlay session (RTSP + screen stream TCP)────────────▶ us
+       ◀─(3) event channel: HID/touch/commands (encrypted, POST /command)──   us
 ```
 
-差别全在"谁先开口"和"地址谁定"：无线是**我们广播、手机找过来**；有线是**手机问、我们答**，
-地址由我们钉在内核 NCM 网卡上再报给它。详见 [§10](#10-有线usb接入2026-10-13)。
+**Wired (USB) is a separate access path**, and after reaching (2)(3) it merges completely
+with the above:
+
+```
+iPhone ──(0) USB: switch into CarPlay configuration, open USBMUX port ───────▶ us
+       ──(1') usbmux v2 → lockdown pairing → in-place TLS → carkit service stream
+       ──(2') iAP2 runs on that service stream: host initiates marker+SYN → identify → MFi → power/subscriptions
+       ◀──(3') 0x4300 CarPlayAvailability ──────────────────────────────────── us
+       ──▶(4') 0x4301 CarPlayStartSession (report local IPv6 link-local + port)
+       ──(5') the phone connects to that address → merges into (2)(3)
+```
+
+The difference is entirely "who speaks first" and "who chooses the address": wireless is
+**we advertise, the phone finds us**; wired is **the phone asks, we answer**, with the
+address pinned by us on the kernel NCM NIC and then reported to it. See
+[§10](#10-wired-usb-access-2026-10-13).
 
 ---
 
-## 1. 蓝牙 / iAP2 触发（M2）
+## 1. Bluetooth / iAP2 trigger (M2)
 
-### 1.1 前置
-- iPhone 需**先与本机蓝牙配对**（bonded）。参照行为：只挑已配对的名字含 "iPhone" 的设备，优先"已连接"的。
-- 连的是**手机上的 SPP 服务**（我方是 RFCOMM 客户端）：
-  UUID `00000000-deca-fade-deca-deafdecacafe`。
-- 备选（若真机验证走这条）：我方注册 SDP 记录 "Wireless iAPv2" 等服务端连接。
-  **两条路都留实现余地，真机定夺。**
+### 1.1 Prerequisites
+- The iPhone must **first be Bluetooth-paired (bonded) with this machine**. Reference
+  behavior: only pick already-paired devices whose name contains "iPhone", preferring
+  "connected" ones.
+- We connect to the **SPP service on the phone** (we are the RFCOMM client):
+  UUID `00000000-deca-fade-deca-deafdecacafe`.
+- Alternative (if real-device verification goes this way): we register an SDP record
+  "Wireless iAPv2" and wait for the phone to connect as a client.
+  **Leave room for both paths; let the device decide.**
 
-### 1.2 iAP2 链路层
-- 起始 marker：`FF 55 02 00 EE 10`（6 字节，链路同步用）。
-- 数据帧 9 字节头：`0xFF5A | u16 长度 | u8 控制 | u8 seq | u8 ack | u8 sessionId | u8 checksum`；
-  **checksum = 帧内所有字节(含自身)之和 ≡ 0 (mod 256)**。
-- 控制位：SYN 0x80 / ACK 0x40 / EAK 0x20 / RST 0x10；session：10=控制、11=EA、12=文件传输。
-- 同步载荷 v1：maxOutgoing/maxLength/重传超时/最大重传与 ACK 数/session 描述表；初始 seq=99；重传 4s、最多 4 次；滑动窗口。
+### 1.2 iAP2 link layer
+- Start marker: `FF 55 02 00 EE 10` (6 bytes, for link synchronization).
+- Data frame 9-byte header: `0xFF5A | u16 length | u8 control | u8 seq | u8 ack | u8
+  sessionId | u8 checksum`;
+  **checksum = sum of all bytes in the frame (including itself) ≡ 0 (mod 256)**.
+- Control bits: SYN 0x80 / ACK 0x40 / EAK 0x20 / RST 0x10; session: 10=control, 11=EA,
+  12=file transfer.
+- Sync payload v1: maxOutgoing/maxLength/retransmit timeout/max retransmits and ACKs/
+  session descriptor table; initial seq=99; retransmit 4s, at most 4 times; sliding
+  window.
 
-### 1.3 CSM 消息层
-- 帧：`0x4040 | u16 长度 | u16 msgId | 参数列表`（大端，无 checksum）。
-- 参数：`u16 长度 | u16 paramId | 载荷`；按对端 session-10 最大载荷分片。
+### 1.3 CSM message layer
+- Frame: `0x4040 | u16 length | u16 msgId | parameter list` (big-endian, no checksum).
+- Parameter: `u16 length | u16 paramId | payload`; fragmented according to the peer's
+  session-10 maximum payload.
 
-### 1.4 消息流程（无线）
-1. **识别**：`0x1D00 StartIdentification` → `0x1D01 IdentificationInformation` → `0x1D02 accepted`。
-   识别信息里含：我方 EA 协议名、蓝牙链路角色（BOOTSTRAP）、消息列表（我们发的/收的/订阅的）、
-   **群组 17 "blue" 用本机蓝牙 MAC**、群组 24 SSID 等。
-2. **MFi 认证**：`0xAA00 RequestCertificate` → `0xAA01 (证书)` → `0xAA02 challenge` → `0xAA03 (签名)` → `0xAA04 失败 / 0xAA05 成功`。
-   签名与证书由 MFi 配件身份提供（见 §5.4）。
-3. **订阅**：0x4157 / 0x5200 / 0xAE00 / 0x5000 / 0x4154（各有语义，参照清单）。
-4. 收到手机 **`0x5702 RequestAccessoryWiFiConfiguration`** → 回 **`0x5703 AccessoryWiFiConfiguration`**：
-   `ssid / passphrase / securityType / channel / [bssid 提示]`（同一局域网模式：填**现有**网络信息）。
-5. 收到手机 **`0x4300 CarPlayAvailability`** → 发 **`0x4301 CarPlayStartSession`**：
-   - group 1（无线）：`ssid / passphrase / channel / ipAddresses[] / securityType`
-   - base 参数：`airPlayPort`(u32)、`deviceIdentifier`、`publicKey`(Ed25519 公钥)、`sourceVersion`
-   - **发送后起 30s watchdog：等 AirPlay TCP 连入；超时则结束本次尝试并重试。**
-6. 收到 `0x4E0E DeviceTransportIdentifier` → **重发一次 0x5703**（走"transport 后"路径）；跟踪 `0x4E0D WirelessCarPlayUpdate`。
+### 1.4 Message flow (wireless)
+1. **Identification**: `0x1D00 StartIdentification` → `0x1D01 IdentificationInformation`
+   → `0x1D02 accepted`.
+   The identification information contains: our EA protocol name, Bluetooth link role
+   (BOOTSTRAP), message list (what we send/receive/subscribe to),
+   **group 17 "blue" using this machine's Bluetooth MAC**, group 24 SSID, etc.
+2. **MFi authentication**: `0xAA00 RequestCertificate` → `0xAA01 (certificate)` → `0xAA02
+   challenge` → `0xAA03 (signature)` → `0xAA04 failure / 0xAA05 success`.
+   The signature and certificate come from the MFi accessory identity (see §5.4).
+3. **Subscriptions**: 0x4157 / 0x5200 / 0xAE00 / 0x5000 / 0x4154 (each has semantics; see
+   the reference list).
+4. Receiving the phone's **`0x5702 RequestAccessoryWiFiConfiguration`** → reply
+   **`0x5703 AccessoryWiFiConfiguration`**:
+   `ssid / passphrase / securityType / channel / [bssid hint]` (same-LAN mode: fill in the
+   **existing** network information).
+5. Receiving the phone's **`0x4300 CarPlayAvailability`** → send **`0x4301
+   CarPlayStartSession`**:
+   - group 1 (wireless): `ssid / passphrase / channel / ipAddresses[] / securityType`
+   - base parameters: `airPlayPort`(u32), `deviceIdentifier`, `publicKey`(Ed25519 public
+     key), `sourceVersion`
+   - **After sending, start a 30s watchdog: wait for the AirPlay TCP connection; on
+     timeout, end this attempt and retry.**
+6. Receiving `0x4E0E DeviceTransportIdentifier` → **resend 0x5703 once** (the
+   "post-transport" path); track `0x4E0D WirelessCarPlayUpdate`.
 
 ---
 
-## 2. Bonjour（M1）
+## 2. Bonjour (M1)
 
-- **广播** `_airplay._tcp`（用系统 Avahi），TXT：
-  `deviceid`(本机网卡 MAC)、`features`(CarPlay 特性位，含 CarPlayControl)、`flags=0x4`、
-  `model`、`srcvers`、`protovers=1.1`、`pi`(配对 UUID)、`pk`(Ed25519 公钥 hex)。
-- **发现** 手机的 `_carplay-ctrl._tcp`，解析出地址后探测：
-  `GET /ctrl-int/1/connect`，带请求头 `AirPlay-Receiver-Device-ID: <deviceid>`；
-  重试 7 次、间隔 1.5s、连接/读超时 3s。**这个"戳一下"会促使手机发起 RTSP 连接。**
+- **Advertise** `_airplay._tcp` (using system Avahi), TXT:
+  `deviceid`(this machine's NIC MAC), `features`(CarPlay feature bits, including
+  CarPlayControl), `flags=0x4`,
+  `model`, `srcvers`, `protovers=1.1`, `pi`(pairing UUID), `pk`(Ed25519 public key hex).
+- **Discover** the phone's `_carplay-ctrl._tcp`, resolve the address, then probe:
+  `GET /ctrl-int/1/connect`, with request header `AirPlay-Receiver-Device-ID: <deviceid>`;
+  retry 7 times at 1.5s intervals, connect/read timeout 3s. **This "poke" prompts the phone
+  to initiate the RTSP connection.**
 
 ---
 
-## 3. AirPlay 会话（M3）
+## 3. AirPlay session (M3)
 
-### 3.1 端点（RTSP over TCP，默认 :7000，被占自动换；**实际端口必须出现在 Bonjour TXT 与 0x4301 里**）
-| 方法 | 路径 | 说明 |
+### 3.1 Endpoints (RTSP over TCP, default :7000, automatically changed if occupied; **the actual port must appear in the Bonjour TXT and in 0x4301**)
+| Method | Path | Notes |
 |---|---|---|
-| GET | `/info` | 返回 bplist：sourceVersion、features、statusFlags=4、model/manufacturer、deviceID、pi/pk、displays（主屏 UUID 等）、HID 设备声明 |
-| POST | `/auth-setup` | MFi-SAP（见 §5.4）；`encryptionType=MFiSAPv1` |
-| POST | `/pair-setup` | SRP-6a（见 §5.1） |
-| POST | `/pair-verify` | X25519+Ed25519（见 §5.2） |
-| SETUP | — | 第一批（无 streams）：手机给 timingPort/macAddress 等；**我们回 eventPort / timingPort**；第二批 streams[]：**110 主屏 / 111 副屏** → 回 `{type, dataPort}`；100/101/102 音频（解码播放）；130 数据（iAP 隧道，可后置） |
-| RECORD | — | 会话活跃（"视频要来了"的里程碑点） |
-| POST | `/command` | 见 §6；`forceKeyFrame` 用于关键帧恢复 |
-| POST | `/feedback` | 每流 streamConnectionID/timestamp/sampleTime（NTP 同步时间） |
-| TEARDOWN | — | 收尾 |
+| GET | `/info` | Returns bplist: sourceVersion, features, statusFlags=4, model/manufacturer, deviceID, pi/pk, displays (main display UUID, etc.), HID device declarations |
+| POST | `/auth-setup` | MFi-SAP (see §5.4); `encryptionType=MFiSAPv1` |
+| POST | `/pair-setup` | SRP-6a (see §5.1) |
+| POST | `/pair-verify` | X25519+Ed25519 (see §5.2) |
+| SETUP | — | First batch (no streams): the phone provides timingPort/macAddress etc.; **we reply with eventPort / timingPort**; second batch streams[]: **110 main display / 111 secondary display** → reply `{type, dataPort}`; 100/101/102 audio (decode and play); 130 data (iAP tunnel, can be deferred) |
+| RECORD | — | Session active (the milestone where "video is coming") |
+| POST | `/command` | See §6; `forceKeyFrame` is used for keyframe recovery |
+| POST | `/feedback` | Per stream streamConnectionID/timestamp/sampleTime (NTP-synchronized time) |
+| TEARDOWN | — | Teardown |
 
-### 3.2 ControlCipher（pair-verify 完成后**所有控制流量加密**）
-- 帧 = `[2 字节 LE 密文长][密文][16 字节 tag]`；**2 字节长度头作为 AAD**；双向独立计数器。
-- ChaCha20-Poly1305；**nonce = 4 字节零 + 8 字节 LE 计数器**。
-
----
-
-## 4. 屏幕流（M3）
-
-- 独立 TCP 连接（端口在 SETUP 响应里给手机）。
-- **128 字节头**：offset 0 = `u32LE bodyLen`；offset 4 = opcode：
-  - `0` = 加密视频帧；`1` = 明文配置帧（avcC/hvcC，按 fourcc 识别）。
-- 帧体解密：ChaCha20-Poly1305，**128 字节头整个作为 AAD**，nonce 规则同 §3.2 计数器。
-- 密钥：`HKDF-SHA512(sharedSecret, "DataStream-Salt" + streamConnectionID, "DataStream-Output-Encryption-Key", 32)`。
-- 明文 = **4 字节大端长度前缀的 NALU（AVCC）** → 转 AnnexB（每个 NAL 要校验合法性）；
-  首个 I 帧（nalType 5/6）前补 SPS/PPS。
-- 关键帧恢复：需要时 `POST /command {"type":"forceKeyFrame"}`（副屏带其 UUID）；解码器侧做"没关键帧不恢复"的闸门。
-- 时间戳：头里带 displayTicks（NTP 同步域）；先简化"来一帧显示一帧"，M4 再做对齐/丢帧。
+### 3.2 ControlCipher (**all control traffic is encrypted after pair-verify completes**)
+- Frame = `[2-byte LE ciphertext length][ciphertext][16-byte tag]`; **the 2-byte length
+  header is used as AAD**; independent counters per direction.
+- ChaCha20-Poly1305; **nonce = 4 zero bytes + 8-byte LE counter**.
 
 ---
 
-## 5. 密码学（全部用 OpenSSL 实现）
+## 4. Screen stream (M3)
 
-### 5.1 pair-setup（SRP-6a）
-- 3072 位、SHA-512、g=5（RFC 5054 素数）、用户名 `Pair-Setup`、**PIN 3939**。
-- **精确公式**（参照 AirPlay 协议逐字节核对，实现于 core/crypto/srp6a.cpp）：
-  - `k = SHA512(toBytes(N) ‖ pad384(g))`（首参是 **toBytes(N)**，不是 pad(N)）。
-  - `x = SHA512(salt(16) ‖ SHA512("Pair-Setup:3939"))`；`v = g^x mod N`；`b` 32 字节随机。
-  - `B = (k*v + g^b) mod N`；`u = SHA512(pad384(A) ‖ pad384(B))`（先验 `A mod N != 0`）。
-  - **`K = SHA512(toBytes(S))`（最短字节，不补零、不做 RFC5054 交错哈希）**——最易踩的坑。
-  - `M1 = SHA512((H(N)⊕H(g)) ‖ SHA512("Pair-Setup") ‖ salt ‖ pad384(A) ‖ pad384(B) ‖ K)`；
-    `M2 = SHA512(pad384(A) ‖ M1 ‖ K)`。
-- 消息体 TLV8（type 0xff 续段）；HKDF 标签 `Pair-Setup-Encrypt-Salt` / `Pair-Setup-Encrypt-Info`；
-  nonce `PS-Msg05` / `PS-Msg06`；存对端 **Ed25519 长期公钥**。
+- Separate TCP connection (the port is given to the phone in the SETUP response).
+- **128-byte header**: offset 0 = `u32LE bodyLen`; offset 4 = opcode:
+  - `0` = encrypted video frame; `1` = plaintext config frame (avcC/hvcC, identified by
+    fourcc).
+- Frame body decryption: ChaCha20-Poly1305, **the entire 128-byte header is used as AAD**,
+  nonce rule same as the §3.2 counter.
+- Key: `HKDF-SHA512(sharedSecret, "DataStream-Salt" + streamConnectionID,
+  "DataStream-Output-Encryption-Key", 32)`.
+- Plaintext = **NALU with a 4-byte big-endian length prefix (AVCC)** → convert to AnnexB
+  (each NAL must be validated);
+  prepend SPS/PPS before the first I-frame (nalType 5/6).
+- Keyframe recovery: when needed, `POST /command {"type":"forceKeyFrame"}` (secondary
+  display includes its UUID); the decoder side implements a "do not recover without a
+  keyframe" gate.
+- Timestamps: the header carries displayTicks (NTP-synchronized domain); for now simplify
+  to "display each frame as it arrives"; alignment/frame dropping comes in M4.
+
+---
+
+## 5. Cryptography (all implemented with OpenSSL)
+
+### 5.1 pair-setup (SRP-6a)
+- 3072-bit, SHA-512, g=5 (RFC 5054 prime), username `Pair-Setup`, **PIN 3939**.
+- **Exact formulas** (checked byte by byte against the AirPlay protocol; implemented in
+  core/crypto/srp6a.cpp):
+  - `k = SHA512(toBytes(N) ‖ pad384(g))` (the first argument is **toBytes(N)**, not
+    pad(N)).
+  - `x = SHA512(salt(16) ‖ SHA512("Pair-Setup:3939"))`; `v = g^x mod N`; `b` is 32 random
+    bytes.
+  - `B = (k*v + g^b) mod N`; `u = SHA512(pad384(A) ‖ pad384(B))` (first verify `A mod N !=
+    0`).
+  - **`K = SHA512(toBytes(S))` (shortest byte form, no zero padding, no RFC5054
+    interleaved hashing)** — the easiest trap.
+  - `M1 = SHA512((H(N)⊕H(g)) ‖ SHA512("Pair-Setup") ‖ salt ‖ pad384(A) ‖ pad384(B) ‖ K)`;
+    `M2 = SHA512(pad384(A) ‖ M1 ‖ K)`.
+- Message body TLV8 (type 0xff continuation chunks); HKDF labels
+  `Pair-Setup-Encrypt-Salt` / `Pair-Setup-Encrypt-Info`;
+  nonces `PS-Msg05` / `PS-Msg06`; store the peer's **long-term Ed25519 public key**.
 
 ### 5.2 pair-verify
-- 临时 X25519 + Ed25519 签名；标签 `Pair-Verify-Encrypt-Salt/Info`；nonce `PV-Msg02/03`。
-- HKDF-SHA512(sharedEcdh, `Control-Salt`, `Control-Write-Encryption-Key` / `Control-Read-Encryption-Key`) → §3.2 的密钥。
+- Ephemeral X25519 + Ed25519 signature; labels `Pair-Verify-Encrypt-Salt/Info`; nonces
+  `PV-Msg02/03`.
+- HKDF-SHA512(sharedEcdh, `Control-Salt`, `Control-Write-Encryption-Key` /
+  `Control-Read-Encryption-Key`) → the keys from §3.2.
 
 ### 5.3 ChaCha20-Poly1305
-- 128 位 tag；nonce64 = 4 零字节 + 8 字节 LE 计数器（每方向独立自增）。
+- 128-bit tag; nonce64 = 4 zero bytes + 8-byte LE counter (independent increment per
+  direction).
 
-### 5.4 MFi-SAP（`/auth-setup` 与 iAP2 共用身份）
-- MFi 配件身份：EC P-256 私钥（PKCS#8）+ 配件证书（PKCS#7，**已验证 607 字节 < 640**），由外部提供、不入库。
-- 签名：对 **32 字节摘要** 做 ECDSA（不再哈希），输出 **64 字节 raw r‖s**（**不是 DER**）。
-  - 摘要构成（协议 MFi-SAP）：`digest = SHA256(accPub(32) ‖ peerPub(32))`；
-    **我们的身份是 `LocalMfiAuthenticationClient`（protocolMajor=3）→ 走 SHA256 分支**；
-    SHA1 分支只属于硬件协处理器（protocolMajor==2）。BAA 证书分支直接签 `pub‖peerPub`（不哈希），本机不涉及。
-- `/auth-setup` 流程：请求体 `[u8 version=1][32 字节对端 X25519 公钥]`；
-  我方生成 X25519 私钥 → `shared` → `aesKey=SHA1("AES-KEY"‖shared)[:16]`、`aesIv=SHA1("AES-IV"‖shared)[:16]`；
-  响应 `[32 我方公钥][u32BE 证书长][证书][u32BE 签名长][AES-128-CTR(签名)]`。
-- iAP2 侧（§1.4 第 2 步）用同一证书+签名器。
-
----
-
-## 6. 事件通道 / HID 回传（安卓已接）
-
-- SETUP 响应里的 `eventPort` 是 ServerSocket；手机连入后：
-  `HKDF-SHA512(shared, "Events-Salt", "Events-Write-Encryption-Key"/"Events-Read-Encryption-Key", 32)` 加密（§3.2 帧格式）。
-- 触摸：`POST /command`，bplist：`{"type":"hidSendReport","uuid":"2a2a2a2a","hidReport":…}`；
-  触点报告：2 触点 × 6 字节（slot、down、x u16le、y u16le）；坐标按显示像素归一。
-- 其他：旋钮 uuid `2a2a2a2b`、媒体键 `2a2a2a2c`、电话 `2a2a2a2d`；`setNightMode`、`requestSiri`。
+### 5.4 MFi-SAP (`/auth-setup` shares identity with iAP2)
+- MFi accessory identity: EC P-256 private key (PKCS#8) + accessory certificate (PKCS#7,
+  **verified 607 bytes < 640**), provided externally and not checked into the repository.
+- Signature: ECDSA over the **32-byte digest** (no additional hashing), output as **64-byte
+  raw r‖s** (**not DER**).
+  - Digest composition (MFi-SAP protocol): `digest = SHA256(accPub(32) ‖ peerPub(32))`;
+    **our identity is `LocalMfiAuthenticationClient` (protocolMajor=3) → use the SHA256
+    branch**;
+    the SHA1 branch belongs only to the hardware coprocessor (protocolMajor==2). The BAA
+    certificate branch signs `pub‖peerPub` directly (no hashing), which does not apply
+    here.
+- `/auth-setup` flow: request body `[u8 version=1][32-byte peer X25519 public key]`;
+  we generate an X25519 private key → `shared` → `aesKey=SHA1("AES-KEY"‖shared)[:16]`,
+  `aesIv=SHA1("AES-IV"‖shared)[:16]`;
+  response `[32 our public key][u32BE cert length][cert][u32BE signature length][AES-128-CTR(signature)]`.
+- The iAP2 side (§1.4 step 2) uses the same certificate and signer.
 
 ---
 
-## 7. /info 要点（参照值、真机再校）
+## 6. Event channel / HID reports (Android already wired up)
 
-- `features` 参照协议的无线值（含 CarPlay 特性位；实现时以协议记录的值起步再按真机调整）。
-- `flags=4`；`model`/`manufacturer` 自选；`statusFlags`；`deviceID` = 网卡 MAC（与 Bonjour TXT 一致）。
-- displays：主屏 `MAIN_UUID = b7e6c5a0-1111-4000-8000-000000000001`（副屏 …0002，先不做）。
-- HID 声明：触摸（+旋钮/媒体/电话可选）；描述符按协议的形态。
-
-## 8. 待真机确认项
-1. RFCOMM 方向（客户端连手机 vs 服务端等连接）。
-2. features 位与 /info 具体值在现行 iOS 上的效果。
-3. NTP：先桩（不响应 NTP 请求是否被接受），失败再加最小 NTP 响应端。
-4. 同网模式下 IPv6/IPv4 地址选择（优先 IPv4 起步）。
-
-## 9. 来源与边界
-- 以上为**协议事实**整理（核查得出，2026-10-10）。
-- 本项目实现为**基于 DiPlay / xcertplay（GPL-3.0）的 C++ 重新实现**；依赖只用系统库。
+- The `eventPort` in the SETUP response is a ServerSocket; after the phone connects:
+  encrypted with `HKDF-SHA512(shared, "Events-Salt",
+  "Events-Write-Encryption-Key"/"Events-Read-Encryption-Key", 32)` (§3.2 frame format).
+- Touch: `POST /command`, bplist: `{"type":"hidSendReport","uuid":"2a2a2a2a","hidReport":…}`;
+  touch report: 2 contacts × 6 bytes (slot, down, x u16le, y u16le); coordinates are
+  normalized to display pixels.
+- Others: knob uuid `2a2a2a2b`, media keys `2a2a2a2c`, phone `2a2a2a2d`; `setNightMode`,
+  `requestSiri`.
 
 ---
 
-## 10. 有线（USB）接入（2026-10-13）
+## 7. /info key points (reference values; re-check on device)
 
-对照真机逐段验证得出，全部在 Linux + iPhone 上跑通（真机 3000 帧上屏、200 秒不掉线）。
+- `features` follows the protocol's wireless value (including CarPlay feature bits; start
+  from the protocol-recorded value and adjust against the device when implementing).
+- `flags=4`; `model`/`manufacturer` are our choice; `statusFlags`; `deviceID` = NIC MAC
+  (consistent with the Bonjour TXT).
+- displays: main display `MAIN_UUID = b7e6c5a0-1111-4000-8000-000000000001` (secondary
+  display …0002, not implemented yet).
+- HID declarations: touch (+ knob/media/phone optional); descriptors follow the protocol's
+  shape.
 
-### 10.1 前置（Linux，缺一不可）
+## 8. Items awaiting real-device confirmation
+1. RFCOMM direction (client connecting to the phone vs server waiting for a connection).
+2. Effect of the features bits and concrete /info values on current iOS.
+3. NTP: stub first (whether unanswered NTP requests are accepted); if that fails, add a
+   minimal NTP responder.
+4. IPv6/IPv4 address selection in same-network mode (start with IPv4 preferred).
 
-- `sudo systemctl stop usbmuxd && sudo systemctl mask usbmuxd` —— USBMUX 口只能有一个主人。
-- `pkill -f gvfsd-gphoto2` —— 不然 gvfs 会抢着去挂载照片。
-- blacklist `apple_mfi_fastcharge`（`/etc/modprobe.d/`）—— 这个内核模块会把设备认走。
-- `/dev/bus/usb/*` 是 root 独占，**整个程序 `sudo` 跑**。`sudo` 会重置环境：
-  日志要 `sudo env ALLPLAY_LOG=…`，状态目录要显式给（否则 `HOME=/root`，本机身份另起一份，
-  手机每次都要重新配对）。
+## 9. Sources and boundaries
+- The above is an organized record of **protocol facts** (checked 2026-10-10).
+- This project is a **C++ reimplementation based on DiPlay / xcertplay (GPL-3.0)**;
+  dependencies are system libraries only.
 
-### 10.2 USB 侧：切进 CarPlay 配置
+---
 
-- iPhone 正常枚举出**一个**配置（PTP）。**解锁后**才报出 CarPlay 那个配置（真机实测 value=6）。
-  → 判据是 `bNumConfigurations <= 1`，**"这台手机没有 CarPlay 配置"多半是锁屏，不是线的问题**。
-- 该配置里认两个接口：**USBMUX 口**（iAP2 的载体，bulk in/out 包成 `IByteStream`）与
-  **NCM 控制/数据口**（交还给内核，别自己 detach）。接口号从描述符里读，不要写死。
-- 切换配置后设备会重枚举（bus/addr 变化），要等它回来再打开。
+## 10. Wired (USB) access (2026-10-13)
 
-### 10.3 控制面：三条迷你 TCP 连接
+Derived from section-by-section verification against a real device; everything works on
+Linux + iPhone (3000 frames displayed on device, 200 seconds without dropping the link).
 
-手机那侧实现了一个 TCP 栈，所以成帧得自己来（`usbmux v2`：版本协商 + setup + 连接请求）。
+### 10.1 Prerequisites (Linux, all required)
 
-1. **明文 lockdown `:62078`** —— `SetValue(UntrustedHostBUID)` → `GetValue(DevicePublicKey)`
-   → `GetValue(WiFiAddress)` → `Pair`（**明文，不是 SRP**；SRP 是 AirPlay 那边的 pair-setup）。
-   报文是 **XML plist**（不是本项目 `core/bplist` 那套二进制），前面加 4 字节大端长度。配完即关。
-2. **同一条连接原地升 TLS** —— `StartSession` → 升级 → `StartService(com.apple.carkit.service)`。
-   这条**要一直开着**，它一断第三条也就废了。客户端身份是 **root 证书**，不是 host 那张。
-3. `StartService` 返回的端口 —— **新的连接**，可选再做一次 TLS。**这就是 iAP2 那条流。**
-   流上第一个字节就是 iAP2 链路帧，中间没有任何额外握手或封装。
+- `sudo systemctl stop usbmuxd && sudo systemctl mask usbmuxd` — the USBMUX port can have
+  only one owner.
+- `pkill -f gvfsd-gphoto2` — otherwise gvfs races to mount the photos.
+- blacklist `apple_mfi_fastcharge` (in `/etc/modprobe.d/`) — this kernel module claims the
+  device.
+- `/dev/bus/usb/*` is root-only, so **run the whole program under `sudo`**. `sudo` resets
+  the environment:
+  logs need `sudo env ALLPLAY_LOG=…`, and the state directory must be given explicitly
+  (otherwise `HOME=/root`, a separate local identity is created, and the phone has to be
+  paired again every time).
 
-配对记录（HostID / SystemBUID / 证书）**目前每跑一次现造**，所以每次都要在手机上点一次"信任"；
-落一份 pair record 可以免掉。
+### 10.2 USB side: switch into the CarPlay configuration
 
-### 10.4 iAP2 链路：有线由**主机**发起
+- An iPhone normally enumerates **one** configuration (PTP). Only **after unlocking** does
+  it expose the CarPlay configuration (value=6 measured on device).
+  → the test is `bNumConfigurations <= 1`; **"this phone has no CarPlay configuration" is
+  usually a locked screen, not a cable problem**.
+- That configuration exposes two interfaces: the **USBMUX port** (the carrier for iAP2;
+  bulk in/out wrapped as `IByteStream`) and
+  the **NCM control/data port** (hand it back to the kernel; do not detach it yourself).
+  Read interface numbers from the descriptors; do not hard-code them.
+- After switching configurations the device re-enumerates (bus/addr change); wait for it
+  to come back before opening it.
 
-`FF 55 02 00 EE 10`（6 字节裸 marker，**前面没有任何长度或封装**）之后：
+### 10.3 Control plane: three mini TCP connections
 
-- **必须立刻自己发 SYN，并每 500ms 重发**，直到收到手机的 SYN。
-  只发 marker 的话手机**一声不吭**（真机实测干等 260 秒零字节）—— 无线那条路是手机先发 marker、
-  我们才进协商，照抄必死。
-- 链路参数（照 DiPlay 的 `WIRED_LINK_CONFIG`）：`maxOutgoing=4`、控制会话版本 2、**声明零确认**
-  （USB 这条道本身可靠）。
+The phone implements a TCP stack on its side, so framing is up to us (`usbmux v2`:
+version negotiation + setup + connect request).
 
-识别 `0x1D01` 里的 **USBHostTransport 接口号**必须是 USBMUX 那个口的 `bInterfaceNumber`
-（真机 = 1），报错手机会直接拒（`0x1D03`）。链路 NORMAL 后要**立刻**做识别 —— 干等约 44 秒
-手机会把 USB 整个重置。
+1. **Plaintext lockdown `:62078`** — `SetValue(UntrustedHostBUID)` →
+   `GetValue(DevicePublicKey)` → `GetValue(WiFiAddress)` → `Pair` (**plaintext, not SRP**;
+   SRP is the AirPlay pair-setup). Messages are **XML plist** (not this project's
+   `core/bplist` binary format), prefixed with a 4-byte big-endian length. Close after
+   pairing.
+2. **Upgrade the same connection to TLS in place** — `StartSession` → upgrade →
+   `StartService(com.apple.carkit.service)`.
+   This connection **must stay open**; if it drops, the third one dies too. The client
+   identity is the **root certificate**, not the host one.
+3. The port returned by `StartService` — **a new connection**, optionally TLS again.
+   **This is the iAP2 stream.**
+   The first byte on the stream is an iAP2 link frame; there is no additional handshake or
+   encapsulation in between.
 
-### 10.5 媒体面：内核 `cdc_ncm`，不是我们
+The pairing record (HostID / SystemBUID / certificate) is **currently created fresh on
+every run**, so the phone asks you to tap "Trust" each time; persisting a pair record
+would remove that step.
 
-切进 CarPlay 配置后内核自己绑 CDC-NCM 功能并建出一块真网卡（实测 `cdc_ncm 1-3:6.3 usb0: register …`）。
-**NTB16 / 以太网 / IPv6 全不用写**，AirPlay 直接绑上去即可。两个坑：
+### 10.4 iAP2 link: on wired, the **host** initiates
 
-- 内核在这块网卡上**不生成任何 IPv6 地址**（`addr_gen_mode=1`），要自己钉；而
-  NetworkManager 会把这根点对点链路当"有线连接"去要 DHCP（没有服务器），一直卡 connecting。
-  → `nmcli device set <if> managed no` → `ip link set up` → `ip addr add fe80::2/64 … nodad`。
-- 网卡名由 MAC 来（`enx…`），**不能写死**。按 USB `busnum`/`devnum` 反查
-  `/sys/class/net/*/device/../{busnum,devnum}`。
-- 链路本地地址 `bind()` **必须带 `sin6_scope_id`**，否则 EINVAL（报得像参数写错了）。
+After `FF 55 02 00 EE 10` (a bare 6-byte marker, **with no length or encapsulation
+before it**):
+
+- **You must immediately send SYN yourself and resend every 500ms**, until the phone's SYN
+  arrives.
+  Sending only the marker leaves the phone **completely silent** (measured: 260 seconds
+  of zero bytes) — on the wireless path the phone sends the marker first and only then do
+  we enter negotiation; copying that is fatal.
+- Link parameters (following DiPlay's `WIRED_LINK_CONFIG`): `maxOutgoing=4`, control
+  session version 2, **zero-acknowledgement declared**
+  (USB is inherently reliable).
+
+In identification, the **USBHostTransport interface number** in `0x1D01` must be the
+USBMUX port's `bInterfaceNumber`
+(measured = 1); otherwise the phone rejects it outright (`0x1D03`). After the link reaches
+NORMAL, do identification **immediately** — waiting ~44 seconds
+makes the phone reset USB entirely.
+
+### 10.5 Media plane: kernel `cdc_ncm`, not us
+
+After switching into the CarPlay configuration, the kernel binds the CDC-NCM function and
+creates a real NIC itself (measured: `cdc_ncm 1-3:6.3 usb0: register …`).
+**NTB16 / Ethernet / IPv6 need not be written at all**; AirPlay can bind directly to it.
+Two traps:
+
+- The kernel **generates no IPv6 address** on this NIC (`addr_gen_mode=1`), so you must
+  pin it yourself; and NetworkManager treats this point-to-point link as a "wired
+  connection" and asks for DHCP (there is no server), leaving it stuck in connecting.
+  → `nmcli device set <if> managed no` → `ip link set up` → `ip addr add fe80::2/64 …
+  nodad`.
+- The NIC name derives from the MAC (`enx…`) and **must not be hard-coded**. Look it up by
+  USB `busnum`/`devnum` via
+  `/sys/class/net/*/device/../{busnum,devnum}`.
+- The link-local address **must include `sin6_scope_id` in `bind()`**, otherwise EINVAL
+  (which looks like a malformed argument).
 
 ### 10.6 `0x4300` / `0x4301`
 
-- `0x4300 CarPlayAvailability`：`group(0)`=有线、`group(1)`=无线、`group(2)`=themeAssets；
-  每组内 `u8(0)=可用否`、`str(1)=标识`。真机报有线可用（标识=手机 UDID）且无线可用（标识=Wi-Fi MAC）。
-- `0x4301 CarPlayStartSession`：`group(0)` 有线 —— 里面**每个地址一个 string 参数、重复 id 0**
-  （**不是字符串列表**，这里最容易搭错）；随后 `u32(2)=AirPlay 端口`、可选 `str(3)=deviceIdentifier`、
-  `str(4)=Ed25519 公钥 hex`、`str(5)=sourceVersion`。
-- 公钥必须是**持久化的那把**（`core::DeviceIdentity`）—— 手机后面 pair-verify 认的就是它。
-- 收到 `0x4300` 就回 `0x4301`，**不按 `available` 过滤**（DiPlay 也是收到就回，可不可用让手机自己判断）。
-- 报的地址**必须是 Receiver 实际绑定监听的那个**，端口同理。说一套自己监听另一套，
-  手机连上来第一件事就是对不上。
+- `0x4300 CarPlayAvailability`: `group(0)`=wired, `group(1)`=wireless,
+  `group(2)`=themeAssets;
+  within each group `u8(0)=available or not`, `str(1)=identifier`. On device, it reports
+  wired available (identifier = phone UDID) and wireless available (identifier = Wi-Fi
+  MAC).
+- `0x4301 CarPlayStartSession`: `group(0)` wired — inside it **each address is a separate
+  string parameter with repeated id 0**
+  (**not a string list**; this is the easiest place to build it wrong); followed by
+  `u32(2)=AirPlay port`, optional `str(3)=deviceIdentifier`,
+  `str(4)=Ed25519 public key hex`, `str(5)=sourceVersion`.
+- The public key must be the **persisted one** (`core::DeviceIdentity`) — it is what the
+  phone will recognize during pair-verify.
+- On receiving `0x4300`, reply `0x4301` **without filtering on `available`** (DiPlay also
+  replies on receipt; let the phone decide availability).
+- The reported address **must be the one the Receiver actually bound and listens on**, and
+  so must the port. Announcing one thing while listening on another
+  means the phone's very first action after connecting will mismatch.
 
-### 10.7 一个"看着像网络故障"的坑
+### 10.7 A trap that "looks like a network failure"
 
-控制面全绿、`/pair-verify` 过了、`RECORD` 了，然后手机每 2 秒 POST 一次 `/feedback`，
-**永远等不到画面**。根因不在网络：`SETUP` 里手机要屏幕流，我们没给 `dataPort`
-（`IVideoOutput` 为空时不建流），手机拿不到数据端口只能干等。
+The control plane is all green, `/pair-verify` passed, `RECORD` happened, and then the
+phone POSTs `/feedback` every 2 seconds,
+**but the picture never arrives**. The root cause is not the network: in `SETUP` the phone
+asks for the screen stream and we do not provide `dataPort`
+(no stream is created when `IVideoOutput` is null), so the phone has no data port and can
+only wait.

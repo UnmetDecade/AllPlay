@@ -1,14 +1,14 @@
 /**
  * @file   tcp.h
- * @brief  TCP 监听/连接抽象
+ * @brief  TCP listener/connection abstraction
  * @author blt
  */
 
 // ============================================================================
-// core/port/tcp.h —— TCP 监听/连接抽象
+// core/port/tcp.h — TCP listener/connection abstraction
 // ============================================================================
-// RTSP 控制端口、屏幕流数据端口、事件端口都建在它上面。读超时由平台层保证
-// （POSIX=SO_RCVTIMEO/poll，Windows=SO_RCVTIMEO，Android=Socket timeout）。
+// The RTSP control port, screen-stream data port and event port all build on it. Read timeouts are guaranteed by the platform layer
+// (POSIX=SO_RCVTIMEO/poll, Windows=SO_RCVTIMEO, Android=Socket timeout).
 #pragma once
 
 #include <cstdint>
@@ -18,26 +18,26 @@
 
 namespace core {
 
-/// 一条已建立的 TCP 连接（字节流）。
+/// An established TCP connection (byte stream).
 class ITcpStream {
 public:
     virtual ~ITcpStream() = default;
-    virtual int  read(uint8_t* buf, size_t n, int timeoutMs) = 0;  // >0 n；0 超时；<0 断开
+    virtual int  read(uint8_t* buf, size_t n, int timeoutMs) = 0;  // >0 n; 0 timeout; <0 disconnected
     virtual bool writeAll(const uint8_t* buf, size_t n) = 0;
     virtual void close() = 0;
 };
 
-/// TCP 监听器。
+/// TCP listener.
 class ITcpListener {
 public:
     virtual ~ITcpListener() = default;
 
-    /// 绑定并监听。port=0 时由内核选端口（用 port() 读回）。失败返回 false 并写 err。
+    /// Bind and listen. port=0 lets the kernel choose (read it back with port()). Returns false and sets err on failure.
     virtual bool start(const std::string& bindAddr, uint16_t port, std::string* err) = 0;
-    /// 阻塞 accept 一条连接（timeoutMs<=0 永不超时）。超时/已停止返回 nullptr。
+    /// Blocking accept of one connection (timeoutMs<=0 never times out). Returns nullptr on timeout/stopped.
     virtual std::unique_ptr<ITcpStream> accept(int timeoutMs) = 0;
     virtual uint16_t port() const = 0;
-    /// 停止并唤醒 accept()。
+    /// Stop and wake up accept().
     virtual void stop() = 0;
 };
 

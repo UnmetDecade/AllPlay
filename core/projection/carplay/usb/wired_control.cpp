@@ -1,6 +1,6 @@
 /**
  * @file   wired_control.cpp
- * @brief  有线控制面的实现
+ * @brief  Implementation of the wired control plane
  * @author blt
  */
 
@@ -20,18 +20,18 @@ namespace {
 constexpr const char* kTag = "wired";
 constexpr uint16_t    kLockdownPort = 62078;
 constexpr int         kConnectTimeoutMs = 10000;
-constexpr int         kPairTimeoutMs = 15000;  ///< 单次 Pair 的等待；真正的等待靠重发轮询
-/// 手机弹"信任此电脑"时等它多久（人得腾出手解锁手机、找到弹窗、点一下）
+constexpr int         kPairTimeoutMs = 15000;  ///< wait per Pair attempt; real waiting is done by resend polling
+/// How long to wait for the "Trust this computer" prompt (a human has to unlock the phone, find the prompt, tap it)
 constexpr int         kTrustWaitSec = 180;
 constexpr int         kSessionTimeoutMs = 15000;
 constexpr const char* kCarkitService = "com.apple.carkit.service";
 
-/// 发请求时用的 Label。手机只是回显它，随便取，但保持和 DiPlay 一致便于比对日志。
+/// Label used when sending requests. The phone merely echoes it; any value works, but keep it identical to DiPlay to ease log comparison.
 constexpr const char* kLabel = "allplay.wired";
 
-/// 造 Pair 请求里的嵌套 PairRecord。
-/// **注意三个证书都是 <data>，里面装的是 PEM 文本字节，不是 DER** —— 这点反直觉，
-/// 曾经被想当然地写成 DER。另外这里**没有 RootPrivateKey 这一项**，私钥永远不发给手机。
+/// Build the nested PairRecord in the Pair request.
+/// **NOTE: all three certificates are <data> containing PEM text bytes, not DER** — counter-intuitive,
+/// and once naively written as DER. Also **there is no RootPrivateKey entry**, the private key is never sent to the phone.
 Plist makePairRecord(const WiredPairIdentity& id)
 {
     auto pem = [](const std::string& s) {
@@ -52,37 +52,37 @@ Plist makePairRecord(const WiredPairIdentity& id)
 WiredControl::WiredControl(IByteStream& pipe) : pipe_(&pipe) {}
 WiredControl::WiredControl(std::unique_ptr<IMux> mux) : mux_(std::move(mux)) {}
 
-WiredControl::~WiredControl() = default;  // 成员按逆序析构：先服务流，最后才是 mux
+WiredControl::~WiredControl() = default;  // members destruct in reverse order: service streams first, mux last
 
 bool WiredControl::connect(std::string* err)
 {
     if (!mux_) {
         if (pipe_ == nullptr) {
-            if (err != nullptr) *err = "没有可用的 mux（既没给 USB 管道，也没给现成的 mux）";
+            if (err != nullptr) *err = "No usable mux (neither a USB pipe nor an existing mux was provided)";
             return false;
         }
         mux_ = std::make_unique<UsbMux>(*pipe_);
     }
     if (!mux_->begin(err)) return false;
 
-    // ① 这对材料以前**配对成功过** → 直接开会话，**一个 Pair 都不发**。
+    // ① This material **paired successfully** before → open the session directly, **send no Pair at all**.
     //
-    // 为什么这才是"免点信任"的关键：复用同一套 HostID/证书只是必要条件。手机那边
-    // "我信任这台电脑"是靠**配对成功之后的连接不再走 Pair、直接拿主机证书做 TLS**
-    // 体现的。每次重发一次 Pair，它就当成一次新的配对，弹窗照旧 —— 实测过：
-    // 同一套材料，12:53 发 Pair 过了，12:54 再发一次又弹。
+    // Why this is the key to "no trust tap": reusing the same HostID/certificates is only a necessary condition. The phone's
+    // "I trust this computer" is expressed by **connections after a successful pairing skipping Pair and going straight to TLS with the host certificate**.
+    // Sending Pair again every time is treated as a new pairing and the prompt reappears — measured: with the same
+    // material, Pair at 12:53 succeeded, another Pair at 12:54 prompted again.
     if (loadTrustedRecord()) {
         std::string serr;
         if (doSessionAndService(&serr)) {
-            LOG_INFO("[%s] 用已存的配对记录直接开会话（没走 Pair）", kTag);
+            LOG_INFO("[%s] Opened session directly with the stored pairing record (skipped Pair)", kTag);
             return true;
         }
-        LOG_WARN("[%s] 不走 Pair 直接开会话没成（%s）—— 退回完整配对", kTag, serr.c_str());
+        LOG_WARN("[%s] Opening the session directly without Pair failed (%s) - falling back to full pairing", kTag, serr.c_str());
         resetSessionStreams();
-        identity_ = WiredPairIdentity{};   // 退回时让 doPair 从头把材料准备一遍
+        identity_ = WiredPairIdentity{};   // on fallback, let doPair prepare the material from scratch
     }
 
-    // ② 完整配对（手机没认过这台机器时，这一步会弹"要信任此电脑吗？"）
+    // ② Full pairing (when the phone has not accepted this machine, this step shows "Trust this computer?")
     if (!doPair(err)) return false;
     return doSessionAndService(err);
 }
@@ -104,7 +104,7 @@ bool WiredControl::loadTrustedRecord()
 
 void WiredControl::resetSessionStreams()
 {
-    // 顺序不能反：service_ / sessionCh_ 是 TLS 流，引用着各自的 raw。
+    // Order matters: service_ / sessionCh_ are TLS streams referencing their raws.
     service_.reset();
     serviceRaw_.reset();
     sessionCh_.reset();
@@ -119,21 +119,21 @@ void WiredControl::setPairStore(std::string key, std::string stateDir)
 
 bool WiredControl::doPair(std::string* err)
 {
-    // 这两个 UUID 必须在流程开始前定死：SetValue 报的那个 BUID 和 Pair 里写的
-    // 必须是同一个，否则手机会当成另一个"主机"，配了等于没配。
+    // These two UUIDs must be fixed before the flow starts: the BUID reported by SetValue and the one written in Pair
+    // must be the same, otherwise the phone treats us as another "host" and pairing is as good as none.
     //
-    // **优先复用上次的**：HostID 一换，手机那边存的 pair record 就对不上了，
-    // 于是又弹一次"要信任此电脑吗？"。DevicePublicKey 这会儿还没拿到（SetValue
-    // 得排在 GetValue 前面），所以键用手机序列号，不是 DevicePublicKey。
+    // **Prefer reusing the previous ones**: changing HostID invalidates the pair record stored on the phone,
+    // so "Trust this computer?" appears again. DevicePublicKey is not available yet (SetValue
+    // must come before GetValue), so the key is the phone serial number, not DevicePublicKey.
     if (!pairKey_.empty()) {
         if (loadWiredPairIds(pairStateDir_, pairKey_, &identity_.hostId, &identity_.systemBuid)) {
-            LOG_INFO("[%s] 复用上次的配对身份 HostID=%s（手机那边认得，不该再弹信任框）", kTag,
+            LOG_INFO("[%s] Reusing previous pairing identity HostID=%s (the phone recognizes it; no trust prompt expected)", kTag,
                      identity_.hostId.c_str());
         }
     }
     if (identity_.hostId.empty()) identity_.hostId = makeUuidUpper();
     if (identity_.systemBuid.empty()) identity_.systemBuid = makeUuidUpper();
-    // 从这一刻起这两个值就是"已经报给手机的那对"，后面任何地方都不许再改。
+    // From this point these two values are "the pair already reported to the phone"; nothing later may change them.
     const std::string hostId     = identity_.hostId;
     const std::string systemBuid = identity_.systemBuid;
 
@@ -141,50 +141,50 @@ bool WiredControl::doPair(std::string* err)
     if (pairCh_ == nullptr) return false;
     LockdownClient lk(*pairCh_);
 
-    // 1) 先自报家门。不报这一下，手机多半不给 DevicePublicKey。
+    // 1) Introduce ourselves first. Without this the phone likely won't hand out DevicePublicKey.
     if (!lk.setValue("UntrustedHostBUID", Plist::string(identity_.systemBuid), err)) return false;
 
-    // 2) 手机的公钥 —— 拿来给"它"签一张证书
+    // 2) The phone's public key — used to sign a certificate "for it"
     Plist devKey;
     bool  found = false;
     if (!lk.getValue("DevicePublicKey", &devKey, &found, err)) return false;
     if (!found) {
-        if (err != nullptr) *err = "手机没给 DevicePublicKey（没解锁？没信任本机？）";
+        if (err != nullptr) *err = "Phone did not provide DevicePublicKey (not unlocked? this computer not trusted?)";
         return false;
     }
     if (devKey.type() != Plist::Type::Data) {
-        if (err != nullptr) *err = "DevicePublicKey 不是 <data>";
+        if (err != nullptr) *err = "DevicePublicKey is not <data>";
         return false;
     }
-    // 具体是什么编码交给 pair_record 判 —— 实测这台手机给的是 **PEM 文本**，不是文档说的
-    // PKCS#1 DER，别在这条日志里替它下结论
+    // Leave the encoding to pair_record — this phone gives **PEM text**, not the documented
+    // PKCS#1 DER; don't conclude otherwise in this log line
     const std::vector<uint8_t>& devKeyBytes = devKey.asData();
-    LOG_INFO("[%s] 拿到手机公钥：%zu 字节", kTag, devKeyBytes.size());
+    LOG_INFO("[%s] Got phone public key: %zu bytes", kTag, devKeyBytes.size());
 
-    // 3) WiFiAddress —— 有线用不上。顺序照抄 DiPlay，读不到不算失败。
+    // 3) WiFiAddress — unused on wired. Order copied from DiPlay; failing to read is not an error.
     Plist wifi;
     bool  hasWifi = false;
     if (!lk.getValue("WiFiAddress", &wifi, &hasWifi, err)) return false;
-    if (hasWifi) LOG_DEBUG("[%s] 手机的 WiFiAddress：%s", kTag, wifi.asString().c_str());
+    if (hasWifi) LOG_DEBUG("[%s] Phone WiFiAddress: %s", kTag, wifi.asString().c_str());
 
-    // 4) 三张证书：**存过就用存的**（手机认的就是这一套，换了等于换台电脑，弹窗重来），
-    //    没存过 / 是另一台手机的，现造一套再存下来。device 那张的公钥是上面拿到的。
+    // 4) Three certificates: **use stored ones if available** (the phone accepts this exact set; changing it is like a new computer, prompt again),
+    //    if absent / for another phone, generate a new set and save it. The device cert's public key is the one obtained above.
     if (!pairKey_.empty()) {
         bool found = false;
         std::string lerr;
         if (!loadWiredPairIdentity(pairStateDir_, pairKey_, devKeyBytes, &identity_, &found,
                                    &lerr)) {
-            if (err != nullptr) *err = lerr;   // 只有"读得出来但坏了"才走到这
+            if (err != nullptr) *err = lerr;   // only reached when "readable but corrupt"
             return false;
         }
         if (found) {
-            // 证书是三张存下来的；**两个 UUID 以已经报给手机的那个为准** ——
-            // 上文 SetValue(UntrustedHostBUID) 发出去的是 identity_.systemBuid，
-            // Pair 里再写一个不一样的就是"另一个主机"，配了等于没配。
-            // （正常情况下两者同源，这里只是不让它们有分叉的机会。）
+            // The certificates came from storage; **the two UUIDs follow the ones already reported to the phone** —
+            // SetValue(UntrustedHostBUID) above sent identity_.systemBuid, so writing a different one
+            // in Pair means "another host" and pairing is as good as none.
+            // (Normally both come from the same source; this just removes any chance of divergence.)
             identity_.hostId     = hostId;
             identity_.systemBuid = systemBuid;
-            LOG_INFO("[%s] 用回存好的证书（root/host/device 各一）", kTag);
+            LOG_INFO("[%s] Reusing the stored certificates (one each for root/host/device)", kTag);
         }
     }
     if (identity_.rootCertPem.empty()) {
@@ -194,9 +194,9 @@ bool WiredControl::doPair(std::string* err)
         }
         if (!pairKey_.empty()) {
             std::string serr;
-            // 存不下不算失败：最多下次再弹一次信任框，别为此把整条配对打断。
+            // Failing to save is not a failure: at worst one more trust prompt; don't abort the whole pairing for it.
             if (!saveWiredPairIdentity(pairStateDir_, pairKey_, devKeyBytes, identity_, &serr))
-                LOG_WARN("[%s] 配对材料没存下（%s）—— 下次这台手机还得多点一次信任", kTag,
+                LOG_WARN("[%s] Failed to save pairing material (%s) - this phone will need one more trust tap next time", kTag,
                          serr.c_str());
         }
     }
@@ -205,17 +205,17 @@ bool WiredControl::doPair(std::string* err)
     Plist req = Plist::dict();
     req.set("Label", Plist::string(kLabel));
     req.set("Request", Plist::string("Pair"));
-    // ProtocolVersion 放在**外层**（DiPlay 如此，不是塞在 PairRecord 里）。
-    // 万一手机嫌它，回的错误里会提到，届时第一个改的就是这一行。
+    // ProtocolVersion goes at the **outer level** (as DiPlay does, not inside PairRecord).
+    // If the phone objects, its error will mention it; that is the first line to change then.
     req.set("ProtocolVersion", Plist::string("2"));
     Plist opts = Plist::dict();
-    opts.set("ExtendedPairingErrors", Plist::boolean(true));  // 失败时给出能读的原因
+    opts.set("ExtendedPairingErrors", Plist::boolean(true));  // gives a readable reason on failure
     req.set("PairingOptions", std::move(opts));
     req.set("PairRecord", makePairRecord(identity_));
 
-    // 手机第一次见到这台"电脑"会弹一个"信任此电脑？"，等在手机上点。
-    // 这段时间它每次都回 Error=PairingDialogResponsePending —— **这不是失败，是"接着等"**，
-    // 把同一条 Pair 请求重发即可（UUID 与证书都不能变，否则等于换了一台电脑，弹窗重来）。
+    // The first time the phone sees this "computer" it shows "Trust this computer?"; wait for the tap.
+    // During this time it replies Error=PairingDialogResponsePending each time — **not a failure, but "keep waiting"**;
+    // just resend the same Pair request (UUIDs and certificates must not change, else it is a new computer and the prompt restarts).
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kTrustWaitSec);
     int  waited = 0;
     for (;;) {
@@ -225,35 +225,35 @@ bool WiredControl::doPair(std::string* err)
         if (perr.find("PairingDialogResponsePending") != std::string::npos &&
             std::chrono::steady_clock::now() < deadline) {
             if (waited == 0) {
-                LOG_WARN("[%s] 手机弹了「要信任此电脑吗？」—— 请解锁手机并点「信任」。"
-                         "这里最多等 %d 秒（每秒重发一次请求，手机上看到的还是同一个弹窗）",
+                LOG_WARN("[%s] The phone is showing \"Trust This Computer?\" - unlock it and tap \"Trust\". "
+                         "Waiting up to %d seconds here (the request is resent every second; the phone still sees the same dialog)",
                          kTag, kTrustWaitSec);
             } else if (waited % 15 == 0) {
-                LOG_INFO("[%s] 还在等确认…（已等 %d 秒）", kTag, waited);
+                LOG_INFO("[%s] Still waiting for confirmation... (%d seconds elapsed)", kTag, waited);
             }
             std::this_thread::sleep_for(std::chrono::seconds(1));
             ++waited;
             continue;
         }
         if (waited > 0) {
-            LOG_WARN("[%s] 等了 %d 秒没等到确认，放弃", kTag, waited);
+            LOG_WARN("[%s] Gave up after waiting %d seconds without confirmation", kTag, waited);
         }
         if (err != nullptr) *err = perr;
         return false;
     }
-    LOG_INFO("[%s] 配对成功（HostID=%s）", kTag, identity_.hostId.c_str());
+    LOG_INFO("[%s] Pairing succeeded (HostID=%s)", kTag, identity_.hostId.c_str());
 
-    // 盖戳：**只有真配成功过**的记录，下一轮才敢跳过 Pair（见 pair_record.h 的说明）。
+    // Stamp: only records from **a genuinely successful pairing** may skip Pair next round (see pair_record.h).
     if (!pairKey_.empty()) {
         std::string merr;
         if (markWiredPairTrusted(pairStateDir_, pairKey_, &merr))
-            LOG_INFO("[%s] 已记下这台手机认了这套材料 —— 下次直接开会话，不再弹框", kTag);
+            LOG_INFO("[%s] Recorded that this phone accepts this material - next time the session opens directly with no prompt", kTag);
         else
-            LOG_WARN("[%s] 没能记下「已配对」（%s）—— 下次这台手机还会再弹一次", kTag,
+            LOG_WARN("[%s] Failed to record \"paired\" (%s) - this phone will prompt once more next time", kTag,
                      merr.c_str());
     }
 
-    pairCh_.reset();  // 第 1 条用完就关，别占着
+    pairCh_.reset();  // connection 1 is done; close it instead of keeping it open
     return true;
 }
 
@@ -262,7 +262,7 @@ bool WiredControl::doSessionAndService(std::string* err)
     sessionRaw_ = mux_->connectTcp(kLockdownPort, kConnectTimeoutMs, err);
     if (sessionRaw_ == nullptr) return false;
 
-    // StartSession 的请求里**没有 EnableSessionSSL** —— 要不要加密是手机在响应里说了算
+    // The StartSession request has **no EnableSessionSSL** — the phone decides encryption in its response
     bool enableSsl = false;
     {
         LockdownClient lk(*sessionRaw_);
@@ -277,18 +277,18 @@ bool WiredControl::doSessionAndService(std::string* err)
         enableSsl = resp.boolValue("EnableSessionSSL", false);
     }
 
-    // 原地升级：同一条连接直接开始 TLS 握手。客户端身份用 **root** 证书+私钥。
+    // Upgrade in place: start the TLS handshake on the same connection. Client identity is the **root** cert + key.
     if (enableSsl) {
-        LOG_INFO("[%s] 会话要 TLS，原地升级", kTag);
+        LOG_INFO("[%s] Session requires TLS; upgrading in place", kTag);
         sessionCh_ = startTlsClient(*sessionRaw_, identity_.rootCertPem, identity_.rootKeyPem, err);
         if (sessionCh_ == nullptr) return false;
     } else {
-        // 手机没要求加密。照它说的走 —— 硬套 TLS 只会把这条连接弄死。
-        LOG_WARN("[%s] 手机没要求 SessionSSL，按明文继续（后面若失败，先怀疑这里）", kTag);
+        // The phone did not ask for encryption. Follow its lead — forcing TLS would only kill this connection.
+        LOG_WARN("[%s] Phone did not request SessionSSL; continuing in plaintext (if it fails later, suspect this first)", kTag);
         sessionCh_ = std::move(sessionRaw_);
     }
 
-    // 在这条（可能已加密的）会话上起 carkit 服务
+    // Start the carkit service on this (possibly encrypted) session
     uint16_t port = 0;
     bool     svcSsl = false;
     {
@@ -296,7 +296,7 @@ bool WiredControl::doSessionAndService(std::string* err)
         if (!lk.startService(kCarkitService, &port, &svcSsl, err)) return false;
     }
 
-    // 第 3 条：去那个端口开新连接。这条就是 iAP2 的载体。
+    // Connection 3: open a new connection to that port. It carries iAP2.
     serviceRaw_ = mux_->connectTcp(port, kConnectTimeoutMs, err);
     if (serviceRaw_ == nullptr) return false;
 
@@ -307,8 +307,8 @@ bool WiredControl::doSessionAndService(std::string* err)
         service_ = std::move(serviceRaw_);
     }
 
-    LOG_INFO("[%s] carkit 服务流到手（端口 %u，服务侧 TLS：%s），可以开始 iAP2 了", kTag,
-             unsigned(port), svcSsl ? "是" : "否");
+    LOG_INFO("[%s] Got the carkit service stream (port %u, service-side TLS: %s); iAP2 can start", kTag,
+             unsigned(port), svcSsl ? "yes" : "no");
     return true;
 }
 

@@ -1,18 +1,18 @@
 /**
  * @file   bplist.h
- * @brief  二进制 plist 序列化（自己实现，不引第三方）
+ * @brief  Binary plist serialization (own implementation, no third-party deps)
  * @author blt
  */
 
 // ============================================================================
-// core/bplist/bplist.h —— 二进制 plist 序列化（自己实现，不引第三方）
+// core/bplist/bplist.h — binary plist serialization (own implementation, no third-party deps)
 // ============================================================================
-// AirPlay 的 /info、SETUP 响应等都是 binary plist（"bplist00"）。
-// 这里实现**写**这一半（M1 的 /info 需要）；**读**那一半到 M3 解析手机请求时再补，
-// 放在同一组文件里保持对称。
+// AirPlay's /info, SETUP responses, etc. are all binary plists ("bplist00").
+// This implements the **write** half (needed for /info in M1); the **read** half comes in M3 when we parse phone requests,
+// kept in the same file group for symmetry.
 //
-// 为什么要自己写：这是协议的一部分（编解码自实现，不引第三方），
-// 而且只用到一个很小的子集：dict/array/string/data/整数/布尔/浮点。
+// Why implement it ourselves: it is part of the protocol (codec is self-contained, no third-party deps),
+// and we only use a tiny subset: dict/array/string/data/integer/bool/float.
 #pragma once
 
 #include <cstdint>
@@ -27,7 +27,7 @@ namespace core::bplist {
 class Value;
 using Ptr = std::shared_ptr<Value>;
 
-// ---- 构造（全部返回共享指针，树形组合）----
+// ---- Construction (all return shared pointers, composed into a tree) ----
 Ptr boolean(bool v);
 Ptr u(uint64_t v);
 Ptr i(int64_t v);
@@ -35,17 +35,17 @@ Ptr real(double v);
 Ptr str(std::string v);
 Ptr data(std::vector<uint8_t> v);
 Ptr array(std::vector<Ptr> v);
-/// 字典：保持插入顺序（plist 读取端不要求有序）
+/// Dictionary: preserves insertion order (plist readers do not require ordering)
 Ptr dict(std::vector<std::pair<std::string, Ptr>> v);
 
-/// 序列化成 "bplist00" 格式的字节流（内部：对象扁平化 + 偏移表 + trailer）
+/// Serialize to a "bplist00" byte stream (internally: flatten objects + offset table + trailer)
 std::vector<uint8_t> serialize(const Ptr& root);
 
 // ---------------------------------------------------------------------------
-// 读侧（M3 起：解析手机发来的 bplist 请求体，如 SETUP / /command）
+// Read side (from M3: parse bplist request bodies sent by the phone, e.g. SETUP / /command)
 // ---------------------------------------------------------------------------
-// 注意（对照 bplist 编码的读侧）：8 字节整数按**无符号**读——手机的
-// streamConnectionID / seed 高位置位时会被（错误地）解成负数 Long，必须当 u64。
+// NOTE (read side, matching the bplist encoding): read 8-byte integers as **unsigned** — the phone's
+// streamConnectionID / seed would otherwise (wrongly) decode as a negative Long when the high bit is set; treat them as u64.
 struct Node;
 using NodePtr = std::shared_ptr<Node>;
 
@@ -54,7 +54,7 @@ enum class NodeType { Dict, Array, Str, Data, Uint, Int, Real, Bool, Null };
 struct Node {
     NodeType type = NodeType::Null;
 
-    std::vector<std::pair<std::string, NodePtr>> dict;   ///< Dict（保序）
+    std::vector<std::pair<std::string, NodePtr>> dict;   ///< Dict (order-preserving)
     std::vector<NodePtr>                              array; ///< Array / Set
     std::string        str;
     std::vector<uint8_t> data;
@@ -64,17 +64,17 @@ struct Node {
     bool               b = false;
 };
 
-/// 解析 "bplist00"；失败（魔数/trailer/越界）返回 nullptr。
+/// Parse "bplist00"; returns nullptr on failure (bad magic/trailer/out-of-bounds).
 NodePtr parse(const uint8_t* data, size_t len);
 
-/// dict 按键取值；不是 dict 或没有该键返回 nullptr。
+/// Look up a dict by key; returns nullptr if not a dict or key absent.
 NodePtr dictGet(const NodePtr& n, const char* key);
-/// array 取下标；越界/不是 array 返回 nullptr。
+/// Index an array; returns nullptr if out of range or not an array.
 NodePtr arrGet(const NodePtr& n, size_t idx);
 
-std::string         strOf(const NodePtr& n);   ///< Str；否则 ""
-std::vector<uint8_t> dataOf(const NodePtr& n);  ///< Data；否则空
-uint64_t            uintOf(const NodePtr& n);   ///< Uint/Int；否则 0
-bool                boolOf(const NodePtr& n);   ///< Bool；否则 false
+std::string         strOf(const NodePtr& n);   ///< Str; otherwise ""
+std::vector<uint8_t> dataOf(const NodePtr& n);  ///< Data; otherwise empty
+uint64_t            uintOf(const NodePtr& n);   ///< Uint/Int; otherwise 0
+bool                boolOf(const NodePtr& n);   ///< Bool; otherwise false
 
 }  // namespace core::bplist

@@ -9,24 +9,24 @@
 #include <vector>
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846   // MSVC 的 <cmath> 不定义它
+#define M_PI 3.14159265358979323846   // MSVC's <cmath> does not define it
 #endif
 
 namespace allplay {
 
 namespace {
 
-// —— 设计稿坐标系：1540×850（= 设计稿 1540×850 的网页），渲染时整体缩放居中 ——
+// -- Design coordinate system: 1540x850 (= the 1540x850 design web page); scaled and centered as a whole at render time --
 constexpr int kDesignW = 1540;
 constexpr int kDesignH = 850;
 
-// 颜色取自设计稿的 CSS 变量，别随手改
+// Colors come from the design's CSS variables; do not change them casually
 constexpr SDL_Color kInk        = {0x17, 0x19, 0x1F, 255};   // --ink
 constexpr SDL_Color kMuted      = {0x73, 0x79, 0x85, 255};   // --muted
 constexpr SDL_Color kBlue       = {0x28, 0x78, 0xF0, 255};   // --blue
 constexpr SDL_Color kEyebrow    = {0x5D, 0x64, 0x70, 255};
 constexpr SDL_Color kHint       = {0x85, 0x8B, 0x96, 255};
-constexpr SDL_Color kFooterInk  = {0x4E, 0x55, 0x60, 255};   // 页脚别太淡：14px 灰字看不清（左右两段共用这个色）
+constexpr SDL_Color kFooterInk  = {0x4E, 0x55, 0x60, 255};   // Footer must not be too light: 14px gray text is hard to read (both segments share this color)
 constexpr SDL_Color kLangInk    = {0x30, 0x36, 0x42, 255};
 constexpr SDL_Color kRule       = {0xF0, 0xF1, 0xF4, 255};
 constexpr SDL_Color kCardLine   = {0xE8, 0xEB, 0xF1, 255};
@@ -34,13 +34,13 @@ constexpr SDL_Color kLangLine   = {0xE5, 0xE8, 0xEE, 255};
 constexpr SDL_Color kVisualLine = {0xED, 0xF0, 0xF4, 255};
 constexpr SDL_Color kVisualBg   = {0xFA, 0xFB, 0xFD, 255};
 constexpr SDL_Color kTileBg     = {0xED, 0xF5, 0xFF, 255};
-constexpr SDL_Color kGreen      = {0x25, 0xB8, 0x78, 255};   // 页脚状态点
-constexpr SDL_Color kPhoneGreen = {0x25, 0xC7, 0x7A, 255};   // 手机里的播放图标
+constexpr SDL_Color kGreen      = {0x25, 0xB8, 0x78, 255};   // Footer status dot
+constexpr SDL_Color kPhoneGreen = {0x25, 0xC7, 0x7A, 255};   // Play icon inside the phone
 constexpr SDL_Color kRed        = {0xE5, 0x48, 0x4D, 255};
-// 蓝牙图标自己的蓝（用户给的那张图取样：天蓝，比 --blue 浅）
+// The Bluetooth icon's own blue (sampled from the image the user provided: sky blue, lighter than --blue)
 constexpr SDL_Color kIconBlue   = {0x1E, 0x9B, 0xE0, 255};
 
-// 版面常量（设计稿像素）
+// Layout constants (design pixels)
 constexpr int kHeaderH   = 88;
 constexpr int kMarginX   = 76;
 constexpr int kMainW     = 1280;
@@ -50,15 +50,15 @@ constexpr int kVisualH   = 330;
 constexpr int kCardH     = 88;
 constexpr int kFooterH   = 54;
 
-// —— 基本图元 ——
+// -- Basic primitives --
 //
-// 全部用 SDL_RenderGeometry（**浮点顶点**）画。
-// 为什么不用逐行整数扫描线：那种画法把每个坐标都量化到 1 个设计稿像素，在 Retina
-// 上就是 1.66 个设备像素——圆角、圆环、小图标于是全是台阶。超采样只能把台阶的
-// 边磨圆一点，磨不掉台阶本身（用户看到的"蓝牙图标非常糊"就是它）。
-// 交给 GPU 之后，顶点先按渲染缩放换成设备坐标，边缘精确到设备像素。
+// Everything is drawn with SDL_RenderGeometry (**floating-point vertices**).
+// Why not per-row integer scanlines: that approach quantizes every coordinate to 1 design pixel, which on Retina
+// becomes 1.66 device pixels -- so rounded corners, rings and small icons are all stair-stepped. Supersampling can only
+// smooth the step edges a little, not remove the steps themselves (this is what the user saw as "the Bluetooth icon is very blurry").
+// Handed to the GPU, vertices are first converted to device coordinates by the render scale, giving device-pixel-accurate edges.
 
-/// 当前绘制色（调用方照旧用 SDL_SetRenderDrawColor 设色，这里读回来当顶点色）
+/// Current draw color (callers still set it with SDL_SetRenderDrawColor; read back here as the vertex color)
 SDL_Color curColor(SDL_Renderer* r)
 {
     SDL_Color c{0, 0, 0, 255};
@@ -66,7 +66,7 @@ SDL_Color curColor(SDL_Renderer* r)
     return c;
 }
 
-/// 三角形收集缓冲：场景重建是单线程的，复用一块内存，别每次都去 malloc
+/// Triangle collection buffer: scene rebuilds are single-threaded, so reuse one block instead of mallocing every time
 std::vector<SDL_Vertex>& triBuf()
 {
     static std::vector<SDL_Vertex> buf;
@@ -91,7 +91,7 @@ void flushTris(SDL_Renderer* r, const std::vector<SDL_Vertex>& v)
         SDL_RenderGeometry(r, nullptr, v.data(), int(v.size()), nullptr, 0);
 }
 
-/// 往缓冲里塞一个实心圆（不落盘，调用方自己 flush —— 蓝牙图标一次要画上百个小圆）
+/// Push a filled circle into the buffer (does not flush; the caller flushes -- the Bluetooth icon draws hundreds of small circles at once)
 void emitCircle(std::vector<SDL_Vertex>& v, double cx, double cy, double R, SDL_Color c)
 {
     const int n = std::clamp(int(R * 4.0), 10, 96);
@@ -107,7 +107,7 @@ void fillCircle(SDL_Renderer* r, int cx, int cy, int rad)
 {
     if (rad <= 0) return;
     auto& v = triBuf();
-    emitCircle(v, cx, cy, rad + 0.5, curColor(r));   // +0.5：和旧扫描线的覆盖范围对齐
+    emitCircle(v, cx, cy, rad + 0.5, curColor(r));   // +0.5: matches the old scanline coverage
     flushTris(r, v);
 }
 
@@ -126,7 +126,7 @@ void fillEllipse(SDL_Renderer* r, int cx, int cy, int rx, int ry)
     flushTris(r, v);
 }
 
-/// 圆环（rad = 外半径，thick = 环宽）
+/// Ring (rad = outer radius, thick = ring width)
 void strokeRing(SDL_Renderer* r, int cx, int cy, int rad, int thick)
 {
     if (rad <= 0 || thick <= 0) return;
@@ -157,14 +157,14 @@ void fillRoundRect(SDL_Renderer* r, int x, int y, int w, int h, int rad)
 {
     if (w <= 0 || h <= 0) return;
     const SDL_Color c = curColor(r);
-    const double x0 = x - 0.5, y0 = y - 0.5;      // 旧扫描线的像素边界
+    const double x0 = x - 0.5, y0 = y - 0.5;      // old scanline pixel boundary
     const double x1 = x0 + w, y1 = y0 + h;
     double R = rad;
     if (R * 2 > w) R = w / 2.0;
     if (R * 2 > h) R = h / 2.0;
 
     auto& v = triBuf();
-    if (R <= 0.5) {                                // 直角矩形
+    if (R <= 0.5) {                                // square-cornered rectangle
         v.push_back(vert(x0, y0, c)); v.push_back(vert(x1, y0, c));
         v.push_back(vert(x1, y1, c));
         v.push_back(vert(x0, y0, c)); v.push_back(vert(x1, y1, c));
@@ -173,13 +173,13 @@ void fillRoundRect(SDL_Renderer* r, int x, int y, int w, int h, int rad)
         return;
     }
 
-    // 轮廓：四个圆角各画一段 90° 弧，首尾自然连出四条直边（形状是凸的，扇形三角化）
+    // Outline: each of the four corners draws a 90-degree arc, and the ends naturally connect into four straight edges (convex shape, fan-triangulated)
     struct Corner { double cx, cy, a0; };
     const Corner corners[4] = {
-        {x0 + R, y0 + R, M_PI},          // 左上：π → 3π/2
-        {x1 - R, y0 + R, -M_PI / 2},     // 右上：-π/2 → 0
-        {x1 - R, y1 - R, 0},             // 右下：0 → π/2
-        {x0 + R, y1 - R, M_PI / 2},      // 左下：π/2 → π
+        {x0 + R, y0 + R, M_PI},          // top-left: pi -> 3pi/2
+        {x1 - R, y0 + R, -M_PI / 2},     // top-right: -pi/2 -> 0
+        {x1 - R, y1 - R, 0},             // bottom-right: 0 -> pi/2
+        {x0 + R, y1 - R, M_PI / 2},      // bottom-left: pi/2 -> pi
     };
     const int seg = std::clamp(int(R * 1.5), 3, 24);
     std::vector<SDL_FPoint> ring;
@@ -202,7 +202,7 @@ void fillRoundRect(SDL_Renderer* r, int x, int y, int w, int h, int rad)
     flushTris(r, v);
 }
 
-/// 圆角矩形描边：先按边框色填满，再用填充色盖住内部（背景都是纯色，够用）。
+/// Rounded-rect stroke: fill with the border color, then cover the inside with the fill color (backgrounds are solid, so this suffices).
 void strokeRoundRect(SDL_Renderer* r, int x, int y, int w, int h, int rad, int t,
                      SDL_Color border, SDL_Color fill)
 {
@@ -212,8 +212,8 @@ void strokeRoundRect(SDL_Renderer* r, int x, int y, int w, int h, int rad, int t
     fillRoundRect(r, x + t, y + t, w - 2 * t, h - 2 * t, rad > t ? rad - t : 0);
 }
 
-/// 卡片投影：同宽、只往下长的一叠淡圆角矩形 —— 离底边越远叠得越少，看起来就是
-/// 一层向下淡出的影子。不向左右溢出，免得在卡片左边露出一条灰边（SDL 没有模糊）。
+/// Card shadow: a stack of faint rounded rects, same width, growing only downward -- the farther from the bottom edge, the fewer layers,
+/// giving a shadow that fades downward. It does not spill left or right, to avoid a gray edge peeking out beside the card (SDL has no blur).
 void softShadow(SDL_Renderer* r, int x, int y, int w, int h, int rad)
 {
     SDL_SetRenderDrawColor(r, 0x1A, 0x26, 0x3A, 3);
@@ -221,7 +221,7 @@ void softShadow(SDL_Renderer* r, int x, int y, int w, int h, int rad)
         fillRoundRect(r, x, y, w, h + i, rad);
 }
 
-/// 示意图背后的蓝色柔光（设计稿里的 radial-gradient）
+/// Blue soft glow behind the diagram (the radial-gradient in the design)
 void softGlow(SDL_Renderer* r, int cx, int cy, int rx, int ry)
 {
     SDL_SetRenderDrawColor(r, 0x28, 0x78, 0xF0, 2);
@@ -231,8 +231,8 @@ void softGlow(SDL_Renderer* r, int cx, int cy, int rx, int ry)
     }
 }
 
-/// 一段圆弧（角度制，0° = +x 方向，顺时针为正）
-/// 现在示意图用的是整圈扩散的波纹，这里暂时没人调；留着给"两侧信号弧"那种画法备用。
+/// An arc (in degrees, 0 = +x direction, clockwise positive)
+/// The diagram currently uses full-ring expanding ripples, so nothing calls this for now; kept for a "signal arcs on both sides" style.
 [[maybe_unused]] void strokeArc(SDL_Renderer* r, int cx, int cy, int rad,
                                 double a0, double a1, int thick)
 {
@@ -256,7 +256,7 @@ void fillTriangle(SDL_Renderer* r, SDL_Point a, SDL_Point b, SDL_Point c)
     flushTris(r, v);
 }
 
-/// 一段粗圆弧：沿线摆一串小圆，端点自然是圆的（跟图标的圆头笔画一致）
+/// A thick arc: place a string of small circles along the line, giving naturally round ends (matching the icon's rounded strokes)
 void emitArc(std::vector<SDL_Vertex>& v, double cx, double cy, double R,
              double a0, double a1, double thick, SDL_Color c)
 {
@@ -268,7 +268,7 @@ void emitArc(std::vector<SDL_Vertex>& v, double cx, double cy, double R,
     }
 }
 
-/// 一段粗直线（圆头）
+/// A thick straight segment (round caps)
 void emitCapsule(std::vector<SDL_Vertex>& v, double ax, double ay,
                  double bx, double by, double thick, SDL_Color c)
 {
@@ -280,49 +280,49 @@ void emitCapsule(std::vector<SDL_Vertex>& v, double ax, double ay,
     }
 }
 
-/// 蓝牙图符（用户指定的那张图标）：粗圆头符文 + 右侧两道信号弧，**没有外圈**。
-/// 界面里两处图标都调它，所以两处长得一模一样。
-/// 符文用官方 logo 的六点折线描出来（左下端 → 右上尖 → 竖脊顶 → 竖脊底 → 右下尖 →
-/// 左上端），比例照图标量的；两道弧以符文中心为圆心，内弧 0.81 半高、外弧 1.33 半高，
-/// 开口 ±36°。
+/// Bluetooth badge (the icon the user specified): thick round-capped glyph + two signal arcs on the right, **no outer ring**.
+/// Both badge spots in the UI call this, so they look identical.
+/// The glyph traces the official logo's six-point polyline (bottom-left end -> top-right tip -> ridge top -> ridge bottom ->
+/// bottom-right tip -> top-left end), proportions measured from the icon; both arcs are centered on the glyph, inner arc at 0.81 half-height, outer at 1.33,
+/// opening +/-36 degrees.
 ///
-/// pulse ∈ [0,1)：两弧一起往外走并渐隐 —— 右栏示意图那颗就靠它做扩散动效；
-/// 传 -1 是静止态（左卡片的图标）。
+/// pulse in [0,1): both arcs move outward together and fade -- this drives the expanding animation on the badge in the right-column diagram;
+/// -1 is the static state (the left card's icon).
 void drawBluetoothBadge(SDL_Renderer* r, int cx, int cy, int outerR, SDL_Color c,
                         double pulse = -1.0)
 {
     if (outerR < 5) return;
 
-    constexpr double kArcIn  = 0.88;                   // 内弧半径 / 符文半高
-    constexpr double kArcOut = 1.42;                   // 外弧半径 / 符文半高
-    constexpr double kArcSpan = 0.55;                  // 弧开口 ±31.5°（照图标量的）
+    constexpr double kArcIn  = 0.88;                   // inner arc radius / glyph half-height
+    constexpr double kArcOut = 1.42;                   // outer arc radius / glyph half-height
+    constexpr double kArcSpan = 0.55;                  // arc opening +/-31.5 degrees (measured from the icon)
 
-    const double h   = outerR * 0.82;                  // 符文半高
-    const double rod = std::max(1.0, outerR * 0.115);  // 笔画粗细
-    const double sx  = cx - (kArcOut - 0.636) / 2 * h; // 符文+右弧整体居中
+    const double h   = outerR * 0.82;                  // glyph half-height
+    const double rod = std::max(1.0, outerR * 0.115);  // stroke width
+    const double sx  = cx - (kArcOut - 0.636) / 2 * h; // center the glyph + right arc together
     const double sy  = cy;
 
     auto& v = triBuf();
 
     static const double kPath[6][2] = {
-        {-0.636,  0.559},   // 左下端
-        { 0.636, -0.429},   // 右上尖
-        { 0.015, -1.000},   // 竖脊顶端
-        { 0.015,  1.000},   // 竖脊底端
-        { 0.636,  0.429},   // 右下尖
-        {-0.636, -0.559},   // 左上端
+        {-0.636,  0.559},   // bottom-left end
+        { 0.636, -0.429},   // top-right tip
+        { 0.015, -1.000},   // ridge top
+        { 0.015,  1.000},   // ridge bottom
+        { 0.636,  0.429},   // bottom-right tip
+        {-0.636, -0.559},   // top-left end
     };
     for (int i = 0; i + 1 < 6; ++i)
         emitCapsule(v, sx + kPath[i][0] * h,     sy + kPath[i][1] * h,
                        sx + kPath[i + 1][0] * h, sy + kPath[i + 1][1] * h, rod, c);
 
     if (pulse < 0.0) {
-        // 静止态：就是用户给的那张图（符文 + 两道弧）
+        // Static state: exactly the image the user provided (glyph + two arcs)
         emitArc(v, sx, sy, kArcIn * h,  -kArcSpan, kArcSpan, rod, c);
         emitArc(v, sx, sy, kArcOut * h, -kArcSpan, kArcSpan, rod, c);
     } else {
-        // 动效：三道弧错开 1/3 周期，从内弧位置一路往外走并渐隐。
-        // 任何时刻都有一道刚生成（贴在图符边），所以轮廓始终认得出来。
+        // Animation: three arcs staggered by 1/3 period, traveling outward from the inner-arc position and fading.
+        // At any moment one is freshly spawned (hugging the glyph), so the shape stays recognizable.
         for (int i = 0; i < 3; ++i) {
             const double p = std::fmod(pulse + i / 3.0, 1.0);
             const Uint8  a = Uint8(std::lround(255.0 * (1.0 - p)));
@@ -335,33 +335,33 @@ void drawBluetoothBadge(SDL_Renderer* r, int cx, int cy, int outerR, SDL_Color c
     flushTris(r, v);
 }
 
-/// 品牌标（用户 2026-11-05 给的那张图，替换原来的"AI"深色方块）：
-/// 深藏青的开口圆环 + 环心一个圆角播放三角。size 是整体外径。
-/// 环的缺口在右侧、略偏上（84°，中心 -8°），两端圆头；
-/// 三角等边、尖朝右，三个角倒圆 —— 用"内缩三角 + 每个顶点画圆"拼，
-/// 等价于内缩三角和半径 cr 的圆做闵可夫斯基和，角上正好是正圆弧。
+/// Brand mark (the image the user provided on 2026-11-05, replacing the old dark "AI" square):
+/// a dark navy open ring + a rounded play triangle at its center. size is the overall outer diameter.
+/// The ring's gap is on the right, slightly above center (84 degrees, centered at -8 degrees), with round ends;
+/// the triangle is equilateral, pointing right, with all three corners rounded -- assembled from "an inset triangle + a circle at each vertex",
+/// equivalent to the Minkowski sum of the inset triangle and a circle of radius cr, giving exact circular arcs at the corners.
 void drawPlayMark(SDL_Renderer* r, int cx, int cy, int size, SDL_Color c)
 {
     if (size < 12) return;
     const double S  = size;
-    const double ro = S * 0.5;          // 外半径
-    const double sw = S * 0.13;         // 环宽（照图量的）
-    const double rm = ro - sw / 2;      // 环心线
+    const double ro = S * 0.5;          // outer radius
+    const double sw = S * 0.13;         // ring width (measured from the image)
+    const double rm = ro - sw / 2;      // ring centerline
 
     auto& v = triBuf();
 
-    // ① 开口圆环：+34° 绕到 +310°，缺口 84°，缺口中心 -8°
-    constexpr double kGapHalf = 0.733;  // 42°
-    constexpr double kTilt    = -0.140; // -8°
+    // ① Open ring: from +34 degrees around to +310 degrees, an 84-degree gap centered at -8 degrees
+    constexpr double kGapHalf = 0.733;  // 42 degrees
+    constexpr double kTilt    = -0.140; // -8 degrees
     emitArc(v, cx, cy, rm, kTilt + kGapHalf, kTilt - kGapHalf + 2 * M_PI, sw, c);
 
-    // ② 圆角播放三角
-    const double rt = S * 0.275;        // 外接圆半径（照图量的：三角高 ≈ 0.375·外径）
-    const double cr = S * 0.045;        // 圆角半径（再大就盖过三角本身，会变成三个圆鼓包）
-    const double gx = cx + S * 0.012;   // 三角的墨迹重心比外接圆心偏左，右移一点点视觉才正
+    // ② Rounded play triangle
+    const double rt = S * 0.275;        // circumradius (measured from the image: triangle height ~= 0.375 x outer diameter)
+    const double cr = S * 0.045;        // corner radius (any larger overshoots the triangle itself and turns into three round bumps)
+    const double gx = cx + S * 0.012;   // the triangle's ink centroid sits left of the circumcenter; nudge right slightly to look centered
     SDL_FPoint p[3];
     for (int i = 0; i < 3; ++i) {
-        const double a = 2 * M_PI * i / 3.0;    // 0° = 正右，就是那个尖
+        const double a = 2 * M_PI * i / 3.0;    // 0 degrees = straight right, i.e. the tip
         p[i] = SDL_FPoint{float(gx + rt * std::cos(a)), float(cy + rt * std::sin(a))};
     }
     const double gcx = (p[0].x + p[1].x + p[2].x) / 3.0;
@@ -370,7 +370,7 @@ void drawPlayMark(SDL_Renderer* r, int cx, int cy, int size, SDL_Color c)
     for (int i = 0; i < 3; ++i) {
         const double dx = gcx - p[i].x, dy = gcy - p[i].y;
         const double L  = std::hypot(dx, dy);
-        const double d  = 2.0 * cr;            // 等边三角形：r / sin(30°)
+        const double d  = 2.0 * cr;            // equilateral triangle: r / sin(30 degrees)
         q[i] = SDL_FPoint{float(p[i].x + dx / L * d), float(p[i].y + dy / L * d)};
     }
     v.push_back(vert(q[0].x, q[0].y, c));
@@ -393,13 +393,13 @@ void drawRight(const TextRenderer& t, SDL_Renderer* r, int right, int y,
     t.draw(r, right - t.measure(s), y, s, c);
 }
 
-/// 放不下就按字符截断并补省略号（蓝牙名可能很长）
+/// Truncate by character and append an ellipsis if it does not fit (Bluetooth names can be long)
 std::string ellipsize(const TextRenderer& t, std::string s, int maxW)
 {
     if (t.measure(s) <= maxW) return s;
     while (!s.empty() && t.measure(s + "…") > maxW) {
         size_t i = s.size() - 1;
-        while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) --i;   // 退到 UTF-8 字符头
+        while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) --i;   // back up to a UTF-8 character head
         s.erase(i);
     }
     return s + "…";
@@ -408,14 +408,14 @@ std::string ellipsize(const TextRenderer& t, std::string s, int maxW)
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 布局
+// Layout
 // ---------------------------------------------------------------------------
 
 int Launcher::logicalW(int winW, int winH)
 {
     if (winW <= 0 || winH <= 0) return kDesignW;
     const int w = int(std::lround(double(kDesignH) * winW / winH));
-    return w > kDesignW ? w : kDesignW;   // 比 1.81 窄时不缩，交给等比居中留边
+    return w > kDesignW ? w : kDesignW;   // do not shrink below 1.81; let proportional centering leave the bars
 }
 
 Launcher::Layout Launcher::layoutFor(int winW, int winH) const
@@ -429,7 +429,7 @@ Launcher::Layout Launcher::layoutFor(int winW, int winH) const
     L.ox    = (winW - L.w * L.scale) / 2.0;
     L.oy    = (winH - L.h * L.scale) / 2.0;
 
-    // 取消按钮的位置跟着字号行高走，和 draw() 里算的是同一份
+    // The cancel button position follows font size and line height, matching what draw() computes
     const int subtitleY = 142 + title_.lineHeight() + 10;
     const int contentY  = subtitleY + body_.lineHeight() + 62;
     const int buttonY   = contentY + kVisualH + 66;
@@ -440,14 +440,14 @@ Launcher::Layout Launcher::layoutFor(int winW, int winH) const
 
 bool Launcher::init()
 {
-    // 默认中文（车机连接页的母语版本）；ALLPLAY_LANG=en 可切英文，方便截图核对版式
+    // Chinese by default (the native version of the head-unit pairing page); ALLPLAY_LANG=en switches to English for screenshot layout checks
     if (const char* env = std::getenv("ALLPLAY_LANG")) {
         if (env[0] == 'e' || env[0] == 'E') lang_ = Lang::En;
     }
     return title_.init(42, FontFace::CJK, /*bold=*/true)
         && body_.init(19, FontFace::CJK)
         && eyebrow_.init(16, FontFace::CJK, /*bold=*/true)
-        && device_.init(32, FontFace::CJK)   // 名称是内容不是标题，别加粗
+        && device_.init(32, FontFace::CJK)   // the name is content, not a heading; do not bold it
         && hint_.init(15, FontFace::CJK)
         && button_.init(17, FontFace::CJK, /*bold=*/true)
         && footer_.init(14, FontFace::CJK)
@@ -457,20 +457,20 @@ bool Launcher::init()
 bool Launcher::handleEvent(const SDL_Event& e, int winW, int winH)
 {
     if (e.type != SDL_MOUSEBUTTONDOWN || e.button.button != SDL_BUTTON_LEFT) return false;
-    // 鼠标坐标是窗口像素；用上一帧画过的窗口尺寸反算（全屏时它和 --screen 不一定一样）
+    // Mouse coordinates are in window pixels; map them back with the window size drawn last frame (in fullscreen it may differ from --screen)
     if (winW_ > 0 && winH_ > 0) {
         winW = winW_;
         winH = winH_;
     }
     const Layout L = layoutFor(winW, winH);
-    // 鼠标事件给的是**窗口坐标**（macOS/Wayland 高 DPI 下是逻辑点），
-    // 而 L 是按**渲染器像素**算的；先乘 pixelRatio_ 换到像素再反算设计稿坐标。
+    // Mouse events give **window coordinates** (logical points on high-DPI macOS/Wayland),
+    // while L is computed in **renderer pixels**; multiply by pixelRatio_ to get pixels first, then map back to design coordinates.
     const double x = (e.button.x * pixelRatio_ - L.ox) / L.scale;
     const double y = (e.button.y * pixelRatio_ - L.oy) / L.scale;
     auto in = [&](const SDL_Rect& rc) {
         return x >= rc.x && x < rc.x + rc.w && y >= rc.y && y < rc.y + rc.h;
     };
-    if (in(L.cancel)) return true;                 // 取消 = 退出
+    if (in(L.cancel)) return true;                 // Cancel = exit
     if (in(L.lang)) lang_ = (lang_ == Lang::Zh) ? Lang::En : Lang::Zh;
     return false;
 }
@@ -488,7 +488,7 @@ void Launcher::releaseTextures()
 }
 
 // ---------------------------------------------------------------------------
-// 绘制
+// Drawing
 // ---------------------------------------------------------------------------
 
 void Launcher::draw(SDL_Renderer* r, int winW, int winH, LinkState st, uint64_t nowMs)
@@ -497,17 +497,17 @@ void Launcher::draw(SDL_Renderer* r, int winW, int winH, LinkState st, uint64_t 
     winH_ = winH;
     const Layout L = layoutFor(winW, winH);
 
-    // 2× 超采样，按**设备像素**算：场景纹理 = 这块画面在窗口里的 2 倍，画完刚好
-    // 2:1 缩回去，等于每个设备像素做 2×2 盒式平均 —— 边平滑、形状也不走样。
-    // 注意别按"设计稿 ×2"来建纹理：那样缩到窗口是 2.4:1，双线性只采 2×2 个纹素，
-    // 结果又糊又起摩尔纹（这正是之前"圆角/图标边缘很糊"的原因）。
-    constexpr int kSS = 2;   // 只能是 2 的幂：双线性缩 3:1 只采 2×2 个纹素，反而起摩尔纹
-    const double sc = L.scale;                     // 设计稿 → 设备像素
-    const int vw = int(std::lround(L.w * sc));     // 画面在窗口里的设备像素尺寸
+    // 2x supersampling, computed in **device pixels**: the scene texture = twice this picture's size in the window, drawn and then
+    // scaled back exactly 2:1, which is a 2x2 box average per device pixel -- smooth edges with undistorted shapes.
+    // Do not build the texture at "design x2": scaling that to the window is 2.4:1, so bilinear only samples 2x2 texels,
+    // giving blur and moire (this is exactly what caused the earlier "blurry rounded corners/icon edges").
+    constexpr int kSS = 2;   // must be a power of two: bilinear at 3:1 samples only 2x2 texels and causes moire
+    const double sc = L.scale;                     // design -> device pixels
+    const int vw = int(std::lround(L.w * sc));     // the picture's size in device pixels within the window
     const int vh = int(std::lround(L.h * sc));
     const int tw = vw * kSS, th = vh * kSS;
 
-    // 动画（波纹、省略号）10 fps 重建就够；静态内容只在状态变化时重画。
+    // Rebuilding at 10 fps is enough for animation (ripples, ellipsis); static content is redrawn only on state changes.
     const uint64_t bucket = nowMs / 100;
     const bool dirty = !scene_ || sceneW_ != tw || sceneH_ != th ||
                        bucket != sceneBucket_ || st != sceneSt_ ||
@@ -521,7 +521,7 @@ void Launcher::draw(SDL_Renderer* r, int winW, int winH, LinkState st, uint64_t 
             sceneH_ = scene_ ? th : 0;
             if (!scene_ && !sceneWarned_) {
                 sceneWarned_ = true;
-                std::fprintf(stderr, "[launcher] 渲染器不支持离屏纹理，退回直画（边缘会有锯齿）：%s\n",
+                std::fprintf(stderr, "[launcher] Renderer does not support offscreen textures, falling back to direct drawing (edges will be jagged): %s\n",
                              SDL_GetError());
             }
         }
@@ -529,8 +529,8 @@ void Launcher::draw(SDL_Renderer* r, int winW, int winH, LinkState st, uint64_t 
             SDL_SetRenderTarget(r, scene_);
             SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
             SDL_RenderClear(r);
-            SDL_RenderSetScale(r, float(sc * kSS), float(sc * kSS));  // 设计稿坐标 → 2× 设备像素
-            drawScene(r, L, st, nowMs, sc * kSS);                    // 字形也按这个倍数栅格化
+            SDL_RenderSetScale(r, float(sc * kSS), float(sc * kSS));  // design coordinates -> 2x device pixels
+            drawScene(r, L, st, nowMs, sc * kSS);                    // glyphs are rasterized at this same factor
             SDL_RenderSetScale(r, 1, 1);
             SDL_SetRenderTarget(r, nullptr);
             SDL_SetTextureScaleMode(scene_, SDL_ScaleModeLinear);
@@ -544,11 +544,11 @@ void Launcher::draw(SDL_Renderer* r, int winW, int winH, LinkState st, uint64_t 
     SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
     SDL_RenderClear(r);
     if (scene_) {
-        // 不设 logical size：直接把 2× 纹理按设备像素贴回去（缩放比正好 2:1）
+        // Do not set logical size: blit the 2x texture back directly in device pixels (the scale ratio is exactly 2:1)
         SDL_Rect dst{int(std::lround(L.ox)), int(std::lround(L.oy)), vw, vh};
         SDL_RenderCopy(r, scene_, nullptr, &dst);
     } else {
-        // 渲染器不支持 target 纹理：退回 logical size 直接画（边缘略糙，但功能不缺）
+        // Renderer has no target texture: fall back to drawing directly with logical size (slightly rough edges, but fully functional)
         SDL_RenderSetLogicalSize(r, L.w, L.h);
         drawScene(r, L, st, nowMs, L.scale);
         SDL_RenderSetLogicalSize(r, 0, 0);
@@ -559,7 +559,7 @@ void Launcher::draw(SDL_Renderer* r, int winW, int winH, LinkState st, uint64_t 
 void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_t nowMs,
                          double rasterScale)
 {
-    // 字形按最终设备像素栅格化（超采样倍数已经乘进来）
+    // Rasterize glyphs at final device pixels (the supersampling factor is already multiplied in)
     for (TextRenderer* t : {&title_, &body_, &eyebrow_, &device_, &hint_,
                             &button_, &footer_, &brand_})
         t->setRasterScale(rasterScale);
@@ -568,20 +568,20 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
 
     const bool zh = (lang_ == Lang::Zh);
 
-    // ======================= 顶栏 =======================
+    // ======================= Top bar =======================
     SDL_SetRenderDrawColor(r, kRule.r, kRule.g, kRule.b, 255);
     SDL_Rect rule{0, kHeaderH, L.w, 2};
     SDL_RenderFillRect(r, &rule);
 
-    // 字标：用户给的 C+播放 图标（原来的深色方块 + "AI" 已撤掉）
-    drawPlayMark(r, kMarginX + 20, kHeaderH / 2, 40, kInk);   // 和字一样纯黑（用户要求）
+    // Wordmark: the C+play icon the user provided (the old dark square + "AI" has been removed)
+    drawPlayMark(r, kMarginX + 20, kHeaderH / 2, 40, kInk);   // pure black like the text (user request)
 
-    // 品牌名
+    // Brand name
     if (brand_.ok())
         brand_.draw(r, kMarginX + 38 + 13, brand_.centeredY(0, kHeaderH, "AIIPlay"),
                     "AIIPlay", kInk);
 
-    // 语言胶囊：中文时显示 EN，英文时显示中文
+    // Language pill: shows EN in Chinese mode, Chinese in English mode
     strokeRoundRect(r, L.lang.x, L.lang.y, L.lang.w, L.lang.h, L.lang.h / 2, 2,
                     kLangLine, SDL_Color{255, 255, 255, 255});
     if (footer_.ok()) {
@@ -590,7 +590,7 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
                      footer_.centeredY(L.lang.y, L.lang.h, pill), pill, kLangInk);
     }
 
-    // ======================= 标题 =======================
+    // ======================= Title =======================
     const std::string title = zh ? "欢迎使用AllPlay" : "Welcome to AllPlay";
     const std::string sub   = zh ? "连接成功后，即可在车机屏幕使用完整的CarPlay服务"
                                  : "Once connected, you can use CarPlay services on the vehicle's display screen.";
@@ -599,15 +599,15 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
     drawCentered(body_, r, L.w / 2, subtitleY, sub, kMuted);
     const int contentY = subtitleY + body_.lineHeight() + 62;
 
-    // ======================= 两栏 =======================
-    const int mainX   = (L.w - kMainW) / 2;   // 内容块 1280 宽，居中（HTML 的 max-width）
+    // ======================= Two columns =======================
+    const int mainX   = (L.w - kMainW) / 2;   // content block 1280 wide, centered (the HTML max-width)
     const int col1W   = int((kMainW - kColGap) * 0.92 / 2.0);
     const int leftX   = mainX + kLeftPad;
     const int leftW   = col1W - kLeftPad;
     const int visualX = mainX + col1W + kColGap;
     const int visualW = kMainW - col1W - kColGap;
 
-    // ------------- 左栏：设备蓝牙名称 -------------
+    // ------------- Left column: device Bluetooth name -------------
     std::vector<std::string> hintLines;
     if (zh) {
         hintLines.push_back("请在手机蓝牙列表中选择此设备进行配对，并确保手机 Wi-Fi 已开启。");
@@ -630,7 +630,7 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
     const int tileX = leftX + 25, tileY = cardY + (kCardH - 48) / 2;
     SDL_SetRenderDrawColor(r, kTileBg.r, kTileBg.g, kTileBg.b, 255);
     fillRoundRect(r, tileX, tileY, 48, 48, 14);
-    // 图标：用户给的那张蓝牙圆标（波纹扩散在右栏示意图那颗上，这里不画）
+    // Icon: the round Bluetooth badge the user provided (the ripple animation is on the badge in the right-column diagram; not drawn here)
     drawBluetoothBadge(r, tileX + 24, tileY + 24, 19, kIconBlue);
 
     if (device_.ok()) {
@@ -646,13 +646,13 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
         hintY += hintLH;
     }
 
-    // ------------- 右栏：示意图 -------------
+    // ------------- Right column: diagram -------------
     softShadow(r, visualX, contentY, visualW, kVisualH, 20);
     strokeRoundRect(r, visualX, contentY, visualW, kVisualH, 20, 2, kVisualLine, kVisualBg);
     softGlow(r, visualX + visualW / 2, contentY + int(kVisualH * 0.52),
              int(visualW * 0.30), int(kVisualH * 0.30));
 
-    // SVG 设计稿是 620×285，等比放进内边距 28 的区域
+    // The SVG design is 620x285; fit it proportionally into the area with 28 padding
     const double sv = std::min(double(visualW - 56) / 620.0, double(kVisualH - 56) / 285.0);
     const double sox = visualX + (visualW - 620 * sv) / 2.0;
     const double soy = contentY + (kVisualH - 285 * sv) / 2.0;
@@ -664,7 +664,7 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
         fillRoundRect(r, PX(x), PY(y), PS(w), PS(h), PS(rad));
     };
 
-    // 手机
+    // Phone
     softShadow(r, PX(20), PY(55), PS(88), PS(174), PS(15));
     rect(20, 55, 88, 174, 15, SDL_Color{0x24, 0x2A, 0x34, 255});
     rect(25, 61, 78, 162, 11, SDL_Color{0xEE, 0xF2, 0xF7, 255});
@@ -676,12 +676,12 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
     fillTriangle(r, SDL_Point{PX(58), PY(126)}, SDL_Point{PX(75), PY(138)},
                     SDL_Point{PX(58), PY(150)});
 
-    // 蓝牙图符：和左侧卡片里的是同一个图标。这里两道信号弧跟着 2 秒一轮往外走、
-    // 渐隐——就是"波纹扩散"的动效，比另外套一圈圈圆环更贴图标本身。
+    // Bluetooth badge: the same icon as in the left card. Here the two signal arcs travel outward once every 2 seconds and fade
+    // -- that is the "ripple expanding" animation, which suits the icon itself better than adding separate rings.
     const double phase = std::fmod(double(nowMs) / 2000.0, 1.0);
     drawBluetoothBadge(r, PX(198), PY(143), PS(19), kIconBlue, phase);
 
-    // 中控屏
+    // Head unit
     softShadow(r, PX(284), PY(24), PS(316), PS(230), PS(13));
     rect(284, 24, 316, 230, 13, SDL_Color{0x20, 0x27, 0x33, 255});
     rect(291, 31, 302, 216, 9, SDL_Color{0xF7, 0xF9, 0xFC, 255});
@@ -689,7 +689,7 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
     for (int i = 0; i < 3; ++i)
         rect(308 + i * 92, 49, 84, 150, 5, SDL_Color{0xE6, 0xEA, 0xF1, 255});
 
-    // 三块面板里的应用图标
+    // App icons in the three panels
     rect(325, 111, 50, 50, 12, SDL_Color{255, 255, 255, 255});
     SDL_SetRenderDrawColor(r, 0x28, 0xBD, 0x78, 255);
     fillTriangle(r, SDL_Point{PX(343), PY(122)}, SDL_Point{PX(362), PY(136)},
@@ -705,14 +705,14 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
     fillTriangle(r, SDL_Point{PX(524), PY(145)}, SDL_Point{PX(534), PY(126)},
                     SDL_Point{PX(544), PY(145)});
 
-    // 底部 dock
+    // Bottom dock
     rect(301, 211, 282, 26, 4, SDL_Color{0xED, 0xF1, 0xF6, 255});
     const SDL_Color dockIcons[4] = {{0x28, 0x78, 0xF0, 255}, {0xF2, 0xC9, 0x4C, 255},
                                     {0x28, 0xBD, 0x78, 255}, {0xEF, 0x9B, 0x78, 255}};
     for (int i = 0; i < 4; ++i)
         rect(314 + i * 28, 217, 15, 15, 4, dockIcons[i]);
     SDL_SetRenderDrawColor(r, 255, 255, 255, 255);
-    for (int i = 0; i < 2; ++i) {   // 黄色 / 橙色图标里的两条白线
+    for (int i = 0; i < 2; ++i) {   // the two white lines inside the yellow / orange icons
         SDL_Rect l1{PX(348), PY(221 + i * 4), PS(7), std::max(1, PS(1.5))};
         SDL_Rect l2{PX(404), PY(221 + i * 4), PS(7), std::max(1, PS(1.5))};
         SDL_RenderFillRect(r, &l1);
@@ -721,10 +721,10 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
     fillTriangle(r, SDL_Point{PX(374), PY(221)}, SDL_Point{PX(381), PY(224.5)},
                     SDL_Point{PX(374), PY(228)});
 
-    SDL_SetRenderDrawColor(r, 0xD5, 0xDB, 0xE4, 255);   // dock 分隔线
+    SDL_SetRenderDrawColor(r, 0xD5, 0xDB, 0xE4, 255);   // dock separator
     SDL_Rect sep{PX(442), PY(224), PS(48), std::max(1, PS(1.5))};
     SDL_RenderFillRect(r, &sep);
-    SDL_SetRenderDrawColor(r, 0x9A, 0xA5, 0xB5, 255);   // 播放 / 暂停 / 翻页
+    SDL_SetRenderDrawColor(r, 0x9A, 0xA5, 0xB5, 255);   // play / pause / page
     strokeRing(r, PX(516), PY(224.5) + 1, PS(5.5), std::max(1, PS(1.4)));
     fillTriangle(r, SDL_Point{PX(515), PY(222)}, SDL_Point{PX(518), PY(225)},
                     SDL_Point{PX(515), PY(228)});
@@ -735,7 +735,7 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
     fillTriangle(r, SDL_Point{PX(568), PY(222)}, SDL_Point{PX(572), PY(225)},
                     SDL_Point{PX(568), PY(228)});
 
-    // ======================= 取消按钮 =======================
+    // ======================= Cancel button =======================
     softShadow(r, L.cancel.x, L.cancel.y, L.cancel.w, L.cancel.h, 14);
     SDL_SetRenderDrawColor(r, kInk.r, kInk.g, kInk.b, 255);
     fillRoundRect(r, L.cancel.x, L.cancel.y, L.cancel.w, L.cancel.h, 14);
@@ -746,7 +746,7 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
                      label, SDL_Color{255, 255, 255, 255});
     }
 
-    // ======================= 页脚 =======================
+    // ======================= Footer =======================
     SDL_SetRenderDrawColor(r, kRule.r, kRule.g, kRule.b, 255);
     SDL_Rect footRule{0, L.h - kFooterH, L.w, 2};
     SDL_RenderFillRect(r, &footRule);
@@ -773,7 +773,7 @@ void Launcher::drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_
             break;
     }
     const int footMid = L.h - kFooterH / 2;
-    // 左右两段共用同一个 y：同一行字必须共基线，各按自己的墨迹居中会错开
+    // Both segments share one y: text on the same line must share a baseline; centering each by its own ink would misalign them
     const int footY = footer_.centeredY(L.h - kFooterH, kFooterH, status);
     SDL_SetRenderDrawColor(r, dot.r, dot.g, dot.b, 255);
     fillCircle(r, kMarginX + 4, footMid, 4);

@@ -1,15 +1,15 @@
 /**
  * @file   pairing_store.h
- * @brief  手机（controller）配对记录的持久化
+ * @brief  Persistence of phone (controller) pairing records
  * @author blt
  */
 
 // ============================================================================
-// core/platform/pairing_store.h —— 手机（controller）配对记录的持久化
+// core/platform/pairing_store.h — persistence of phone (controller) pairing records
 // ============================================================================
-// pair-setup M5 存手机 Ed25519 长期公钥（LTPK）+ 其 identifier（UUID 字符串）；
-// pair-verify M3 按 identifier 取回验签。首版只存"最近一个"手机（单手机场景），
-// 多手机映射属 M4+ 细化。落盘 0600，与 device_identity 同目录。
+// pair-setup M5 stores the phone's Ed25519 long-term public key (LTPK) + its identifier (UUID string);
+// pair-verify M3 fetches it by identifier to verify signatures. v1 stores only the "most recent" phone (single-phone case),
+// multi-phone mapping is an M4+ refinement. Written with 0600, in the same directory as device_identity.
 #pragma once
 
 #include <cstdint>
@@ -20,14 +20,14 @@ namespace core {
 
 class PairingStore {
 public:
-    /// 从 stateDir 读（不存在/读不出返回 false，不报错）。
+    /// Read from stateDir (missing/unreadable returns false without error).
     bool load(const std::string& stateDir);
 
     bool hasPairing() const { return !controllerId_.empty(); }
     const std::string&        controllerId() const { return controllerId_; }
     const std::vector<uint8_t>& controllerLtpk() const { return controllerLtpk_; }
 
-    /// 保存（0600）。失败返回 false。
+    /// Save (0600). Returns false on failure.
     bool save(const std::string& stateDir, const std::string& id,
               const std::vector<uint8_t>& ltpk32);
 

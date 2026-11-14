@@ -3,8 +3,8 @@ package com.allplay.app
 import android.view.Surface
 
 /**
- * 原生桥的 JNI 声明（对应 jni_bridge.cpp 里的
- * Java_com_allplay_app_NativeAllPlay_* 入口）。
+ * JNI declarations for the native bridge (corresponding to the
+ * Java_com_allplay_app_NativeAllPlay_* entry points in jni_bridge.cpp).
  */
 class NativeAllPlay {
     companion object {
@@ -13,8 +13,8 @@ class NativeAllPlay {
         }
     }
 
-    /// 启动 core（Receiver）：蓝牙/mDNS/视频三个服务对象交给 native 下调。
-    /// @return RTSP 端口（>0 成功；-1 失败）
+    /// Start core (Receiver): hand the Bluetooth/mDNS/video service objects to native for downcalls.
+    /// @return RTSP port (>0 on success; -1 on failure)
     external fun nativeStart(
         bt: BluetoothService,
         mdns: MdnsService,
@@ -37,15 +37,15 @@ class NativeAllPlay {
 
     external fun nativeSetSurface(surface: Surface)
 
-    /// 发触摸：每组 3 个 float [x, y, down(0/1)]，最多 2 组；坐标归一化 0..1
+    /// Send touch: each group is 3 floats [x, y, down(0/1)], at most 2 groups; coordinates normalized 0..1
     external fun nativeSendTouch(points: FloatArray)
 
-    /// 立即向 iPhone 请求关键帧（回前台 Surface 重建后调用，尽快恢复画面）
+    /// Request a keyframe from the iPhone immediately (called after the Surface is rebuilt on returning to foreground, to restore the picture ASAP)
     external fun nativeRequestKeyFrame()
 
-    /// 会话状态：0=等待连接，1=连接中，2=已连接
+    /// Session state: 0=waiting for connection, 1=connecting, 2=connected
     external fun nativeSessionState(): Int
 
-    /// 本机 deviceid（如 "02:F5:92:44:8E:EC"），用于探测 /ctrl-int/1/connect
+    /// Local deviceid (e.g. "02:F5:92:44:8E:EC"), used to probe /ctrl-int/1/connect
     external fun nativeDeviceId(): String
 }

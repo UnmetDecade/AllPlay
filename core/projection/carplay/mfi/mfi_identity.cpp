@@ -34,12 +34,12 @@ std::unique_ptr<CertificateMfiIdentity> CertificateMfiIdentity::load(const std::
     bool ok = false;
     auto keyDer = readFile(dir + "/identity.pk8", &ok);
     if (!ok) {
-        if (err) *err = "读不到 " + dir + "/identity.pk8（先跑 scripts/extract-identity.sh）";
+        if (err) *err = "Cannot read " + dir + "/identity.pk8 (run scripts/extract-identity.sh first)";
         return nullptr;
     }
     auto cert = readFile(dir + "/certificate.p7b", &ok);
     if (!ok) {
-        if (err) *err = "读不到 " + dir + "/certificate.p7b";
+        if (err) *err = "Cannot read " + dir + "/certificate.p7b";
         return nullptr;
     }
     return loadFromMemory(keyDer.data(), keyDer.size(), cert.data(), cert.size(), err);
@@ -49,11 +49,11 @@ std::unique_ptr<CertificateMfiIdentity> CertificateMfiIdentity::loadFromMemory(
     const uint8_t* keyDer, size_t keyLen, const uint8_t* certDer, size_t certLen, std::string* err)
 {
     if (!keyDer || keyLen == 0) {
-        if (err) *err = "identity.pk8 是空的";
+        if (err) *err = "identity.pk8 is empty";
         return nullptr;
     }
     if (!certDer || certLen == 0) {
-        if (err) *err = "certificate.p7b 是空的";
+        if (err) *err = "certificate.p7b is empty";
         return nullptr;
     }
 
@@ -62,22 +62,22 @@ std::unique_ptr<CertificateMfiIdentity> CertificateMfiIdentity::loadFromMemory(
     const unsigned char* p = keyDer;
     self->key_ = d2i_AutoPrivateKey(nullptr, &p, long(keyLen));
     if (!self->key_) {
-        if (err) *err = "identity.pk8 不是有效的私钥（PKCS#8 DER）";
+        if (err) *err = "identity.pk8 is not a valid private key (PKCS#8 DER)";
         return nullptr;
     }
     if (EVP_PKEY_base_id(self->key_) != EVP_PKEY_EC) {
-        if (err) *err = "identity.pk8 不是 EC 私钥";
+        if (err) *err = "identity.pk8 is not an EC private key";
         return nullptr;
     }
     self->cert_.assign(certDer, certDer + certLen);
-    LOG_INFO("MFi 身份已载入：证书 %zu 字节", self->cert_.size());
+    LOG_INFO("MFi identity loaded: certificate %zu bytes", self->cert_.size());
     return self;
 }
 
 std::vector<uint8_t> CertificateMfiIdentity::signDigest(const uint8_t* digest, size_t len, bool* ok) const
 {
     if (ok) *ok = false;
-    if (!key_ || len != 32) return {};   // P-256 的摘要固定 32 字节
+    if (!key_ || len != 32) return {};   // P-256 digests are always 32 bytes
 
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(key_, nullptr);
     if (!ctx) return {};
@@ -89,7 +89,7 @@ std::vector<uint8_t> CertificateMfiIdentity::signDigest(const uint8_t* digest, s
         std::vector<uint8_t> der(derLen);
         if (EVP_PKEY_sign(ctx, der.data(), &derLen, digest, len) <= 0) break;
 
-        // DER → raw r||s（各 32 字节）
+        // DER -> raw r||s (32 bytes each)
         const unsigned char* q = der.data();
         ECDSA_SIG* sig = d2i_ECDSA_SIG(nullptr, &q, long(derLen));
         if (!sig) break;

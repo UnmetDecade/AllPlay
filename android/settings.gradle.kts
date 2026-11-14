@@ -1,6 +1,6 @@
 pluginManagement {
     repositories {
-        // 国内镜像优先，Google/MavenCentral 兜底
+        // Prefer the China mirrors, fall back to Google/MavenCentral
         maven("https://maven.aliyun.com/repository/gradle-plugin")
         maven("https://maven.aliyun.com/repository/google")
         maven("https://maven.aliyun.com/repository/public")

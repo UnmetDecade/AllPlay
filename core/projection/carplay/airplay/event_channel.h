@@ -1,18 +1,18 @@
 /**
  * @file   event_channel.h
- * @brief  事件通道（M4：HID/触摸回传 + 命令）
+ * @brief  Event channel (M4: HID/touch feedback + commands)
  * @author blt
  */
 
 // ============================================================================
-// core/airplay/event_channel.h —— 事件通道（M4：HID/触摸回传 + 命令）
+// core/airplay/event_channel.h - Event channel (M4: HID/touch feedback + commands)
 // ============================================================================
-// iPhone 连到 SETUP 响应里的 eventPort。通道用 ControlCipher 加密：
-//   密钥 = HKDF-SHA512(sharedSecret, "Events-Salt", "Events-*", 32)
-//   写方向 = "Events-Write-Encryption-Key"，读方向 = "Events-Read-Encryption-Key"
-// 触摸：把触点编成 HID report，作为 POST /command 的 bplist 体发过去
+// The iPhone connects to the eventPort from the SETUP response. The channel is encrypted with ControlCipher:
+//   key = HKDF-SHA512(sharedSecret, "Events-Salt", "Events-*", 32)
+//   write direction = "Events-Write-Encryption-Key", read direction = "Events-Read-Encryption-Key"
+// Touch: encode contacts as an HID report and send it as the bplist body of POST /command
 //   {"type":"hidSendReport","uuid":"2a2a2a2a","hidReport":<12B report>}
-// 参照 AirPlay 事件通道（sendCommand/sendTouch + HID touchReport）。
+// Per the AirPlay event channel (sendCommand/sendTouch + HID touchReport).
 #pragma once
 
 #include "airplay/control_cipher.h"
@@ -33,7 +33,7 @@ namespace core::bplist { class Value; }
 
 namespace core::airplay {
 
-/// 一个触点（坐标归一化 0..1，相对主屏分辨率）。
+/// One touch contact (coordinates normalized 0..1 relative to the main screen resolution).
 struct TouchPoint {
     float x = 0;
     float y = 0;
@@ -42,7 +42,7 @@ struct TouchPoint {
 
 class EventChannel {
 public:
-    /// listener 需已绑定（port 已知）。sharedSecret = pair-verify 的 shared。
+    /// listener must already be bound (port known). sharedSecret = the shared secret from pair-verify.
     EventChannel(std::unique_ptr<core::ITcpListener> listener,
                  const std::vector<uint8_t>& sharedSecret,
                  int width, int height);
@@ -52,28 +52,28 @@ public:
     uint16_t port() const { return port_; }
     void stop();
 
-    /// 换用新一场 pair-verify 的 sharedSecret 重算读写密钥，并踢掉旧连接。
-    /// 通道对象跨会话复用（监听端口不变），但密钥是**每场会话**的 —— 不换的话，
-    /// 宿主发给手机的包手机一侧解不开，iOS 会把整个 CarPlay 会话掐断。
+    /// Recompute the read/write keys from a new pair-verify sharedSecret and kick the old connection.
+    /// The channel object is reused across sessions (the listening port stays the same), but the keys are **per session** — otherwise
+    /// the phone cannot decrypt packets the host sends, and iOS terminates the entire CarPlay session.
     void rekey(const std::vector<uint8_t>& sharedSecret);
 
-    /// 发触摸（归一化坐标 → 缩放成像素 → HID report → 加密 POST /command）。
+    /// Send a touch (normalized coordinates -> scaled to pixels -> HID report -> encrypted POST /command).
     bool sendTouch(const std::vector<TouchPoint>& contacts);
 
-    /// 发任意命令（bplist dict）。
+    /// Send an arbitrary command (bplist dict).
     bool sendCommand(const std::shared_ptr<core::bplist::Value>& cmd);
 
 private:
-    void run();   // accept + 读侧（解密 + 解析 + 回 200 ACK）
-    /// 独立的写线程：加密 + 发出去。见 .cpp 里"为什么不能让调用方自己写"。
+    void run();   // accept + read side (decrypt + parse + send 200 ACK)
+    /// Separate write thread: encrypt + send. See the .cpp for "why callers must not write directly".
     void writeLoop();
-    /// 入队一段待发明文。非阻塞 —— 触摸是 UI 线程调的，绝不能在这里等 socket。
+    /// Enqueue plaintext to send. Non-blocking — touch is called from the UI thread and must never wait on a socket here.
     bool submit(std::vector<uint8_t> plain, bool droppable);
     bool sendCommandImpl(const std::shared_ptr<core::bplist::Value>& cmd, bool droppable);
 
     struct OutMsg {
         std::vector<uint8_t> plain;
-        bool droppable = false;   ///< true = 触摸这种"新的覆盖旧的"的包，队列挤时可丢
+        bool droppable = false;   ///< true = a "newer supersedes older" packet like touch, may be dropped when the queue is full
     };
 
     std::unique_ptr<core::ITcpListener> listener_;
@@ -83,14 +83,14 @@ private:
     std::thread thread_;
     std::thread writer_;
 
-    std::mutex mu_;                          // 保护 stream_/cipher_/cseq_/plain_
+    std::mutex mu_;                          // protects stream_/cipher_/cseq_/plain_
     std::shared_ptr<core::ITcpStream> stream_;
     std::shared_ptr<ControlCipher> cipher_;
     uint64_t cseq_ = 0;
     std::vector<uint8_t> writeKey_, readKey_;
-    std::vector<uint8_t> plain_;             // 读侧解密后的明文缓冲（未凑整帧的部分）
+    std::vector<uint8_t> plain_;             // decrypted plaintext buffer on the read side (partial frame remainder)
 
-    std::mutex outMu_;                       // 保护发送队列
+    std::mutex outMu_;                       // protects the send queue
     std::condition_variable outCv_;
     std::deque<OutMsg> out_;
     size_t outBytes_ = 0;

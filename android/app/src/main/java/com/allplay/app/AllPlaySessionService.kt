@@ -16,8 +16,8 @@ import android.provider.Settings
 import android.view.Surface
 
 /**
- * 前台服务：常驻承载 native core（Receiver）。蓝牙触发 → 配对 → 投屏都在这里。
- * MainActivity 只负责 Surface 与启动/停止本服务。
+ * Foreground service: hosts the native core (Receiver) permanently. Bluetooth trigger → pairing → projection all happen here.
+ * MainActivity only handles the Surface and starting/stopping this service.
  */
 class AllPlaySessionService : Service() {
     private lateinit var native: NativeAllPlay
@@ -38,7 +38,7 @@ class AllPlaySessionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        ensureIdentity()   // 首启把打包进 APK 的 MFi 身份（identity.pk8 + certificate.p7b）落到 files/identity
+        ensureIdentity()   // On first launch, unpack the MFi identity bundled in the APK (identity.pk8 + certificate.p7b) into files/identity
         val app = application as AllPlayApp
         app.service = this
         native = NativeAllPlay()
@@ -47,10 +47,10 @@ class AllPlaySessionService : Service() {
         video = MediaCodecSink()
         audio = AudioSink()
         hotspot = HotspotManager(this)
-        // 后台保活：拿部分唤醒锁，防止退后台后 CPU/网络休眠导致 CarPlay 断连
+        // Background keep-alive: hold a partial wake lock so CPU/network sleep after backgrounding does not drop CarPlay
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AllPlay:CarPlay").apply { acquire() }
-        // Surface 可能先于本服务就绪（MainActivity surfaceCreated 早于服务创建），补传一次
+        // The Surface may become ready before this service (MainActivity surfaceCreated runs before service creation); pass it in once
         app.surface?.let { s -> video.setSurface(s) }
     }
 
@@ -63,8 +63,8 @@ class AllPlaySessionService : Service() {
         return START_STICKY
     }
 
-    /// 首启把打包进 APK 的 MFi 身份落到 files/identity（identity.pk8 + certificate.p7b）。
-    /// 已存在就不动，所以之后 adb push 覆盖的文件优先于 APK 内置的这份。
+    /// On first launch, unpack the MFi identity bundled in the APK into files/identity (identity.pk8 + certificate.p7b).
+    /// If already present, leave it alone, so files later overwritten via adb push take precedence over the APK copy.
     private fun ensureIdentity() {
         val dir = java.io.File(filesDir, "identity")
         val key = java.io.File(dir, "identity.pk8")
@@ -74,9 +74,9 @@ class AllPlaySessionService : Service() {
         try {
             if (!key.exists()) copyAsset("identity/identity.pk8", key)
             if (!cert.exists()) copyAsset("identity/certificate.p7b", cert)
-            android.util.Log.i("AllPlay", "MFi 身份已从 APK 落到 files/identity")
+            android.util.Log.i("AllPlay", "MFi identity copied from APK to files/identity")
         } catch (e: Exception) {
-            android.util.Log.e("AllPlay", "MFi 身份落地失败，CarPlay 认证会过不了", e)
+            android.util.Log.e("AllPlay", "Failed to copy MFi identity; CarPlay authentication will fail", e)
         }
     }
 
@@ -88,11 +88,11 @@ class AllPlaySessionService : Service() {
         }
     }
 
-    /// 屏幕方向：默认横屏（宽 > 高）；files/portrait 存在则竖屏（宽 < 高）。
-    /// 流畅模式：分辨率减半（像素降到 1/4，比例不变）。
+    /// Screen orientation: landscape by default (width > height); portrait if files/portrait exists (width < height).
+    /// Smooth mode: halve the resolution (pixels drop to 1/4, aspect ratio unchanged).
     private fun resolutionForOrientation(): Pair<Int, Int> {
         val portraitMode = java.io.File(filesDir, "portrait").exists()
-        // 性能模式：固定 1280x720 @ 30fps（不再分辨率减半）
+        // Performance mode: fixed 1280x720 @ 30fps (no more halved resolution)
         if (smoothMode) return if (portraitMode) 720 to 1280 else 1280 to 720
         val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
         val dm = android.util.DisplayMetrics()
@@ -106,78 +106,78 @@ class AllPlaySessionService : Service() {
         val (w, h) = resolutionForOrientation()
         nativeWidth = w; nativeHeight = h
         val stateDir = filesDir.absolutePath
-        val identityDir = "$stateDir/identity"   // 由安装/首启时放入 identity.pk8 + certificate.p7b
-        // 热点模式：后台线程开热点 → 用热点 SSID/口令/IP 启动（避免阻塞主线程）
-        // 局域网模式：files/lan 存在则跳过热点，直接用当前 WiFi（iPhone 与平板同网）
+        val identityDir = "$stateDir/identity"   // identity.pk8 + certificate.p7b are placed here at install/first launch
+        // Hotspot mode: open the hotspot on a background thread → start with the hotspot SSID/passphrase/IP (to avoid blocking the main thread)
+        // LAN mode: if files/lan exists, skip the hotspot and use the current WiFi directly (iPhone and tablet on the same network)
         val lanMode = java.io.File(filesDir, "lan").exists()
         Thread {
-            android.util.Log.i("AllPlay", "startNative 线程开始")
+            android.util.Log.i("AllPlay", "startNative thread started")
             var ssid = ""; var pass = ""; var ip = ""
-            // 先检测用户手动开的系统热点（vivo 上 app 自建热点被 ROM 封，手动热点反而能用）
+            // First detect a system hotspot the user turned on manually (on vivo the ROM blocks app-created hotspots, but a manual one works)
             val manualSsid = if (!lanMode) hotspot.readManualApSsid() else null
             val manualIp = if (!lanMode) hotspot.manualHotspotIp() else null
-            android.util.Log.i("AllPlay", "手动热点检测：ssid=$manualSsid ip=$manualIp")
+            android.util.Log.i("AllPlay", "Manual hotspot detection: ssid=$manualSsid ip=$manualIp")
             if (lanMode) {
                 ssid = currentSsid()
-                pass = wifiPassphrase().ifEmpty { "12345678" }   // 占位密码→securityType=WPA2，iPhone 已连 WiFi 不需真密码
-                android.util.Log.i("AllPlay", "LAN 模式：跳过热点，用当前网络 ssid=$ssid")
+                pass = wifiPassphrase().ifEmpty { "12345678" }   // placeholder passphrase → securityType=WPA2; the iPhone is already on WiFi so no real passphrase is needed
+                android.util.Log.i("AllPlay", "LAN mode: skipping hotspot, using current network ssid=$ssid")
             } else if (manualIp != null) {
-                // 手动热点激活：SSID 优先读系统(getSoftApConfiguration，需签名权限)，读不到退回 files/ssid
+                // Manual hotspot active: prefer the system SSID (getSoftApConfiguration, needs a signature permission), fall back to files/ssid
                 ssid = manualSsid ?: currentSsid()
                 pass = wifiPassphrase().ifEmpty { "12345678" }
                 ip = manualIp
                 cachedSsid = ssid; cachedPass = pass; cachedIp = ip
                 hotspotReady = true
-                android.util.Log.i("AllPlay", "检测到手动热点：ssid=$ssid ip=$ip passLen=${pass.length}")
+                android.util.Log.i("AllPlay", "Manual hotspot detected: ssid=$ssid ip=$ip passLen=${pass.length}")
             } else if (hotspotReady) {
-                // 旋转重启：复用已开的热点，别重复开（省 15s）
+                // Rotation restart: reuse the hotspot already open instead of reopening it (saves 15s)
                 ssid = cachedSsid; pass = cachedPass; ip = cachedIp
-                android.util.Log.i("AllPlay", "复用已开热点 ssid=$ssid")
+                android.util.Log.i("AllPlay", "Reusing open hotspot ssid=$ssid")
             } else if (hotspot.start()) {
                 ssid = hotspot.ssid; pass = hotspot.passphrase; ip = hotspot.ip
                 cachedSsid = ssid; cachedPass = pass; cachedIp = ip
                 hotspotReady = true
-                android.util.Log.i("AllPlay", "热点已开：ssid=$ssid ip=$ip")
+                android.util.Log.i("AllPlay", "Hotspot opened: ssid=$ssid ip=$ip")
             } else {
-                android.util.Log.w("AllPlay", "热点启动失败，退回同网模式 ssid=$ssid")
+                android.util.Log.w("AllPlay", "Hotspot start failed, falling back to same-network mode ssid=$ssid")
                 ssid = currentSsid(); pass = wifiPassphrase()
             }
-            mdns.advertiseIp = ip   // 热点接口 IP：让 JmDNS 绑定到 AP 接口广播
+            mdns.advertiseIp = ip   // hotspot interface IP: makes JmDNS bind to the AP interface for advertising
             val fps = maxFps()
             val port = native.nativeStart(
                 bt, mdns, video, audio,
                 stateDir, identityDir, "AllPlay",
                 bluetoothMac(), ssid, pass, ip,
                 w, h,
-                false,   // 旋转重连也必须走蓝牙触发：实测 carplay-probe 单独不够，iPhone 不会自动重连
+                false,   // Rotation reconnects must also go through the Bluetooth trigger: carplay-probe alone is not enough in practice, and the iPhone will not reconnect on its own
                 fps,
             )
-            android.util.Log.i("AllPlay", "nativeStart -> port=$port 分辨率=${w}x${h} restart=$restart fps=$fps")
+            android.util.Log.i("AllPlay", "nativeStart -> port=$port resolution=${w}x${h} restart=$restart fps=$fps")
             startCarPlayProbe()
         }.start()
     }
 
-    /// 旋转后方向变了：停旧会话，用新分辨率重启（CarPlay 分辨率需重新协商，iPhone 会短暂重连）
+    /// Orientation changed after rotation: stop the old session and restart with the new resolution (CarPlay must renegotiate the resolution; the iPhone reconnects briefly)
     fun restartForOrientation() {
         if (!started) return
-        // 防抖：3s 内不重复重启，吞掉回前台/旋转瞬间的抖动
+        // Debounce: do not restart within 3s, absorbing the flurry when returning to foreground/rotating
         val now = System.currentTimeMillis()
         if (now - lastRestartMs < 3000) return
         val (w, h) = resolutionForOrientation()
         if (w == nativeWidth && h == nativeHeight) return
         lastRestartMs = now
-        android.util.Log.i("AllPlay", "方向变化，重启会话 ${nativeWidth}x${nativeHeight} → ${w}x${h}")
+        android.util.Log.i("AllPlay", "Orientation changed, restarting session ${nativeWidth}x${nativeHeight} → ${w}x${h}")
         native.nativeStop()
         startNative(restart = true)
     }
 
     fun attachSurface(surface: Surface) {
         video.setSurface(surface)
-        // 回前台 Surface 重建后立即请一次关键帧，尽快恢复画面（别等 1s 限频或手机自然 IDR）
+        // After the Surface is rebuilt on returning to foreground, request a keyframe immediately to restore the picture ASAP (do not wait for the 1s rate limit or the phone's natural IDR)
         native.nativeRequestKeyFrame()
     }
 
-    /// 退后台 Surface 销毁：让视频解码器释放对死 Surface 的引用，避免 configure/渲染崩溃
+    /// Surface destroyed on backgrounding: make the video decoder drop its reference to the dead Surface to avoid configure/render crashes
     fun releaseSurface() {
         video.releaseSurface()
     }
@@ -186,23 +186,23 @@ class AllPlaySessionService : Service() {
         native.nativeSendTouch(points)
     }
 
-    /// 暴露视频解码器给 MainActivity 算实时帧率
+    /// Expose the video decoder to MainActivity for live frame-rate calculation
     val videoSink: MediaCodecSink get() = video
 
-    /// 会话状态：0=等待连接，1=连接中，2=已连接
+    /// Session state: 0=waiting for connection, 1=connecting, 2=connected
     fun sessionState(): Int = if (started) native.nativeSessionState() else 0
 
-    /// 保存网络配置后重启会话（重新读 files 配置）
+    /// Restart the session after the network config is saved (re-reads the files config)
     fun restartNative() {
         if (!started) return
-        android.util.Log.i("AllPlay", "网络配置已改，重启会话")
+        android.util.Log.i("AllPlay", "Network config changed, restarting session")
         native.nativeStop()
         startNative(restart = true)
     }
 
     @SuppressLint("MissingPermission", "HardwareIds")
     private fun bluetoothMac(): String {
-        // 华为打码 WifiManager/BluetoothAdapter 的值，允许 adb push 文件覆盖（见 files/btmac）
+        // Huawei masks the WifiManager/BluetoothAdapter values, so allow an adb-pushed file to override them (see files/btmac)
         val manual = try { java.io.File(filesDir, "btmac").readText().trim() } catch (e: Exception) { "" }
         if (manual.isNotEmpty()) return manual
         val a = BluetoothAdapter.getDefaultAdapter()?.address ?: ""
@@ -212,7 +212,7 @@ class AllPlaySessionService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun currentSsid(): String {
-        // 华为打码，允许 adb push 文件覆盖（见 files/ssid）
+        // Huawei masks it, so allow an adb-pushed file to override it (see files/ssid)
         val manual = try { java.io.File(filesDir, "ssid").readText().trim() } catch (e: Exception) { "" }
         if (manual.isNotEmpty()) return manual
         return try {
@@ -221,44 +221,44 @@ class AllPlaySessionService : Service() {
         } catch (e: Exception) { "" }
     }
 
-    /// Wi-Fi 口令：从 files/passphrase 读（同网模式，WPA2 需口令）
+    /// Wi-Fi passphrase: read from files/passphrase (same-network mode; WPA2 needs a passphrase)
     private fun wifiPassphrase(): String =
         try { java.io.File(filesDir, "passphrase").readText().trim() } catch (e: Exception) { "" }
 
-    /// CarPlay 帧率上限：files/fps 覆盖，默认 60；流畅模式下强制 30
+    /// CarPlay frame-rate cap: overridden by files/fps, default 60; forced to 30 in smooth mode
     private fun maxFps(): Int {
         if (smoothMode) return 30
         val s = try { java.io.File(filesDir, "fps").readText().trim() } catch (e: Exception) { "" }
         return s.toIntOrNull()?.coerceIn(15, 60) ?: 60
     }
 
-    /// 流畅模式标记文件：files/smooth 存在 = 分辨率减半 + 30fps
+    /// Smooth-mode marker file: files/smooth exists = halved resolution + 30fps
     private val smoothFile get() = java.io.File(filesDir, "smooth")
     private val smoothMode get() = smoothFile.exists()
 
-    /// 供 MainActivity 判断当前是否已在流畅模式（弹窗文案/按钮用）
+    /// Lets MainActivity check whether smooth mode is currently active (for dialog text/buttons)
     val smoothModeActive: Boolean get() = smoothMode
 
-    /// 进入流畅模式：写标记 → 用减半分辨率 + 30fps 重启会话
+    /// Enter smooth mode: write the marker → restart the session with halved resolution + 30fps
     fun enableSmoothMode() {
         try { smoothFile.createNewFile() } catch (e: Exception) {}
-        android.util.Log.i("AllPlay", "进入流畅模式（分辨率减半 + 30fps），重启会话")
+        android.util.Log.i("AllPlay", "Entering smooth mode (halved resolution + 30fps), restarting session")
         native.nativeStop()
         startNative(restart = true)
     }
 
-    /// 退出流畅模式：删标记 → 恢复正常分辨率 + 60fps
+    /// Exit smooth mode: delete the marker → restore normal resolution + 60fps
     fun disableSmoothMode() {
         try { smoothFile.delete() } catch (e: Exception) {}
-        android.util.Log.i("AllPlay", "退出流畅模式，恢复正常分辨率 + 60fps")
+        android.util.Log.i("AllPlay", "Exiting smooth mode, restoring normal resolution + 60fps")
         native.nativeStop()
         startNative(restart = true)
     }
 
-    /// 发现 iPhone 的 _carplay-ctrl._tcp 并探测 /ctrl-int/1/connect，促使 iPhone 连 RTSP
+    /// Discover the iPhone's _carplay-ctrl._tcp and probe /ctrl-int/1/connect to make the iPhone connect over RTSP
     private fun startCarPlayProbe() {
         Thread {
-            try { Thread.sleep(2000) } catch (e: Exception) {}   // 等蓝牙触发先跑
+            try { Thread.sleep(2000) } catch (e: Exception) {}   // let the Bluetooth trigger run first
             val deviceId = native.nativeDeviceId()
             val resolved = java.util.concurrent.atomic.AtomicReference<Pair<String, Int>?>(null)
             mdns.discoverCarPlayCtrl { host, port -> resolved.set(host to port) }
@@ -286,19 +286,19 @@ class AllPlaySessionService : Service() {
 
     private fun buildNotification(): Notification {
         if (Build.VERSION.SDK_INT >= 26) {
-            val ch = NotificationChannel("allplay", "AllPlay 投屏", NotificationManager.IMPORTANCE_LOW)
+            val ch = NotificationChannel("allplay", "AllPlay Casting", NotificationManager.IMPORTANCE_LOW)
             (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(ch)
             return Notification.Builder(this, "allplay")
                 .setContentTitle("AllPlay")
-                .setContentText("等待 iPhone 连接…")
+                .setContentText("Waiting for iPhone connection…")
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .build()
         }
-        // Android 4.4：无 NotificationChannel，用旧构造器
+        // Android 4.4: no NotificationChannel, use the old constructor
         @Suppress("DEPRECATION")
         return Notification.Builder(this)
             .setContentTitle("AllPlay")
-            .setContentText("等待 iPhone 连接…")
+            .setContentText("Waiting for iPhone connection…")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .build()
     }

@@ -8,7 +8,7 @@ namespace {
 constexpr uint16_t kPageConsumer  = 0x000c;
 constexpr uint16_t kPageTelephony = 0x000b;
 
-// HID Usage Tables：Consumer page 的常用键
+// HID Usage Tables: common Consumer page keys
 constexpr uint16_t kPlay          = 0x00b0;
 constexpr uint16_t kPause         = 0x00b1;
 constexpr uint16_t kFastForward   = 0x00b3;
@@ -23,8 +23,8 @@ constexpr uint16_t kMute          = 0x00e2;
 constexpr uint16_t kVoiceCommand  = 0x00cf;
 constexpr uint16_t kAcHome        = 0x0223;
 
-// Telephony page：电话键（消费者页没有接听/挂断）
-constexpr uint16_t kHookSwitch    = 0x0020;   // 摘下=接听，挂上=挂断
+// Telephony page: phone keys (the Consumer page has no answer/hang-up)
+constexpr uint16_t kHookSwitch    = 0x0020;   // off-hook = answer, on-hook = hang up
 constexpr uint16_t kPhoneDrop      = 0x0026;
 }  // namespace
 
@@ -42,8 +42,8 @@ HidUsage mediaKeyUsage(core::MediaKey key)
     case core::MediaKey::VolumeUp:      return {kPageConsumer, kVolumeUp};
     case core::MediaKey::VolumeDown:    return {kPageConsumer, kVolumeDown};
     case core::MediaKey::Mute:          return {kPageConsumer, kMute};
-    // Siri 在 HID 里没有专用 usage：行业通行做法是报"语音命令"，
-    // 手机侧再按自己的策略决定是 Siri 还是系统听写。
+    // Siri has no dedicated HID usage; the common industry practice is to report "voice command",
+    // and the phone decides between Siri and system dictation per its own policy.
     case core::MediaKey::Siri:          return {kPageConsumer, kVoiceCommand};
     case core::MediaKey::Voice:         return {kPageConsumer, kVoiceCommand};
     case core::MediaKey::PhoneAccept:   return {kPageTelephony, kHookSwitch};
@@ -67,7 +67,7 @@ std::vector<uint8_t> hidReport(core::MediaKey key, bool down, uint8_t reportId)
 
 std::vector<uint8_t> hidReportMessage(const std::vector<uint8_t>& report)
 {
-    // 参数 0 = 报表字节。真机上若对端要求别的参数 id，只改这一行。
+    // Parameter 0 = report bytes. If a real peer requires a different parameter id, change only this line.
     Params p;
     p.bytes(0, report);
     return csmFrame(kAccessoryHidReport, p.encode());

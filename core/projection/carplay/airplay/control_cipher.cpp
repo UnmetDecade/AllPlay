@@ -7,7 +7,7 @@
 namespace core::airplay {
 
 namespace {
-constexpr size_t kMaxPayload = 0x4000;   // 16384，参照协议的帧体上限
+constexpr size_t kMaxPayload = 0x4000;   // 16384, protocol frame body limit
 }
 
 ControlCipher::ControlCipher(const ControlKeys& keys)
@@ -46,7 +46,7 @@ bool ControlCipher::next(std::vector<uint8_t>* out)
     while (buf_.size() >= 2) {
         const size_t ctLen = size_t(buf_[0]) | (size_t(buf_[1]) << 8);
         const size_t frameLen = 2 + ctLen + 16;
-        if (buf_.size() < frameLen) return false;   // 未凑齐一整帧
+        if (buf_.size() < frameLen) return false;   // incomplete frame
 
         std::array<uint8_t, 2> hdr{buf_[0], buf_[1]};
         std::vector<uint8_t> pt;
@@ -55,7 +55,7 @@ bool ControlCipher::next(std::vector<uint8_t>* out)
                                            buf_.data() + 2, ctLen + 16, &pt);
         ++readCounter_;
         buf_.erase(buf_.begin(), buf_.begin() + frameLen);
-        if (!ok) { failed_ = true; return false; }   // 鉴权失败
+        if (!ok) { failed_ = true; return false; }   // authentication failed
         *out = std::move(pt);
         return true;
     }

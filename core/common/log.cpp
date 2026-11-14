@@ -62,7 +62,7 @@ void logf(Level lv, const char* file, int line, const char* fmt, ...)
     std::vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
 
-    // 墙钟时间（秒精度够用；日志不打点、别引入更多依赖）
+    // Wall-clock time (second precision is enough; logs are not profiled, avoid extra deps)
     char ts[24] = "";
     {
         std::time_t t = std::time(nullptr);
@@ -78,7 +78,7 @@ void logf(Level lv, const char* file, int line, const char* fmt, ...)
     {
         std::lock_guard<std::mutex> lk(g_mu);
 #if !defined(__ANDROID__)
-        // 桌面：打印到 stderr。Android（API<23）不导出 stderr 符号，且日志走 logcat，这里跳过。
+        // Desktop: print to stderr. Android (API<23) does not export the stderr symbol and logs go to logcat, so skip it here.
         std::fprintf(stderr, "[%s] [%s] %s:%d  %s\n", ts, levelName(lv), baseName(file), line, msg);
         std::fflush(stderr);
 #endif
@@ -94,7 +94,7 @@ void logf(Level lv, const char* file, int line, const char* fmt, ...)
 #endif
     }
 
-    // 额外出口（鸿蒙：hilog / 界面）。放在锁外 —— sink 里再打日志也不会自锁。
+    // Extra sink (HarmonyOS: hilog / UI). Kept outside the lock — logging again inside a sink cannot self-deadlock.
     if (LogSink sink = g_sink.load(std::memory_order_relaxed)) sink(lv, msg);
 }
 

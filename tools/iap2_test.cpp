@@ -1,16 +1,16 @@
 // ============================================================================
-// tools/iap2_test.cpp —— iAP2/MFi 的自测（不插硬件能验的最高程度）
+// tools/iap2_test.cpp -- iAP2/MFi self-test (the most that can be verified without hardware)
 // ============================================================================
-// 覆盖：
-//   ① 线格式：参数编解码往返、字符串 NUL、CSM 拆帧（含垃圾前置/分片）
-//   ①b 方控：媒体键 → HID usage/报表 → 0x4E02 报文、按键队列的进出与溢出
-//   ② 链路层：两个 LinkEngine 经内存管道握手（marker→SYN→ACK→NORMAL），
-//      控制载荷双向可靠送达、序号/校验和路径正确
-//   ③ MFi 签名：identity/ 加载 + 32 字节摘要签名 + 用证书公钥验签
-//   ④ 全流程：WirelessTrigger ←→ "假 iPhone"（用同一套引擎实现的对端），
-//      跑完 识别→MFi→订阅→0x5703→0x4301
+// Covers:
+//   ① Wire format: param encode/decode round trip, string NUL, CSM deframing (including leading junk / fragmentation)
+//   ①b Steering-wheel controls: media key -> HID usage/report -> 0x4E02 message, key queue push/pop and overflow
+//   ② Link layer: two LinkEngines handshake over an in-memory pipe (marker->SYN->ACK->NORMAL),
+//      control payloads delivered reliably both ways, sequence/checksum paths correct
+//   ③ MFi signing: load identity/ + sign a 32-byte digest + verify with the cert's public key
+//   ④ Full flow: WirelessTrigger <-> "fake iPhone" (a peer built on the same engine),
+//      running identification -> MFi -> subscribe -> 0x5703 -> 0x4301
 //
-// 用法： iap2_test [identity目录]   （默认 <项目根>/identity）
+// Usage: iap2_test [identity-dir]   (default <project root>/identity)
 #include "iap2/hid.h"
 #include "iap2/link.h"
 #include "iap2/wire.h"
@@ -52,7 +52,7 @@ uint64_t nowMs()
 }
 
 // ---------------------------------------------------------------------------
-// 线程安全的内存管道（两端互喂字节）
+// Thread-safe in-memory pipe (both ends feed bytes to each other)
 // ---------------------------------------------------------------------------
 class Pipe {
 public:
@@ -67,9 +67,9 @@ public:
         std::unique_lock<std::mutex> lk(mu_);
         if (!cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs),
                           [&] { return !buf_.empty() || closed_; })) {
-            return 0;   // 超时
+            return 0;   // timeout
         }
-        if (buf_.empty()) return -1;   // 关闭
+        if (buf_.empty()) return -1;   // closed
         const size_t take = std::min(n, buf_.size());
         std::copy(buf_.begin(), buf_.begin() + take, out);
         buf_.erase(buf_.begin(), buf_.begin() + take);
@@ -101,11 +101,11 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// ① 线格式
+// ① Wire format
 // ---------------------------------------------------------------------------
 void testWire()
 {
-    std::printf("== ① 线格式 ==\n");
+    std::printf("== ① Wire format ==\n");
     using namespace core::iap2;
 
     Params p;
@@ -115,85 +115,85 @@ void testWire()
     p.group(7, g);
     auto enc = p.encode();
     std::vector<Param> back;
-    CHECK(parseParams(enc.data(), enc.size(), &back), "参数编解码往返");
+    CHECK(parseParams(enc.data(), enc.size(), &back), "parameter encode/decode round-trip");
     bool ok = false;
-    CHECK(back.size() == 7, "参数个数 7");
+    CHECK(back.size() == 7, "parameter count is 7");
     CHECK(back[3].payload.size() == 6 && back[3].payload.back() == 0 &&
-          paramString(back[3], &ok) == "hello" && ok, "字符串带 NUL");
-    CHECK(back[2].payload.size() == 4 && paramU32(back[2]) == 0xDEADBEEF, "u32 大端");
-    CHECK(back[4].payload.size() == 6 && back[4].payload[5] == 3 && back[4].payload[1] == 1, "u16 列表");
+          paramString(back[3], &ok) == "hello" && ok, "string carries NUL");
+    CHECK(back[2].payload.size() == 4 && paramU32(back[2]) == 0xDEADBEEF, "u32 big-endian");
+    CHECK(back[4].payload.size() == 6 && back[4].payload[5] == 3 && back[4].payload[1] == 1, "u16 list");
     std::vector<Param> gsub;
     CHECK(parseParams(back[6].payload.data(), back[6].payload.size(), &gsub) &&
-          gsub.size() == 2 && paramString(gsub[1]) == "abc", "group 嵌套");
+          gsub.size() == 2 && paramString(gsub[1]) == "abc", "nested group");
 
     auto frame = csmFrame(0x4301, enc);
     CsmFramer fr;
-    std::vector<uint8_t> junk = {0x00, 0xff, 0x41};   // 不以 0x40 结尾（否则与帧头拼成假 4040）
-    fr.feed(junk.data(), junk.size());              // 帧前的垃圾（对齐用）
-    fr.feed(frame.data(), 3);                       // 再分片喂
+    std::vector<uint8_t> junk = {0x00, 0xff, 0x41};   // doesn't end with 0x40 (otherwise it joins the frame header into a fake 4040)
+    fr.feed(junk.data(), junk.size());              // junk before the frame (for alignment)
+    fr.feed(frame.data(), 3);                       // then feed in fragments
     uint16_t id = 0;
     std::vector<uint8_t> body;
-    CHECK(!fr.next(&id, &body), "分片未齐不发帧");
+    CHECK(!fr.next(&id, &body), "no frame emitted while fragmented");
     fr.feed(frame.data() + 3, frame.size() - 3);
-    CHECK(fr.next(&id, &body) && id == 0x4301 && body == enc, "CSM 拆帧（容忍前置垃圾/分片）");
+    CHECK(fr.next(&id, &body) && id == 0x4301 && body == enc, "CSM deframing (tolerates leading junk / fragmentation)");
 }
 
 // ---------------------------------------------------------------------------
-// ①b 方控（媒体键 → HID 报表 → iAP2 报文）
+// ①b Steering-wheel encoding (media key -> HID report -> iAP2 message)
 // ---------------------------------------------------------------------------
 void testHid()
 {
-    std::printf("== ①b 方控编码 ==\n");
+    std::printf("== ①b Steering-wheel encoding ==\n");
     using namespace core::iap2;
 
     const HidUsage next = mediaKeyUsage(core::MediaKey::NextTrack);
-    CHECK(next.page == 0x000c && next.id == 0x00b5, "下一首 → Consumer Scan Next(0xB5)");
+    CHECK(next.page == 0x000c && next.id == 0x00b5, "next track → Consumer Scan Next(0xB5)");
     const HidUsage hook = mediaKeyUsage(core::MediaKey::PhoneAccept);
-    CHECK(hook.page == 0x000b && hook.id == 0x0020, "接听 → Telephony HookSwitch");
+    CHECK(hook.page == 0x000b && hook.id == 0x0020, "answer → Telephony HookSwitch");
 
-    // 按下报 usage，抬起报 0（HID 惯例）
+    // report the usage on press, 0 on release (HID convention)
     const auto down = hidReport(core::MediaKey::NextTrack, true);
     CHECK(down.size() == 4 && down[0] == 0x0c && down[1] == 0x00 && down[2] == 0xb5 &&
-          down[3] == 0x00, "按下报表 = 页 0x000C / usage 0x00B5（小端）");
+          down[3] == 0x00, "press report = page 0x000C / usage 0x00B5 (little-endian)");
     const auto up = hidReport(core::MediaKey::NextTrack, false);
-    CHECK(up.size() == 4 && up[2] == 0 && up[3] == 0, "抬起报表 usage = 0");
+    CHECK(up.size() == 4 && up[2] == 0 && up[3] == 0, "release report usage = 0");
     const auto withId = hidReport(core::MediaKey::PlayPause, true, 3);
-    CHECK(withId.size() == 5 && withId[0] == 3, "带报表 ID 时首字节是 ID");
+    CHECK(withId.size() == 5 && withId[0] == 3, "first byte is the report ID when an ID is present");
 
-    // 报文：CSM id = 0x4E02，参数 0 = 报表
+    // message: CSM id = 0x4E02, param 0 = report
     const auto frame = hidReportMessage(core::MediaKey::NextTrack, true);
     CsmFramer fr;
     fr.feed(frame.data(), frame.size());
     uint16_t id = 0;
     std::vector<uint8_t> body;
-    CHECK(fr.next(&id, &body) && id == kAccessoryHidReport, "报文的 CSM id = 0x4E02");
+    CHECK(fr.next(&id, &body) && id == kAccessoryHidReport, "message CSM id = 0x4E02");
     std::vector<Param> ps;
     CHECK(parseParams(body.data(), body.size(), &ps) && ps.size() == 1 && ps[0].id == 0 &&
-          ps[0].payload == down, "参数 0 = 报表字节");
+          ps[0].payload == down, "param 0 = report bytes");
 
-    // 队列：先进先出；超过容量丢最老的
+    // Queue: FIFO; when over capacity, drop the oldest
     core::MediaKeyQueue q;
     q.push(core::MediaKey::Play, true);
     q.push(core::MediaKey::Play, false);
     core::MediaKeyEvent ev;
-    CHECK(q.pop(&ev) && ev.key == core::MediaKey::Play && ev.down, "队列先进先出");
-    CHECK(q.pop(&ev) && !ev.down, "队列出到抬起事件");
-    CHECK(!q.pop(&ev), "空队列返回 false");
+    CHECK(q.pop(&ev) && ev.key == core::MediaKey::Play && ev.down, "queue is FIFO");
+    CHECK(q.pop(&ev) && !ev.down, "queue yields the release event");
+    CHECK(!q.pop(&ev), "empty queue returns false");
     const size_t extra = 3;
     for (size_t i = 0; i < core::MediaKeyQueue::kCapacity + extra; ++i)
         q.push(core::MediaKey::NextTrack, i % 2 == 0);
-    CHECK(q.size() == core::MediaKeyQueue::kCapacity, "满了不再长");
-    // 最老的三条被丢掉，队首是第 3 条（i=3 → down=false）
+    CHECK(q.size() == core::MediaKeyQueue::kCapacity, "does not grow past capacity");
+    // the three oldest are dropped; the head is the 3rd (i=3 -> down=false)
     CHECK(q.pop(&ev) && ev.key == core::MediaKey::NextTrack && !ev.down,
-          "溢出丢最老的那条");
+          "overflow drops the oldest entry");
 }
 
 // ---------------------------------------------------------------------------
-// ② 链路层握手 + 数据
+// ② Link-layer handshake + data
 // ---------------------------------------------------------------------------
 void testLink()
 {
-    std::printf("== ② 链路层握手 ==\n");
+    std::printf("== ② Link-layer handshake ==\n");
     using namespace core::iap2;
 
     Pipe ab, ba;
@@ -215,9 +215,9 @@ void testLink()
         pump(b, ab, ba);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    CHECK(a.ready() && b.ready(), "双端握手到 NORMAL（marker→SYN→ACK）");
+    CHECK(a.ready() && b.ready(), "both sides handshake to NORMAL (marker→SYN→ACK)");
 
-    // a → b 一条控制载荷
+    // one control payload a -> b
     const std::vector<uint8_t> msg = {0x40, 0x40, 0x00, 0x0a, 0x12, 0x34, 1, 2, 3, 4};
     a.sendControl(msg, nowMs());
     bool got = false;
@@ -231,18 +231,18 @@ void testLink()
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    CHECK(got, "控制载荷 a→b 可靠送达");
+    CHECK(got, "control payload a→b delivered reliably");
 }
 
 // ---------------------------------------------------------------------------
-// ③ MFi 签名（对证书公钥验签）
+// ③ MFi signing (verify against the cert public key)
 // ---------------------------------------------------------------------------
 bool verifyRawSig(const std::vector<uint8_t>& certDer, const uint8_t digest[32],
                   const std::vector<uint8_t>& raw)
 {
     if (raw.size() != 64) return false;
     const unsigned char* p = certDer.data();
-    // p7b 里通常只有一张证书；用 d2i_PKCS7 提取
+    // a p7b usually contains just one cert; extract it with d2i_PKCS7
     PKCS7* pkcs7 = d2i_PKCS7(nullptr, &p, long(certDer.size()));
     if (!pkcs7) return false;
     STACK_OF(X509)* certs = pkcs7->d.sign ? pkcs7->d.sign->cert : nullptr;
@@ -272,25 +272,25 @@ bool verifyRawSig(const std::vector<uint8_t>& certDer, const uint8_t digest[32],
 
 void testMfi(const std::string& dir)
 {
-    std::printf("== ③ MFi 签名 ==\n");
+    std::printf("== ③ MFi signing ==\n");
     std::string err;
     auto id = core::mfi::CertificateMfiIdentity::load(dir, &err);
     if (!id) {
-        std::printf("   ⏭  跳过（%s）\n", err.c_str());
+        std::printf("   ⏭  skipped (%s)\n", err.c_str());
         return;
     }
-    CHECK(!id->certificate().empty(), "证书已载入");
+    CHECK(!id->certificate().empty(), "certificate loaded");
     uint8_t digest[32];
     for (int i = 0; i < 32; ++i) digest[i] = uint8_t(i * 7 + 1);
     bool ok = false;
     auto sig = id->signDigest(digest, 32, &ok);
-    CHECK(ok && sig.size() == 64, "签名 = 64 字节 raw r||s");
-    CHECK(verifyRawSig(id->certificate(), digest, sig), "对证书公钥验签通过");
-    // 篡改摘要应验不过
+    CHECK(ok && sig.size() == 64, "signature = 64-byte raw r||s");
+    CHECK(verifyRawSig(id->certificate(), digest, sig), "verifies against the certificate public key");
+    // a tampered digest should fail verification
     digest[0] ^= 0x01;
-    CHECK(!verifyRawSig(id->certificate(), digest, sig), "错摘要验签失败（阴性对照）");
+    CHECK(!verifyRawSig(id->certificate(), digest, sig), "wrong digest fails verification (negative control)");
 
-    // 同一份身份从内存加载 —— 鸿蒙走的就是这条路（HAP rawfile 读字节，读不到路径）
+    // Load the same identity from memory -- this is the path HarmonyOS takes (HAP rawfile reads bytes, no path available)
     {
         auto slurp = [](const std::string& p, std::vector<uint8_t>* out) {
             std::ifstream in(p, std::ios::binary);
@@ -303,24 +303,24 @@ void testMfi(const std::string& dir)
             auto id2 = core::mfi::CertificateMfiIdentity::loadFromMemory(
                 key.data(), key.size(), cert.data(), cert.size(), &err);
             CHECK(id2 && id2->certificate() == id->certificate(),
-                  "从内存加载身份（证书与目录加载一致）");
+                  "load identity from memory (certificate matches directory load)");
             if (id2) {
-                digest[0] ^= 0x01;   // 还原成原摘要
+                digest[0] ^= 0x01;   // restore the original digest
                 bool ok2 = false;
                 auto sig2 = id2->signDigest(digest, 32, &ok2);
                 CHECK(ok2 && verifyRawSig(id2->certificate(), digest, sig2),
-                      "内存加载的身份也能签出可验签的名字");
+                      "memory-loaded identity also produces verifiable signatures");
             }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// ④ 全流程："假 iPhone" 对打
+// ④ Full flow: sparring with a "fake iPhone"
 // ---------------------------------------------------------------------------
 void testFlow(const std::string& dir)
 {
-    std::printf("== ④ 全流程（假 iPhone）==\n");
+    std::printf("== ④ Full flow (fake iPhone) ==\n");
     using namespace core::iap2;
 
     Pipe toTrigger, toPhone;
@@ -337,9 +337,9 @@ void testFlow(const std::string& dir)
     cfg.publicKeyHex = std::string(64, 'a');
     cfg.mfiDir = dir;
     cfg.timeoutMs = 15000;
-    // 0x4301 发出后 run() 不会自己结束 —— 那是无线 CarPlay 的心跳线，得一直读
-    // （见 wireless_client.cpp 里的 kSessionKeepAliveMs）。测试在拿齐证据后置位取消，
-    // 否则 t.join() 会一直挂着。
+    // After 0x4301 is sent, run() doesn't end on its own -- that's the wireless CarPlay heartbeat, which must keep reading
+    // (see kSessionKeepAliveMs in wireless_client.cpp). The test sets cancel once it has gathered the evidence,
+    // otherwise t.join() would hang forever.
     std::atomic<bool> cancel{false};
     cfg.cancel = &cancel;
 
@@ -350,7 +350,7 @@ void testFlow(const std::string& dir)
         triggerDone.store(true);
     });
 
-    // 假 iPhone：同款 LinkEngine + 手写应答
+    // Fake iPhone: same LinkEngine + hand-written responses
     LinkEngine phone;
     CsmFramer framer;
     phone.start(nowMs());
@@ -368,7 +368,7 @@ void testFlow(const std::string& dir)
     const uint64_t deadline = nowMs() + 15000;
     while (nowMs() < deadline && !triggerDone.load()) {
         phone.tick(nowMs());
-        // 链路就绪后，由"手机"发起识别（真实流程：iPhone 先发 0x1D00）
+        // Once the link is ready, let the "phone" initiate identification (real flow: the iPhone sends 0x1D00 first)
         if (phone.ready() && !sent1d00) {
             phoneSend(0x1d00, Params{});
             sent1d00 = true;
@@ -390,7 +390,7 @@ void testFlow(const std::string& dir)
                 switch (msgId) {
                 case 0x1d01: {
                     seenId = true;
-                    // 抽查识别报文关键字段
+                    // spot-check key fields of the identification message
                     bool okName = false, okEap = false;
                     const Param* p0 = findParam(params, 0);
                     const Param* p10 = findParam(params, 10);
@@ -402,10 +402,10 @@ void testFlow(const std::string& dir)
                         bool ok2 = false;
                         if (s1) okEap = paramString(*s1, &ok2) == cfg.eaProtocol && ok2;
                     }
-                    CHECK(okName, "假 iPhone 收到识别报文（name）");
-                    CHECK(okEap, "识别报文 group10 EA 协议");
-                    CHECK(findParam(params, 17) != nullptr, "识别报文 group17（蓝牙）");
-                    CHECK(findParam(params, 24) != nullptr, "识别报文 group24（SSID）");
+                    CHECK(okName, "fake iPhone received identification message (name)");
+                    CHECK(okEap, "identification message group10 EA protocol");
+                    CHECK(findParam(params, 17) != nullptr, "identification message group17 (Bluetooth)");
+                    CHECK(findParam(params, 24) != nullptr, "identification message group24 (SSID)");
                     phoneSend(0x1d02, Params{});   // IdentificationAccepted
                     phoneSend(0xaa00, Params{});   // RequestCertificate
                     break;
@@ -440,22 +440,22 @@ void testFlow(const std::string& dir)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    cancel.store(true);   // 证据已收齐，让常驻的触发线程收工（见上面 cfg.cancel 注释）
+    cancel.store(true);   // evidence gathered; let the resident trigger thread wind down (see the cfg.cancel comment above)
     t.join();
-    CHECK(triggerDone.load(), "触发线程结束");
-    CHECK(triggerOk.load(), "触发返回成功（0x4301 已发出）");
-    CHECK(seenId && seenCert && seenSig, "过程：识别→证书→签名");
-    CHECK(subs == 5, "过程：5 条订阅");
-    CHECK(seen5703, "过程：0x5703 已发");
-    if (!trigger.error().empty()) std::printf("   （错误：%s）\n", trigger.error().c_str());
+    CHECK(triggerDone.load(), "trigger thread finished");
+    CHECK(triggerOk.load(), "trigger returned success (0x4301 sent)");
+    CHECK(seenId && seenCert && seenSig, "flow: identification→certificate→signature");
+    CHECK(subs == 5, "flow: 5 subscriptions");
+    CHECK(seen5703, "flow: 0x5703 sent");
+    if (!trigger.error().empty()) std::printf("   (error: %s)\n", trigger.error().c_str());
 
-    // 假 iPhone 验签：用 identity 里的证书
+    // Fake iPhone signature check: use the cert from identity
     std::string err;
     auto id = core::mfi::CertificateMfiIdentity::load(dir, &err);
     if (id && sigBytes.size() == 64) {
         uint8_t digest[32];
         std::memset(digest, 0x5A, 32);
-        CHECK(verifyRawSig(id->certificate(), digest, sigBytes), "0xAA03 签名可用证书验签");
+        CHECK(verifyRawSig(id->certificate(), digest, sigBytes), "0xAA03 signature verifies with the certificate");
     }
 }
 
@@ -469,6 +469,6 @@ int main(int argc, char** argv)
     testLink();
     testMfi(dir);
     testFlow(dir);
-    std::printf("\n%s（失败 %d）\n", g_fail ? "==== 有失败 ====" : "==== 全部通过 ====", g_fail);
+    std::printf("\n%s (%d failures)\n", g_fail ? "==== FAILURES ====" : "==== ALL PASSED ====", g_fail);
     return g_fail ? 1 : 0;
 }

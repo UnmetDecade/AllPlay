@@ -1,16 +1,16 @@
 /**
  * @file   bluetooth.h
- * @brief  蓝牙传输抽象（iAP2 触发用）
+ * @brief  Bluetooth transport abstraction (for iAP2 triggering)
  * @author blt
  */
 
 // ============================================================================
-// core/port/bluetooth.h —— 蓝牙传输抽象（iAP2 触发用）
+// core/port/bluetooth.h — Bluetooth transport abstraction (for iAP2 triggering)
 // ============================================================================
-// 平台实现：macOS=IOBluetooth，Linux=BlueZ（待做），Android=BluetoothSocket。
-// iAP2 协议栈（core/iap2）与平台无关，直接吃 core::IByteStream。
+// Platform implementations: macOS=IOBluetooth, Linux=BlueZ (TODO), Android=BluetoothSocket.
+// The iAP2 stack (core/iap2) is platform-independent and consumes core::IByteStream directly.
 //
-// ⚠️ macOS 27：**必须有蓝牙权限**才能枚举/查询；ssh 进程会被 TCC 静默拒绝。
+// ⚠️ macOS 27: **Bluetooth permission is required** to enumerate/query; an ssh process is silently denied by TCC.
 #pragma once
 
 #include "port/stream.h"
@@ -21,15 +21,15 @@
 
 namespace core {
 
-/// iPhone 上暴露的 iAP2 SPP 服务 UUID（客户端方向：我们主动连手机）
+/// iAP2 SPP service UUID exposed on the iPhone (client direction: we connect to the phone)
 inline const char* const kIap2SppUuid = "00000000-deca-fade-deca-deafdecacafe";
 
-/// 配件侧 "Wireless iAP" 服务 UUID（服务端方向：注册 SDP 等手机连）
+/// Accessory-side "Wireless iAP" service UUID (server direction: register SDP and wait for the phone)
 inline const char* const kWirelessIapUuid = "00000000-deca-fade-deca-deafdecacaff";
 
 struct BtDevice {
     std::string name;
-    std::string address;    ///< 平台形态（macOS "AA-BB-CC-DD-EE-FF" 小写短横线）
+    std::string address;    ///< Platform form (on macOS "AA-BB-CC-DD-EE-FF", lowercase with dashes)
     bool        connected = false;
 };
 
@@ -37,16 +37,16 @@ class IBluetooth {
 public:
     virtual ~IBluetooth() = default;
 
-    /// 已配对设备（macOS 27 需蓝牙权限；列表空时 err 说明可能原因）。
+    /// Paired devices (macOS 27 requires Bluetooth permission; if the list is empty, err explains possible causes).
     virtual std::vector<BtDevice> pairedDevices(std::string* err) = 0;
 
-    /// SDP 查 uuid → 开 RFCOMM；失败返回 nullptr 并写 err。
-    /// 返回的指针不归调用方所有（生命周期契约见各平台实现）。
+    /// Look up uuid via SDP → open RFCOMM; returns nullptr and sets err on failure.
+    /// The returned pointer is not owned by the caller (lifetime contract in each platform implementation).
     virtual IByteStream* connectRFCOMM(const std::string& address,
                                        const std::string& uuid,
                                        std::string* err) = 0;
 
-    /// 服务端方向：注册 SDP 并阻塞等手机连入（超时返回 nullptr）。
+    /// Server direction: register SDP and block waiting for the phone (returns nullptr on timeout).
     virtual IByteStream* waitForPhoneConnection(int timeoutMs, std::string* err) = 0;
 };
 

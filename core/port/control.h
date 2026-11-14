@@ -1,24 +1,24 @@
 /**
  * @file   control.h
- * @brief  车机侧输入口：方控 / 媒体键
+ * @brief  Head-unit input port: steering-wheel controls / media keys
  * @author blt
  */
 
 // ============================================================================
-// core/port/control.h —— 车机侧输入口：方控 / 媒体键
+// core/port/control.h — head-unit input port: steering-wheel controls / media keys
 // ============================================================================
-// 方向是**车机 → 手机**：方向盘上的"上一首/下一首/播放暂停"、麦克风键。
-// 与 media.h 正好相反（那是手机把画面和声音推给车机）。
+// Direction is **head unit → phone**: steering-wheel "previous/next/play-pause" and the microphone key.
+// The opposite of media.h (that one pushes video and audio from phone to head unit).
 //
-// 这一层只定义"按键是什么"，不定义"按键怎么送出去"：
-//   · 上层（鸿蒙 Index.ets、桌面宿主的按键处理、将来的硬件按键驱动）负责把
-//     物理事件翻译成 MediaKey，按进 MediaKeyQueue；
-//   · 协议层（core::iap2::WirelessTrigger / WiredLink）各自把队列里的键编码、
-//     发到手机上 —— 无线的队伍在 run() 里排干，有线的由调用方在 pump 之间排干。
+// This layer only defines "what a key is", not "how a key is sent":
+//   · the upper layer (HarmonyOS Index.ets, desktop host key handling, future hardware key drivers) translates
+//     physical events into MediaKey and pushes them into MediaKeyQueue;
+//   · the protocol layer (core::iap2::WirelessTrigger / WiredLink) encodes keys from the queue and
+//     sends them to the phone — the wireless one drains its queue in run(), the wired one is drained by the caller between pumps.
 //
-// 为什么不在这里做一次"发送"回调：iAP2 链路是**单线程**的（链路层的 seq/ack
-// 与加密写计数都不能被两个线程碰），上层在 UI 线程直接发会撞车。队列是唯一
-// 安全的那道门。
+// Why no single "send" callback here: the iAP2 link is **single-threaded** (the link layer's seq/ack
+// and encrypted write counter must not be touched by two threads), so sending directly from the UI thread would race. The queue is the only
+// safe gate.
 #pragma once
 
 #include <cstddef>
@@ -28,53 +28,53 @@
 
 namespace core {
 
-/// 方控按键。值本身没有协议含义，编码在 iap2/hid.h 里做映射。
+/// Steering-wheel keys. The values themselves have no protocol meaning; mapping is done in iap2/hid.h.
 enum class MediaKey : uint8_t {
     Play = 0,
     Pause,
-    PlayPause,      ///< 播放/暂停同一个物理键（方向盘上最常见）
+    PlayPause,      ///< Play/pause share one physical key (most common on steering wheels)
     Stop,
     NextTrack,
     PreviousTrack,
     FastForward,
     Rewind,
-    VolumeUp,       ///< 音量：CarPlay 一般期望车机自己调本地音量，
-    VolumeDown,     ///< 这两个留着是为了走"统一音量"的车型，默认别接
+    VolumeUp,       ///< Volume: CarPlay generally expects the head unit to adjust local volume itself,
+    VolumeDown,     ///< these two are kept for "unified volume" vehicle models; leave unconnected by default
     Mute,
-    Siri,           ///< 长按语音键唤醒 Siri
-    Voice,          ///< 短按语音键（系统语音输入）
-    PhoneAccept,    ///< 接听
-    PhoneEnd,       ///< 挂断
-    Home,           ///< 回主屏
+    Siri,           ///< Long-press the voice key to wake Siri
+    Voice,          ///< Short-press the voice key (system voice input)
+    PhoneAccept,    ///< Accept call
+    PhoneEnd,       ///< End call
+    Home,           ///< Back to home screen
 };
 
-/// 日志用（"NextTrack" → "下一首"）
+/// For logging: returns a human-readable display name for the key
 const char* mediaKeyName(MediaKey key);
 
-/// 一次按键：按下或抬起。成对的按下/抬起由上层决定什么时候产生
-/// （多数按键是按下发一次、抬起发一次，用 0 usage 表示松手）。
+/// One key event: press or release. The upper layer decides when to produce paired press/release
+/// (most keys send once on press and once on release, using usage 0 to mean released).
 struct MediaKeyEvent {
     MediaKey key  = MediaKey::PlayPause;
     bool     down = true;
 };
 
-/// 平台无关的按键出口。将来若出现"不走 iAP2 的方控通道"（比如某个车型用私有
-/// CAN 转发），照着这个接口再写一个实现即可。
+/// Platform-independent key output. If a "steering-wheel channel not over iAP2" ever appears (e.g. a model using proprietary
+/// CAN forwarding), just write another implementation of this interface.
 class IMediaKeySink {
 public:
     virtual ~IMediaKeySink() = default;
     virtual bool send(const MediaKeyEvent& ev) = 0;
 };
 
-/// 线程安全的事件队列：上层 push，协议线程 pop。满了丢最老的（方控按键
-/// 堆着没意义，松手比三秒前的"下一首"更该被发出去）。
+/// Thread-safe event queue: upper layer pushes, protocol thread pops. Drops the oldest when full (steering-wheel keys
+/// piling up is pointless; a release matters more than a "next track" from three seconds ago).
 class MediaKeyQueue {
 public:
     static constexpr size_t kCapacity = 32;
 
     void   push(MediaKey key, bool down);
     void   push(const MediaKeyEvent& ev);
-    bool   pop(MediaKeyEvent* out);          ///< 空队列返回 false
+    bool   pop(MediaKeyEvent* out);          ///< Returns false if the queue is empty
     void   clear();
     size_t size() const;
 

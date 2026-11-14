@@ -1,6 +1,6 @@
 /**
  * @file   tls.cpp
- * @brief  AA TLS 1.2 客户端实现（OpenSSL + 内存 BIO）
+ * @brief  AA TLS 1.2 client implementation (OpenSSL + memory BIOs)
  */
 
 #include "projection/androidauto/tls.h"
@@ -26,10 +26,10 @@ std::string opensslError(const char* what)
     if (e == 0) return what;
     char buf[256];
     ERR_error_string_n(e, buf, sizeof buf);
-    return std::string(what) + "：" + buf;
+    return std::string(what) + ": " + buf;
 }
 
-/// 生成 RSA-2048 自签名证书（CN=AllPlay）。不依赖文件系统。
+/// Generate a self-signed RSA-2048 certificate (CN=AllPlay). Does not touch the filesystem.
 EVP_PKEY* generateKey(std::string* err)
 {
     EVP_PKEY_CTX* kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
@@ -41,7 +41,7 @@ EVP_PKEY* generateKey(std::string* err)
               EVP_PKEY_keygen(kctx, &key) == 1;
     EVP_PKEY_CTX_free(kctx);
     if (!ok) {
-        if (err) *err = opensslError("生成 RSA 密钥失败");
+        if (err) *err = opensslError("Failed to generate RSA key");
         EVP_PKEY_free(key);
         return nullptr;
     }
@@ -53,9 +53,9 @@ X509* makeCertificate(EVP_PKEY* key, std::string* err)
     X509* x = X509_new();
     if (!x) { if (err) *err = opensslError("X509_new"); return nullptr; }
 
-    X509_set_version(x, 2);   // v3（不带扩展也合法）
+    X509_set_version(x, 2);   // v3 (valid even without extensions)
     ASN1_INTEGER_set(X509_get_serialNumber(x), 1);
-    // 往前留一天，避免手机时钟比车机慢一点就判"证书还没生效"。
+    // Backdate by one day so a slightly slow phone clock does not judge the certificate as "not yet valid".
     X509_gmtime_adj(X509_get_notBefore(x), -60L * 60 * 24);
     X509_gmtime_adj(X509_get_notAfter(x), 60L * 60 * 24 * 3650);
 
@@ -66,11 +66,11 @@ X509* makeCertificate(EVP_PKEY* key, std::string* err)
                                reinterpret_cast<const unsigned char*>("AllPlay"), -1, -1, 0);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
                                reinterpret_cast<const unsigned char*>("AllPlay"), -1, -1, 0);
-    X509_set_issuer_name(x, name);   // 自签名
+    X509_set_issuer_name(x, name);   // self-signed
 
     if (X509_set_pubkey(x, key) != 1 ||
         X509_sign(x, key, EVP_sha256()) <= 0) {
-        if (err) *err = opensslError("自签名证书失败");
+        if (err) *err = opensslError("Failed to create self-signed certificate");
         X509_free(x);
         return nullptr;
     }
@@ -83,7 +83,7 @@ Tls12Client::~Tls12Client() { reset(); }
 
 void Tls12Client::reset()
 {
-    if (ssl_) { SSL_free(ssl_); ssl_ = nullptr; }   // 随 SSL 释放 BIO
+    if (ssl_) { SSL_free(ssl_); ssl_ = nullptr; }   // BIOs are freed with the SSL object
     rbio_ = nullptr;
     wbio_ = nullptr;
     if (ctx_) { SSL_CTX_free(ctx_); ctx_ = nullptr; }
@@ -100,7 +100,7 @@ bool Tls12Client::init(std::string* err)
         return false;
     }
 
-    // AA 车机侧历来是 TLS 1.2；不固定的话新 OpenSSL 可能协商到 1.3，手机不认。
+    // AA head units have always used TLS 1.2; without pinning, newer OpenSSL may negotiate 1.3, which the phone rejects.
     SSL_CTX_set_min_proto_version(ctx_, TLS1_2_VERSION);
     SSL_CTX_set_max_proto_version(ctx_, TLS1_2_VERSION);
 
@@ -115,7 +115,7 @@ bool Tls12Client::init(std::string* err)
     X509_free(cert);
     EVP_PKEY_free(key);
     if (!ok) {
-        if (err) *err = opensslError("装载自签名证书失败");
+        if (err) *err = opensslError("Failed to load self-signed certificate");
         reset();
         return false;
     }
@@ -130,15 +130,15 @@ bool Tls12Client::init(std::string* err)
     rbio_ = BIO_new(BIO_s_mem());
     wbio_ = BIO_new(BIO_s_mem());
     if (!rbio_ || !wbio_) {
-        if (err) *err = "BIO_new 失败";
+        if (err) *err = "BIO_new failed";
         reset();
         return false;
     }
     BIO_set_mem_eof_return(rbio_, -1);
     BIO_set_mem_eof_return(wbio_, -1);
-    SSL_set_bio(ssl_, rbio_, wbio_);   // 所有权交给 SSL
+    SSL_set_bio(ssl_, rbio_, wbio_);   // ownership passes to SSL
     SSL_set_connect_state(ssl_);
-    SSL_set_verify(ssl_, SSL_VERIFY_NONE, nullptr);   // 与 aasdk 一致：手机侧自行决定
+    SSL_set_verify(ssl_, SSL_VERIFY_NONE, nullptr);   // same as aasdk: the phone side decides
     return true;
 }
 
@@ -164,7 +164,7 @@ std::vector<uint8_t> Tls12Client::takeOutput()
 
 Tls12Client::Handshake Tls12Client::handshake(std::string* err)
 {
-    if (!ssl_) { if (err) *err = "TLS 未初始化"; return Handshake::Failed; }
+    if (!ssl_) { if (err) *err = "TLS not initialized"; return Handshake::Failed; }
     ERR_clear_error();
     const int r = SSL_do_handshake(ssl_);
     if (r == 1) {
@@ -173,14 +173,14 @@ Tls12Client::Handshake Tls12Client::handshake(std::string* err)
     }
     const int e = SSL_get_error(ssl_, r);
     if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return Handshake::NeedMore;
-    if (err) *err = opensslError("TLS 握手失败");
+    if (err) *err = opensslError("TLS handshake failed");
     return Handshake::Failed;
 }
 
 bool Tls12Client::encrypt(const std::vector<uint8_t>& plain, std::vector<uint8_t>* cipher,
                           std::string* err)
 {
-    if (!active_ || !ssl_) { if (err) *err = "TLS 未就绪"; return false; }
+    if (!active_ || !ssl_) { if (err) *err = "TLS not ready"; return false; }
     cipher->clear();
 
     ERR_clear_error();
@@ -202,8 +202,8 @@ bool Tls12Client::decrypt(const uint8_t* data, size_t len, std::vector<uint8_t>*
                           std::string* err)
 {
     plain->clear();
-    if (!active_ || !ssl_) { if (err) *err = "TLS 未就绪"; return false; }
-    if (!ingest(data, len)) { if (err) *err = "TLS 输入缓冲写入失败"; return false; }
+    if (!active_ || !ssl_) { if (err) *err = "TLS not ready"; return false; }
+    if (!ingest(data, len)) { if (err) *err = "Failed to write TLS input buffer"; return false; }
 
     ERR_clear_error();
     uint8_t buf[16 * 1024];
@@ -215,7 +215,7 @@ bool Tls12Client::decrypt(const uint8_t* data, size_t len, std::vector<uint8_t>*
         }
         const int e = SSL_get_error(ssl_, n);
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return true;
-        if (e == SSL_ERROR_ZERO_RETURN) return true;   // 对端关闭
+        if (e == SSL_ERROR_ZERO_RETURN) return true;   // peer closed the connection
         if (err) *err = opensslError("SSL_read");
         return false;
     }

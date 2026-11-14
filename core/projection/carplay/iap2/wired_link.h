@@ -1,23 +1,23 @@
 /**
  * @file   wired_link.h
- * @brief  有线 iAP2：把链路层套在 carkit 服务流上，并由主机主动发起协商
+ * @brief  Wired iAP2: link layer over the carkit service stream, with host-initiated negotiation
  * @author blt
  */
 
 // ============================================================================
-// core/iap2/wired_link.h —— 有线 iAP2 链路的驱动
+// core/iap2/wired_link.h - Driver for the wired iAP2 link
 // ============================================================================
-// 有线和无线在链路层上的差别只有一条，但它是"通"和"一片死寂"的差别：
+// Wired and wireless differ in only one link-layer detail, but it is the difference between "works" and "total silence":
 //
-//   无线：手机（配件）先发 marker，本端收到后回 SYN。
-//   有线：**主机先发 marker，然后不等任何回话，自己立刻发 SYN**，并且每 500ms 重发，
-//         直到手机把它的 SYN 发回来。
+//   wireless: the phone (accessory) sends the marker first; we reply with SYN after receiving it.
+//   wired: **the host sends the marker first, then without waiting for any reply immediately sends its own SYN**, resending every 500ms,
+//         until the phone sends its SYN back.
 //
-// 所以 LinkEngine 只看"对端 marker"是进不了协商态的，得有人替它踩第一脚 ——
-// 这个类就是那只脚：LinkConfig::initiator = true，外加一个泵（读→喂→tick→写）。
+// So LinkEngine alone cannot enter negotiation just by watching for the peer marker; someone must take the first step for it —
+// this class is that step: LinkConfig::initiator = true, plus a pump (read -> feed -> tick -> write).
 //
-// 有线链路参数也照 DiPlay 的 WIRED_LINK_CONFIG 走：maxOutgoing=4、控制会话版本 2、
-// 并且**声明零确认**（USB 这条道本身可靠，重传与 ACK 都不必）。
+// Wired link parameters also follow DiPlay's WIRED_LINK_CONFIG: maxOutgoing=4, control session version 2,
+// and **zero acknowledgements declared** (the USB path is reliable, so neither retransmission nor ACK is needed).
 #pragma once
 
 #include "iap2/link.h"
@@ -35,13 +35,13 @@ class IMfiIdentity;
 
 namespace core::iap2 {
 
-class Params;   // iap2/wire.h：CSM 报文体构造器
+class Params;   // iap2/wire.h: CSM message body builder
 
-/// 有线链路参数（对比 LinkConfig 的默认值：那套是无线在用的）
+/// Wired link parameters (compare LinkConfig defaults: those are used by wireless)
 LinkConfig wiredLinkConfig();
 
-/// 有线识别（0x1D01）要报的身份。字段名沿用无线那边的叫法，值可以不一样 ——
-/// 有线报的是"车机"，不是"配件"。
+/// Identity reported in wired identification (0x1D01). Field names follow the wireless naming; values may differ —
+/// wired reports a "head unit", not an "accessory".
 struct WiredConfig {
     std::string name         = "AllPlay";
     std::string model        = "AllPlay1,1";
@@ -52,102 +52,102 @@ struct WiredConfig {
     std::string eaProtocol   = "com.allplay.receiver";
     std::string language     = "en";
 
-    /// 手机那侧给 CarPlay 用的 USB 接口号 —— 就是描述符里 USBMUX 那个口的 bInterfaceNumber
-    /// （真机实测 = 1）。**这个数不是我们挑的，是从 USB 描述符里读出来的**，
-    /// 报错了手机会直接拒识别（0x1D03）。
+    /// USB interface number the phone exposes for CarPlay — that is the bInterfaceNumber of the USBMUX interface in the descriptor
+    /// (measured = 1 on a real device). **We do not choose this number; it is read from the USB descriptor**,
+    /// and reporting it wrong makes the phone reject identification outright (0x1D03).
     int carPlayUsbInterfaceNumber = 1;
 
-    /// 0xAE03 PowerSourceUpdate 里报的"能给手机多少电流"（毫安）。照 DiPlay 的默认值。
+    /// "How much current we can supply to the phone" reported in 0xAE03 PowerSourceUpdate (mA). Matches DiPlay's default.
     uint16_t availableCurrentMilliAmps = 2400;
 
     int timeoutMs = 30000;
 };
 
-/// 0x4301 CarPlayStartSession 里"有线那一组"要报的东西。
-/// DiPlay 的对应物是 Iap2WiredCarPlayEndpoint —— 那边地址来自它自建的 VPN/NCM，
-/// 这边来自**内核 cdc_ncm 挂出来的那张网卡**（见 core::INetworkInfo::interfaceForUsbDevice）。
+/// What the "wired group" reports in 0x4301 CarPlayStartSession.
+/// The DiPlay counterpart is Iap2WiredCarPlayEndpoint — there the address comes from its own VPN/NCM,
+/// while here it comes from **the NIC created by the kernel cdc_ncm** (see core::INetworkInfo::interfaceForUsbDevice).
 struct WiredCarPlayEndpoint {
-    /// 本端在 NCM 链路上的 IPv6 字面量，至少一个。手机拿到它就往这儿连 AirPlay。
-    /// **必须是链路本地**（fe80::/10）：NCM 是点对点链路，没有路由器发前缀。
+    /// IPv6 literal(s) of our side on the NCM link, at least one. The phone uses it to connect AirPlay here.
+    /// **Must be link-local** (fe80::/10): NCM is a point-to-point link with no router advertising a prefix.
     std::vector<std::string> ipv6Addresses;
     uint16_t    airPlayPort = 7000;
-    /// AirPlay 配对层公钥（Ed25519，小写 hex）—— 手机后面 pair-verify 认的就是它
+    /// AirPlay pairing-layer public key (Ed25519, lowercase hex) — this is what the phone verifies in pair-verify
     std::string publicKeyHex;
-    /// 协议版本串（AirPlay 的 sourceVersion / srcvers）。**不能为空**，手机会挑版本。
+    /// Protocol version string (AirPlay sourceVersion / srcvers). **Must not be empty**; the phone selects versions based on it.
     std::string sourceVersion;
-    /// 可选。空则不发这个参数。
+    /// Optional. If empty, this parameter is not sent.
     std::string deviceIdentifier;
 };
 
-/// 0x4300 CarPlayAvailability 里我们关心的部分。**两个方向各一组**：
-/// 这里收到的是手机在问"你（配件）这边有线/无线各自能不能上"。
+/// The part of 0x4300 CarPlayAvailability we care about. **One group per direction**:
+/// what we receive here is the phone asking "can your (accessory) side do wired/wireless each".
 struct CarPlayAvailability {
     bool        haveWired         = false;
     bool        wiredAvailable    = false;
-    std::string wiredIdentifier;             ///< 手机那侧的有线传输标识（真机上是它的 UDID）
+    std::string wiredIdentifier;             ///< phone-side wired transport identifier (its UDID on a real device)
     bool        haveWireless      = false;
     bool        wirelessAvailable = false;
-    std::string wirelessIdentifier;          ///< 手机那侧的 Wi-Fi MAC
+    std::string wirelessIdentifier;          ///< phone-side Wi-Fi MAC
 };
 
-/// 解析 0x4300 的报文体（CSM 头之后的参数表）。畸形时返回 false 并把能读到的留下。
+/// Parse the 0x4300 message body (the parameter table after the CSM header). Returns false on malformed input and keeps whatever could be read.
 bool parseCarPlayAvailability(const std::vector<uint8_t>& body, CarPlayAvailability* out);
 
-/// 给人看的一行摘要（日志用）
+/// One-line summary for humans (for logs)
 std::string describeCarPlayAvailability(const CarPlayAvailability& a);
 
 class WiredLink {
 public:
-    /// 一条完整的 CSM 消息
+    /// One complete CSM message
     struct Message {
         uint16_t             id = 0;
         std::vector<uint8_t> body;
     };
 
-    /// stream 必须比本对象活得久（通常是 WiredControl::service()）
+    /// stream must outlive this object (usually WiredControl::service())
     explicit WiredLink(core::IByteStream& stream);
 
-    /// 发 marker + SYN，进入协商。只调一次。
+    /// Send marker + SYN to enter negotiation. Call only once.
     void start(uint64_t nowMs);
 
-    /// 泵一次：把待发字节写出去 → 读一段 → 喂给链路层 → 推进时间 → 再写出去。
-    /// 返回 false = 传输层断了（不是"没数据"）。
+    /// Pump once: write pending bytes -> read a chunk -> feed the link layer -> advance time -> write again.
+    /// Returns false = the transport is broken (not "no data").
     bool pumpOnce(int readTimeoutMs);
 
-    /// 一直泵到链路进入 NORMAL。ready=false 时 err 里写的是判死原因或超时说明。
+    /// Pump until the link reaches NORMAL. When ready=false, err contains the cause of death or a timeout description.
     bool negotiate(int timeoutMs, std::string* err);
 
-    /// 识别：等手机的 0x1D00 → 回 0x1D01 → 等 0x1D02。
-    /// **链路 NORMAL 之后手机第一条发的就是 0x1D00，而且它等不了太久** ——
-    /// 实测干等 44 秒会被它把 USB 整个重置掉。所以识别必须紧跟着协商做。
+    /// Identification: wait for the phone's 0x1D00 -> reply 0x1D01 -> wait for 0x1D02.
+    /// **The first thing the phone sends after the link reaches NORMAL is 0x1D00, and it will not wait long** —
+    /// measured: waiting 44 seconds gets the USB reset entirely. So identification must follow negotiation immediately.
     bool identify(const WiredConfig& cfg, std::string* err);
 
-    /// MFi 认证：0xAA00 → 发证书 0xAA01 → 0xAA02 挑战 → 发签名 0xAA03 → 0xAA05（通过）。
-    /// identity 为 null 就发空证书 —— 真机必失败，只用于离线对拍。
+    /// MFi authentication: 0xAA00 -> send certificate 0xAA01 -> 0xAA02 challenge -> send signature 0xAA03 -> 0xAA05 (passed).
+    /// If identity is null, send an empty certificate — guaranteed to fail on a real device; only for offline comparison.
     bool authenticate(const mfi::IMfiIdentity* identity, int timeoutMs, std::string* err);
 
-    /// 0xAE03 PowerSourceUpdate：告诉手机"我这边能给你多少电、在不在充"。
-    /// 有线这条道上我们确实在给手机供电，所以这一步是有实义的，不是走流程。
+    /// 0xAE03 PowerSourceUpdate: tell the phone "how much power I can give you and whether I am charging".
+    /// On the wired path we really are powering the phone, so this step is meaningful rather than a formality.
     void sendPowerSourceUpdate(uint16_t availableCurrentMilliAmps, bool charging);
 
-    /// DiPlay 有线 bring-up 里紧随电源之后的那 5 条订阅：
+    /// The 5 subscriptions immediately after power in DiPlay's wired bring-up:
     /// 0x5000 NowPlaying / 0x5200 RouteGuidance / 0xAE00 Power /
-    /// 0x4157 Communications / 0x4154 CallState。
-    /// **订阅的是"手机告诉车机"的那半边** —— 不发这 5 条，手机不会推任何状态过来。
+    /// 0x4157 Communications / 0x4154 CallState.
+    /// **These subscribe to the "phone tells the head unit" side** — without sending these 5, the phone pushes no state at all.
     void sendSubscriptions();
 
-    /// 0x4301 CarPlayStartSession（有线组）。发了这一条，手机才开始往
-    /// ipv6Addresses:airPlayPort 上连 AirPlay。参数不合格返回 false 并写 err。
+    /// 0x4301 CarPlayStartSession (wired group). Only after this is sent does the phone start connecting
+    /// AirPlay to ipv6Addresses:airPlayPort. Returns false and writes err if the parameters are invalid.
     bool sendCarPlayStartSession(const WiredCarPlayEndpoint& ep, std::string* err);
 
-    /// 泵一次，把这一轮攒到的完整 CSM 消息依次交出来。false = 传输层断开。
+    /// Pump once and hand over the complete CSM messages accumulated this round, in order. false = transport disconnected.
     bool pump(int readTimeoutMs, std::vector<Message>* out);
 
-    /// 方控：发一次按键（编码见 iap2/hid.h）。**必须和 pump 在同一个线程调用**——
-    /// 链路层的 seq/ack 是单线程状态。返回值只表示"进了发送队列"。
+    /// Steering wheel: send one button event (encoding in iap2/hid.h). **Must be called on the same thread as pump** —
+    /// the link layer's seq/ack is single-threaded state. The return value only means "entered the send queue".
     bool sendMediaKey(core::MediaKey key, bool down);
 
-    /// 方控：把队列里的按键一次发完，返回发出的条数。同上，只在 pump 线程里用。
+    /// Steering wheel: drain all queued button events, returning how many were sent. As above, use only on the pump thread.
     int pumpMediaKeys(core::MediaKeyQueue& q);
 
     LinkEngine&       engine() { return engine_; }
@@ -155,20 +155,20 @@ public:
 
 private:
     void flush();
-    /// 泵一次（内部），同上但供各步骤复用。
+    /// Pump once (internal); same as above but reused by each step.
     bool pumpMessages(int readTimeoutMs, std::vector<Message>* out);
-    /// 发一条 CSM 消息（按对端可承载大小分片进链路）
+    /// Send one CSM message (fragmented into the link at the peer's capacity)
     void sendMessage(uint16_t msgId, const Params& params);
     void sendIdentification(const WiredConfig& cfg);
 
     core::IByteStream& stream_;
     LinkEngine         engine_;
-    /// **跨 identify/authenticate 保留**：手机的 0xAA00 完全可能在上一步的泵里就到了，
-    /// 每步各建一个 framer 会把半条消息丢掉（现象：认证永远等不到 0xAA00）。
+    /// **Kept across identify/authenticate**: the phone's 0xAA00 may well arrive during the previous step's pump,
+    /// and creating a framer per step would drop half a message (symptom: authentication never sees 0xAA00).
     CsmFramer          framer_;
 };
 
-/// 单调毫秒（链路层的时间都由调用方给，这里给个统一的来源）
+/// Monotonic milliseconds (the link layer takes time from the caller; this provides a single source)
 uint64_t monoMs();
 
 }  // namespace core::iap2

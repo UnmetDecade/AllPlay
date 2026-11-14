@@ -1,6 +1,6 @@
 /**
  * @file   aa_usb_libusb.cpp
- * @brief  Android Auto 的 libusb 传输层（AOAP 控制请求 + 手机重枚举 + bulk 端点）
+ * @brief  Android Auto libusb transport (AOAP control requests + phone re-enumeration + bulk endpoints)
  */
 
 #include "posix/aa_usb.h"
@@ -35,7 +35,7 @@ bool isAccessoryDevice(const libusb_device_descriptor& dd)
     return dd.idProduct == kAoapProductIds[0] || dd.idProduct == kAoapProductIds[1];
 }
 
-/// 非手机（键盘、集线器、Apple 自己的设备）不打扰。
+/// Leave non-phones (keyboards, hubs, Apple's own devices) alone.
 bool obviouslyNotPhone(const libusb_device_descriptor& dd)
 {
     if (dd.idVendor == 0x05ac) return true;
@@ -64,7 +64,7 @@ std::string makeId(const libusb_device_descriptor& dd, libusb_device* dev,
     return buf;
 }
 
-/// 问一下手机支不支持 AOAP（只读，不会让它换模式）。
+/// Ask the phone whether it supports AOAP (read-only; does not switch its mode).
 bool supportsAoap(libusb_device_handle* h)
 {
     uint8_t v[2] = {};
@@ -90,12 +90,12 @@ public:
                          uint16_t index, uint8_t* data, uint16_t len,
                          int timeoutMs, std::string* err) override
     {
-        if (!handle_) { if (err) *err = "USB 设备已关闭"; return false; }
+        if (!handle_) { if (err) *err = "USB device is closed"; return false; }
         const int rc = libusb_control_transfer(
             handle_, requestType, request, value, index, data, len,
             uint16_t(timeoutMs > 0 ? timeoutMs : 1000));
         if (rc < 0 || (len > 0 && rc != int(len))) {
-            if (err) *err = std::string("控制传输失败：") + libusb_error_name(rc);
+            if (err) *err = std::string("control transfer failed: ") + libusb_error_name(rc);
             return false;
         }
         return true;
@@ -104,12 +104,12 @@ public:
     std::unique_ptr<IAaUsbDevice> waitForAccessory(int timeoutMs,
                                                    std::string* err) override
     {
-        // AOAP START 之后手机会用新的 PID 重新枚举，旧句柄必然失效。
+        // After AOAP START the phone re-enumerates with a new PID, so the old handle is always invalid.
         close();
 
         libusb_context* ctx = nullptr;
         if (libusb_init(&ctx) != 0) {
-            if (err) *err = "libusb_init 失败";
+            if (err) *err = "libusb_init failed";
             return nullptr;
         }
 
@@ -131,7 +131,7 @@ public:
                 if (libusb_open(list[i], &h) != 0) continue;
                 const std::string id = makeId(dd, list[i], serialOf(h, dd));
                 libusb_free_device_list(list, 1);
-                LOG_INFO("[%s] AOAP 配件模式：%04x:%04x %s", kTag, dd.idVendor,
+                LOG_INFO("[%s] AOAP accessory mode: %04x:%04x %s", kTag, dd.idVendor,
                          dd.idProduct, id.c_str());
                 return std::make_unique<LibusbAaDevice>(ctx, h, id);
             }
@@ -141,45 +141,45 @@ public:
 
         libusb_exit(ctx);
         if (err)
-            *err = "手机没有切到 Android Auto 模式（START 之后没等到 18d1:2d00/2d01）。"
-                   "确认手机上装了 Android Auto，且 USB 模式没被别的程序占着。";
+            *err = "phone did not switch to Android Auto mode (no 18d1:2d00/2d01 after START). "
+                   "Make sure Android Auto is installed on the phone and the USB mode is not held by another program.";
         return nullptr;
     }
 
     bool openBulk(std::string* err) override
     {
-        if (!handle_) { if (err) *err = "USB 设备已关闭"; return false; }
+        if (!handle_) { if (err) *err = "USB device is closed"; return false; }
 
 #if defined(__linux__)
-        // 手机常被 MTP 驱动占着接口；libusb 能自动 detach。
+        // The phone's interface is often held by the MTP driver; libusb can detach it automatically.
         libusb_set_auto_detach_kernel_driver(handle_, 1);
 #endif
 
-        // AOAP 配件只用 configuration 1。有的手机（或 macOS 的 IOKit 状态）会
-        // 拒绝重复设置，BUSY 时沿用当前配置继续。
+        // AOAP accessories use only configuration 1. Some phones (or macOS's IOKit state) reject
+        // setting it again, so on BUSY we keep using the current configuration.
         const int cfgRc = libusb_set_configuration(handle_, 1);
         if (cfgRc < 0 && cfgRc != LIBUSB_ERROR_BUSY)
-            LOG_WARN("[%s] set_configuration(1)：%s", kTag, libusb_error_name(cfgRc));
+            LOG_WARN("[%s] set_configuration(1): %s", kTag, libusb_error_name(cfgRc));
 
         int iface = 0;
         uint8_t epIn = 0, epOut = 0;
         if (!findBulkEndpoints(&iface, &epIn, &epOut)) {
-            if (err) *err = "手机的 AOAP 接口上没有找到 bulk 端点";
+            if (err) *err = "no bulk endpoints found on the phone's AOAP interface";
             return false;
         }
 
         const int claim = libusb_claim_interface(handle_, iface);
         if (claim != 0) {
-            if (err) *err = std::string("claim 接口 ") + std::to_string(iface) +
-                            " 失败：" + libusb_error_name(claim) +
-                            "（macOS 上通常是别的程序开着手机；Linux 上可能被 MTP 占着）";
+            if (err) *err = std::string("failed to claim interface ") + std::to_string(iface) +
+                            ": " + libusb_error_name(claim) +
+                            " (on macOS another program usually has the phone open; on Linux MTP may hold it)";
             return false;
         }
         claimed_    = true;
         interface_  = iface;
         bulkIn_     = epIn;
         bulkOut_    = epOut;
-        LOG_INFO("[%s] bulk 就绪：接口 %d out=0x%02x in=0x%02x", kTag, iface,
+        LOG_INFO("[%s] bulk ready: interface %d out=0x%02x in=0x%02x", kTag, iface,
                  unsigned(epOut), unsigned(epIn));
         return true;
     }
@@ -187,14 +187,14 @@ public:
     int writeBulk(const uint8_t* data, size_t len, int timeoutMs,
                   std::string* err) override
     {
-        if (!handle_ || !claimed_) { if (err) *err = "bulk 未就绪"; return -1; }
+        if (!handle_ || !claimed_) { if (err) *err = "bulk not ready"; return -1; }
         int transferred = 0;
         const int rc = libusb_bulk_transfer(handle_, bulkOut_,
                                             const_cast<uint8_t*>(data), int(len),
                                             &transferred,
                                             timeoutMs > 0 ? timeoutMs : 10000);
         if (rc != 0 && rc != LIBUSB_ERROR_TIMEOUT) {
-            if (err) *err = std::string("bulk OUT 失败：") + libusb_error_name(rc);
+            if (err) *err = std::string("bulk OUT failed: ") + libusb_error_name(rc);
             return -1;
         }
         return transferred;
@@ -203,7 +203,7 @@ public:
     int readBulk(uint8_t* data, size_t cap, int timeoutMs, std::string* err) override
     {
         if (!handle_ || !claimed_) {
-            if (err) *err = "bulk 未就绪";
+            if (err) *err = "bulk not ready";
             return -1;
         }
         int transferred = 0;
@@ -212,7 +212,7 @@ public:
                                             timeoutMs > 0 ? timeoutMs : 1000);
         if (rc == LIBUSB_ERROR_TIMEOUT) return 0;
         if (rc != 0) {
-            if (err) *err = std::string("bulk IN 失败：") + libusb_error_name(rc);
+            if (err) *err = std::string("bulk IN failed: ") + libusb_error_name(rc);
             return -1;
         }
         return transferred;
@@ -230,7 +230,7 @@ private:
             return false;
 
         EndpointPair found{-1, 0, 0};
-        // 优先接口 0（AOAP 的约定），否则取第一个有完整 bulk 对的接口。
+        // Prefer interface 0 (the AOAP convention), otherwise take the first interface with a complete bulk pair.
         for (int i = 0; i < int(cfg->bNumInterfaces) && found.interface < 0; ++i) {
             for (int a = 0; a < int(cfg->interface[i].num_altsetting) &&
                             found.interface < 0; ++a) {
@@ -274,14 +274,14 @@ private:
     uint8_t              bulkOut_ = 0;
 };
 
-/// 枚举一遍，按 id 找设备；找到就 open（不影响别的设备）。
+/// Enumerate once and find the device by id; open it if found (without affecting other devices).
 std::unique_ptr<IAaUsbDevice> openById(libusb_context* ctx, const std::string& want,
                                        std::string* err)
 {
     libusb_device** list = nullptr;
     const ssize_t n = libusb_get_device_list(ctx, &list);
     if (n < 0) {
-        if (err) *err = "枚举 USB 设备失败";
+        if (err) *err = "failed to enumerate USB devices";
         return nullptr;
     }
     for (ssize_t i = 0; i < n; ++i) {
@@ -296,7 +296,7 @@ std::unique_ptr<IAaUsbDevice> openById(libusb_context* ctx, const std::string& w
             libusb_free_device_list(list, 1);
             if (!isAccessoryDevice(dd) && !supportsAoap(h)) {
                 libusb_close(h);
-                if (err) *err = "设备 " + want + " 不支持 AOAP";
+                if (err) *err = "device " + want + " does not support AOAP";
                 return nullptr;
             }
             return std::make_unique<LibusbAaDevice>(ctx, h, id);
@@ -304,7 +304,7 @@ std::unique_ptr<IAaUsbDevice> openById(libusb_context* ctx, const std::string& w
         libusb_close(h);
     }
     libusb_free_device_list(list, 1);
-    if (err) *err = "找不到 Android Auto 设备：" + want + "（可能已拔出或重新枚举）";
+    if (err) *err = "Android Auto device not found: " + want + " (possibly unplugged or re-enumerating)";
     return nullptr;
 }
 
@@ -318,7 +318,7 @@ AaUsbPorts makeAndroidAutoUsbPorts()
         std::vector<std::string> out;
         libusb_context* ctx = nullptr;
         if (libusb_init(&ctx) != 0) {
-            if (err) *err = "libusb_init 失败";
+            if (err) *err = "libusb_init failed";
             return out;
         }
 
@@ -326,7 +326,7 @@ AaUsbPorts makeAndroidAutoUsbPorts()
         const ssize_t n = libusb_get_device_list(ctx, &list);
         if (n < 0) {
             libusb_exit(ctx);
-            if (err) *err = "枚举 USB 设备失败";
+            if (err) *err = "failed to enumerate USB devices";
             return out;
         }
         for (ssize_t i = 0; i < n; ++i) {
@@ -344,8 +344,8 @@ AaUsbPorts makeAndroidAutoUsbPorts()
         libusb_exit(ctx);
 
         if (out.empty() && err)
-            *err = "没有找到支持 Android Auto 的手机：先用 USB 线连上，"
-                   "解锁后在通知里选「文件传输 / Android Auto」。";
+            *err = "no phone supporting Android Auto found: connect it with a USB cable first, "
+                   "then unlock it and choose 'File Transfer / Android Auto' in the notification.";
         return out;
     };
 
@@ -353,12 +353,12 @@ AaUsbPorts makeAndroidAutoUsbPorts()
         -> std::unique_ptr<IAaUsbDevice> {
         libusb_context* ctx = nullptr;
         if (libusb_init(&ctx) != 0) {
-            if (err) *err = "libusb_init 失败";
+            if (err) *err = "libusb_init failed";
             return nullptr;
         }
         auto dev = openById(ctx, id, err);
         if (!dev) libusb_exit(ctx);
-        // 成功时 ctx 的所有权交给 LibusbAaDevice。
+        // On success ownership of ctx passes to LibusbAaDevice.
         return dev;
     };
 

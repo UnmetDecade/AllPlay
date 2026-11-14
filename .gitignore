@@ -1,5 +1,5 @@
 # ============================================================================
-# 构建产物
+# Build artifacts
 # ============================================================================
 /build/
 build-*/
@@ -10,10 +10,10 @@ compile_commands.json
 *.a
 
 # ============================================================================
-# 敏感文件 —— 绝对不入库
+# Sensitive files — never commit
 # ============================================================================
-# MFi 配件身份：Apple 签发的凭证（私钥 + 证书）。属敏感文件，
-# 不要拷去别处、不要进任何仓库。运行时放在 identity/（见 README「仓库结构」）。
+# MFi accessory identity: Apple-issued credentials (private key + certificate). These are sensitive,
+# so do not copy them elsewhere or add them to any repository. At runtime they live in identity/ (see "Repository layout" in the README).
 /identity/
 *.pk8
 *.p7b
@@ -25,16 +25,16 @@ compile_commands.json
 *.crt
 *.mobileprovision
 
-# Android 签名密钥
+# Android signing keys
 *.jks
 *.keystore
 
-# 临时目录：抓来的固件 / 解出的凭证 / 抓包都爱往这儿放。
-# 别指望它安全 —— 唯一安全的是压根不放。
+# Scratch directory: dumped firmware / extracted credentials / packet captures tend to land here.
+# Do not count on it being safe — the only safe place is not putting things here at all.
 /tmp/
 
 # ============================================================================
-# 系统 / 编辑器
+# OS / editor
 # ============================================================================
 .DS_Store
 .idea/
@@ -43,7 +43,7 @@ compile_commands.json
 *~
 
 # ============================================================================
-# Android（Gradle / NDK 生成）
+# Android (Gradle / NDK generated)
 # ============================================================================
 /android/.gradle/
 /android/**/build/
@@ -55,6 +55,6 @@ compile_commands.json
 *.aab
 
 # ============================================================================
-# 日志
+# Logs
 # ============================================================================
 *.log

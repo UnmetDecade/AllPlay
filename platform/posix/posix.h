@@ -1,16 +1,16 @@
 /**
  * @file   posix.h
- * @brief  POSIX 平台适配（Linux + macOS）的装配入口
+ * @brief  Assembly entry point for the POSIX platform adapters (Linux + macOS)
  * @author blt
  */
 
 // ============================================================================
-// platform/posix/posix.h —— POSIX 平台适配（Linux + macOS）的装配入口
+// platform/posix/posix.h -- assembly entry point for the POSIX platform adapters (Linux + macOS)
 // ============================================================================
-// core 只依赖 core::PlatformServices；这里提供 POSIX 实现并组装好。
-// 各实现文件：net_posix.cpp（TCP/网卡）、mdns_{dns_sd,avahi}.cpp（mDNS）、
-// bt_{iobluetooth,bluez}.{mm,cpp}（蓝牙）。桌面组合根（app/main.cpp、tools/*）
-// 调用 allplay::posix::makePlatformServices() 注入 core。
+// core depends only on core::PlatformServices; this provides the POSIX implementation and assembles it.
+// Implementation files: net_posix.cpp (TCP/network interfaces), mdns_{dns_sd,avahi}.cpp (mDNS),
+// bt_{iobluetooth,bluez}.{mm,cpp} (Bluetooth). The desktop composition root (app/main.cpp, tools/*)
+// calls allplay::posix::makePlatformServices() to inject them into core.
 #pragma once
 
 #include "port/platform.h"
@@ -21,55 +21,55 @@
 
 namespace allplay::posix {
 
-/// 网卡信息单例（POSIX getifaddrs）
+/// Singleton for network interface info (POSIX getifaddrs)
 core::INetworkInfo& networkInfo();
 
-/// 各工厂：每用建一个新实例
+/// Factories: each call builds a new instance
 std::unique_ptr<core::ITcpListener>   makeTcpListener();
 std::unique_ptr<core::IUdpSocket>     makeUdpSocket();
 std::unique_ptr<core::IMdnsAdvertiser> makeMdnsAdvertiser();
 std::unique_ptr<core::IBluetooth>     makeBluetooth();
 
-/// 组合根辅助：蓝牙控制器地址 / 当前 Wi-Fi SSID（拿不到返回空串）。
-/// macOS 27 起两者常被系统打码，同网模式请用 --ssid 显式传。
+/// Composition-root helpers: Bluetooth controller address / current Wi-Fi SSID (empty string if unavailable).
+/// Since macOS 27 the system often masks both; in same-network mode pass --ssid explicitly.
 std::string controllerAddress();
 std::string currentSSID();
 
-/// 蓝牙适配器对外显示的名字 —— 手机蓝牙列表里看到的**就是它**（启动页要印的那个）。
-/// Linux 走 BlueZ Adapter1.Alias；macOS 走 IOBluetoothHostController。拿不到返回空串。
+/// Advertised Bluetooth adapter name -- this is **exactly** what appears in the phone's Bluetooth list (and what the splash page prints).
+/// Linux uses BlueZ Adapter1.Alias; macOS uses IOBluetoothHostController. Empty string if unavailable.
 std::string bluetoothAdapterName();
 
-/// 组装一份完整的 POSIX PlatformServices（network + 三个工厂）。
+/// Assemble a complete POSIX PlatformServices (network + the three factories).
 core::PlatformServices makePlatformServices();
 
 // ---------------------------------------------------------------------------
-// 有线 CarPlay 的媒体面：内核 cdc_ncm 那张网卡
+// Wired CarPlay media plane: the network interface created by the kernel's cdc_ncm
 // ---------------------------------------------------------------------------
 
-/// 有线媒体面就绪后的样子
+/// State of the wired media plane once it is ready
 struct WiredNcmLink {
     std::string              ifname;
-    std::string              mac;      ///< AA:BB:CC:DD:EE:FF（enx… 名字就是从它来的）
-    std::vector<std::string> ipv6;     ///< 链路本地地址；**钉的那个排第一**
-    bool                     unmanaged = false;  ///< 这次把 NetworkManager 摘开了
+    std::string              mac;      ///< AA:BB:CC:DD:EE:FF (the enx... name is derived from it)
+    std::vector<std::string> ipv6;     ///< Link-local addresses; **the pinned one comes first**
+    bool                     unmanaged = false;  ///< NetworkManager was detached this time
     bool                     broughtUp = false;
-    bool                     pinned    = false;  ///< 这次是新钉的地址（之前就有则 false）
+    bool                     pinned    = false;  ///< Address was newly pinned this time (false if one already existed)
 };
 
-/// 把有线媒体面拉起来：找到手机那侧 NCM 网卡挂出来的网卡 → 交给内核前先把
-/// NetworkManager 摘开 → 拉 up → 保证链路上有一个可用的 IPv6 链路本地地址。
+/// Bring up the wired media plane: locate the interface exposed by the phone-side NCM NIC
+/// -> detach NetworkManager before handing it to the kernel -> bring it up -> ensure a usable IPv6 link-local address on the link.
 ///
-/// **必须在 USB 切进 CarPlay 配置之后调** —— 网卡是那时候才被内核建出来的。
-/// USB 侧要的东西（bus/addr）来自 openWiredCarPlay 回填的 WiredUsbInfo。
+/// **Must be called after USB has switched into the CarPlay configuration** -- the kernel creates the interface only then.
+/// The USB-side data (bus/addr) comes from the WiredUsbInfo filled in by openWiredCarPlay.
 ///
-/// 两个真机上踩过的点，写在这儿免得下次再查：
-///   · 这张网卡的 `addr_gen_mode=1`（NONE）—— **内核一个地址都不生成**，
-///     `ip -6 addr` 是空的，0x4301 里就没地址可报给手机。
-///   · NetworkManager 拿它当"有线连接"去要 DHCP，一直卡在 connecting，
-///     随时可能把我们钉的地址冲掉。所以先 `managed no`。
+/// Two pitfalls hit on real hardware, recorded here so they do not have to be rediscovered:
+///   - This interface has `addr_gen_mode=1` (NONE) -- **the kernel generates no address at all**,
+///     `ip -6 addr` is empty, so there is no address in 0x4301 to report to the phone.
+///   - NetworkManager treats it as a "wired connection" and keeps requesting DHCP, stuck in connecting,
+///     and can flush our pinned address at any moment. Hence `managed no` first.
 ///
-/// @param wantLinkLocal 想钉的地址，空串用默认（fe80::2，照 DiPlay 的 config.linkLocal）
-/// @return 成功时 out->ipv6 非空；失败返回 false 并写 err
+/// @param wantLinkLocal address to pin; empty string uses the default (fe80::2, per DiPlay's config.linkLocal)
+/// @return on success out->ipv6 is non-empty; on failure returns false and writes err
 bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLocal,
                      WiredNcmLink* out, std::string* err);
 

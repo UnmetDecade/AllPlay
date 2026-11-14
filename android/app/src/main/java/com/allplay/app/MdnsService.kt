@@ -17,14 +17,14 @@ import javax.jmdns.ServiceInfo
 import javax.jmdns.ServiceListener
 
 /**
- * IMdnsAdvertiser 的 Android 实现。
+ * Android implementation of IMdnsAdvertiser.
  *
- * 广播与发现优先用 JmDNS（热点模式下要显式绑定热点接口 IP，NsdManager 会绑错网卡）。
- * 但部分 ROM（尤其 Android 4.4 电视盒子）系统 netd 已占住 5353 端口，JmDNS bind 会
- * EADDRINUSE；此时退回系统 NsdManager（它复用 netd 的 mDNS responder，不抢端口）。
+ * Prefer JmDNS for advertising and discovery (in hotspot mode it must bind explicitly to the hotspot interface IP, or NsdManager binds the wrong NIC).
+ * But on some ROMs (especially Android 4.4 TV boxes) the system netd already holds port 5353, so JmDNS bind fails with
+ * EADDRINUSE; fall back to the system NsdManager then (it reuses netd's mDNS responder and does not contend for the port).
  */
 class MdnsService(private val context: Context) {
-    /** 热点接口 IPv4（AllPlaySessionService 在 nativeStart 前注入）。null/空 = 自动探测。 */
+    /** Hotspot interface IPv4 (injected by AllPlaySessionService before nativeStart). null/empty = auto-detect. */
     var advertiseIp: String? = null
 
     private val jmdnsList = mutableListOf<JmDNS>()
@@ -33,7 +33,7 @@ class MdnsService(private val context: Context) {
         (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
             .createMulticastLock("allplay-mdns").apply { setReferenceCounted(false) }
 
-    // JmDNS 抢不到 5353（EADDRINUSE）时退回系统 NsdManager
+    // Fall back to the system NsdManager when JmDNS cannot get 5353 (EADDRINUSE)
     private val nsdManager =
         context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
     private var usingNsd = false
@@ -41,12 +41,12 @@ class MdnsService(private val context: Context) {
 
     fun register(name: String, port: Int, txt: Array<String>): Boolean {
         if (tryJmDnsRegister(name, port, txt)) return true
-        Log.w("AllPlay", "JmDNS 注册失败，退回系统 NsdManager")
+        Log.w("AllPlay", "JmDNS registration failed, falling back to system NsdManager")
         usingNsd = true
         return tryNsdRegister(name, port, txt)
     }
 
-    /// JmDNS 路径：显式绑定接口（热点模式需要）。
+    /// JmDNS path: bind the interface explicitly (needed in hotspot mode).
     private fun tryJmDnsRegister(name: String, port: Int, txt: Array<String>): Boolean {
         return try {
             multicastLock.acquire()
@@ -62,25 +62,25 @@ class MdnsService(private val context: Context) {
                 if (addr is Inet4Address) {
                     dns.registerService(ServiceInfo.create("_airplay._tcp.local.", name, port, 0, 0, map))
                     dns.registerService(ServiceInfo.create("_carplay._tcp.local.", name, port, 0, 0, map))
-                    Log.i("AllPlay", "JmDNS 广播 _airplay/_carplay._tcp iface=$addr")
+                    Log.i("AllPlay", "JmDNS advertising _airplay/_carplay._tcp iface=$addr")
                 } else {
-                    Log.i("AllPlay", "JmDNS 仅发现（不广播）iface=$addr")
+                    Log.i("AllPlay", "JmDNS discovery only (no advertising) iface=$addr")
                 }
             }
             if (addrs.isEmpty()) {
                 val dns = JmDNS.create()
                 jmdnsList.add(dns)
                 dns.registerService(ServiceInfo.create("_airplay._tcp.local.", name, port, 0, 0, map))
-                Log.i("AllPlay", "JmDNS 广播 _airplay._tcp iface=(all)")
+                Log.i("AllPlay", "JmDNS advertising _airplay._tcp iface=(all)")
             }
             true
         } catch (e: Exception) {
-            Log.w("AllPlay", "JmDNS 注册失败 ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("AllPlay", "JmDNS registration failed ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }
 
-    /// NsdManager 路径：复用系统 netd 的 mDNS responder，广播 _airplay/_carplay._tcp。
+    /// NsdManager path: reuse the system netd mDNS responder and advertise _airplay/_carplay._tcp.
     private fun tryNsdRegister(name: String, port: Int, txt: Array<String>): Boolean {
         val types = arrayOf("_airplay._tcp", "_carplay._tcp")
         return try {
@@ -94,10 +94,10 @@ class MdnsService(private val context: Context) {
                 nsdManager.registerService(info, NsdManager.PROTOCOL_DNS_SD,
                     object : NsdManager.RegistrationListener {
                         override fun onServiceRegistered(i: NsdServiceInfo) {
-                            Log.i("AllPlay", "NsdManager 已广播 ${i.serviceType} name=${i.serviceName}")
+                            Log.i("AllPlay", "NsdManager advertising ${i.serviceType} name=${i.serviceName}")
                         }
                         override fun onRegistrationFailed(i: NsdServiceInfo, errorCode: Int) {
-                            Log.w("AllPlay", "NsdManager 广播失败 ${i.serviceType} code=$errorCode")
+                            Log.w("AllPlay", "NsdManager advertising failed ${i.serviceType} code=$errorCode")
                         }
                         override fun onServiceUnregistered(i: NsdServiceInfo) {}
                         override fun onUnregistrationFailed(i: NsdServiceInfo, errorCode: Int) {}
@@ -106,14 +106,14 @@ class MdnsService(private val context: Context) {
             }
             true
         } catch (e: Exception) {
-            Log.w("AllPlay", "NsdManager 注册失败 ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("AllPlay", "NsdManager registration failed ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }
 
-    /// 设置 TXT：API 21+ 用 setAttribute；API 19 不设（setTxtRecord(byte[]) 不存在、
-    /// setTxtRecord(DnsSdTxtRecord) 会导致 NsdServiceInfo Binder 序列化失败 → mDNS 注册失败）。
-    /// 实测 API 19 上 TXT 为 null 时 iPhone 靠蓝牙 0x4301 + RTSP /info 就能连，TXT 不是必需。
+    /// Set TXT: API 21+ uses setAttribute; API 19 skips it (setTxtRecord(byte[]) does not exist, and
+    /// setTxtRecord(DnsSdTxtRecord) makes NsdServiceInfo Binder serialization fail → mDNS registration fails).
+    /// Measured on API 19: with TXT null, the iPhone still connects via Bluetooth 0x4301 + RTSP /info, so TXT is not required.
     private fun setTxtRecordCompat(info: NsdServiceInfo, txt: Array<String>) {
         if (Build.VERSION.SDK_INT >= 21) {
             txt.forEach { kv ->
@@ -123,13 +123,13 @@ class MdnsService(private val context: Context) {
         }
     }
 
-    /// 发现 iPhone 的 _carplay-ctrl._tcp，解析出 host/port 后回调。
+    /// Discover the iPhone's _carplay-ctrl._tcp and invoke the callback once host/port are resolved.
     fun discoverCarPlayCtrl(onResolved: (host: String, port: Int) -> Unit) {
         if (usingNsd) { discoverNsd(onResolved); return }
         if (jmdnsList.isEmpty()) return
         val listener = object : ServiceListener {
             override fun serviceAdded(event: ServiceEvent) {
-                Log.i("AllPlay", "JmDNS 发现 _carplay-ctrl serviceAdded name=${event.name}")
+                Log.i("AllPlay", "JmDNS discovered _carplay-ctrl serviceAdded name=${event.name}")
                 event.dns.requestServiceInfo(event.type, event.name, true)
             }
             override fun serviceRemoved(event: ServiceEvent) {}
@@ -144,7 +144,7 @@ class MdnsService(private val context: Context) {
         }
         jmdnsList.forEach { dns ->
             dns.addServiceListener("_carplay-ctrl._tcp.local.", listener)
-            Log.i("AllPlay", "JmDNS 发现 _carplay-ctrl 挂到 ${dns.inetAddress}")
+            Log.i("AllPlay", "JmDNS discovered _carplay-ctrl on ${dns.inetAddress}")
         }
     }
 
@@ -152,13 +152,13 @@ class MdnsService(private val context: Context) {
         nsdManager.discoverServices("_carplay-ctrl._tcp", NsdManager.PROTOCOL_DNS_SD,
             object : NsdManager.DiscoveryListener {
                 override fun onDiscoveryStarted(serviceType: String) {
-                    Log.i("AllPlay", "NsdManager 开始发现 $serviceType")
+                    Log.i("AllPlay", "NsdManager started discovery $serviceType")
                 }
                 override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                    Log.i("AllPlay", "NsdManager 发现 _carplay-ctrl name=${serviceInfo.serviceName}")
+                    Log.i("AllPlay", "NsdManager discovered _carplay-ctrl name=${serviceInfo.serviceName}")
                     nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
                         override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                            Log.w("AllPlay", "NsdManager resolve 失败 code=$errorCode")
+                            Log.w("AllPlay", "NsdManager resolve failed code=$errorCode")
                         }
                         override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                             val host = serviceInfo.host?.hostAddress
@@ -170,13 +170,13 @@ class MdnsService(private val context: Context) {
                 override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
                 override fun onDiscoveryStopped(serviceType: String) {}
                 override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                    Log.w("AllPlay", "NsdManager 开始发现失败 code=$errorCode")
+                    Log.w("AllPlay", "NsdManager start discovery failed code=$errorCode")
                 }
                 override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
             })
     }
 
-    /// 探测 iPhone：GET /ctrl-int/1/connect（参照协议 CarPlayBonjour 请求格式）
+    /// Probe the iPhone: GET /ctrl-int/1/connect (per the protocol's CarPlayBonjour request format)
     fun probeCarPlay(host: String, port: Int, deviceId: String, sourceVersion: String): Boolean {
         return try {
             val sock = Socket()
@@ -218,7 +218,7 @@ class MdnsService(private val context: Context) {
         if (multicastLock.isHeld) multicastLock.release()
     }
 
-    /// 广播/发现应绑定的地址：显式配置优先；否则探测热点接口（wlan/ap/softap）的 IPv4+IPv6。
+    /// Addresses to bind for advertising/discovery: explicit config first; otherwise detect IPv4+IPv6 on hotspot interfaces (wlan/ap/softap).
     private fun resolveAdvertiseAddresses(): List<InetAddress> {
         val ip = advertiseIp?.takeIf { it.isNotBlank() }
         if (ip != null) {

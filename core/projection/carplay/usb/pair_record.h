@@ -1,22 +1,22 @@
 /**
  * @file   pair_record.h
- * @brief  有线配对要用的本地证书材料（root / host / device 三张）
+ * @brief  Local certificate material for wired pairing (root / host / device)
  * @author blt
  */
 
 // ============================================================================
-// core/usb/pair_record.h —— 有线配对的自造证书
+// core/usb/pair_record.h — self-generated certificates for wired pairing
 // ============================================================================
-// 有线这条路的配对**不是**无线那套 SRP（pair-setup/pair-verify），而是明文 Pair，
-// 证书全部**本地现造**，手机那把公钥也只用来"签一张属于它的证书"：
+// Wired pairing is **not** the wireless SRP scheme (pair-setup/pair-verify); it is a plaintext Pair,
+// with all certificates **generated locally on the spot**; the phone's public key is only used to "sign a certificate belonging to it":
 //
-//   root   —— 自签（空 DN、serial 0、CA:TRUE）。进 Pair 请求；**之后 TLS 的客户端身份也是它**
-//   host   —— root 签（空 DN、CA:FALSE）
-//   device —— root 签，但**证书里的公钥是手机通过 GetValue(DevicePublicKey) 给的**
-//             （所以这把私钥在手机里，我们签不出东西来）
+//   root   — self-signed (empty DN, serial 0, CA:TRUE). Goes into the Pair request; **it is also the TLS client identity afterward**
+//   host   — signed by root (empty DN, CA:FALSE)
+//   device — signed by root, but **the public key in the certificate is the one the phone gave via GetValue(DevicePublicKey)**
+//             (so the private key lives on the phone; we cannot sign anything with it)
 //
-// 形状照抄 DiPlay：RSA-2048 / SHA256withRSA / 有效期 10 年 / 空 issuer 与 subject DN /
-// serial 恒 0。**别自作主张加 CN 或改 serial** —— 手机认不认是实测出来的事，改了得重测。
+// Shape copied from DiPlay: RSA-2048 / SHA256withRSA / 10-year validity / empty issuer and subject DN /
+// serial always 0. **Do not add a CN or change the serial on your own** — whether the phone accepts it was determined empirically; any change requires re-testing.
 #pragma once
 
 #include <cstdint>
@@ -25,72 +25,72 @@
 
 namespace core::usb {
 
-/// 一次配对所需的全部本地材料
+/// All local material needed for one pairing
 struct WiredPairIdentity {
-    std::string rootCertPem;    ///< 自签 root 证书（PEM 文本）
-    std::string rootKeyPem;     ///< root 私钥（PKCS#8 PEM）——TLS 客户端身份用它
-    std::string hostCertPem;    ///< host 证书（PEM 文本）
+    std::string rootCertPem;    ///< self-signed root certificate (PEM text)
+    std::string rootKeyPem;     ///< root private key (PKCS#8 PEM) — used for the TLS client identity
+    std::string hostCertPem;    ///< host certificate (PEM text)
     std::string hostKeyPem;
-    std::string deviceCertPem;  ///< 给手机签的 device 证书（PEM 文本）
-    std::string hostId;         ///< 大写 UUID
-    std::string systemBuid;     ///< 大写 UUID
+    std::string deviceCertPem;  ///< device certificate signed for the phone (PEM text)
+    std::string hostId;         ///< uppercase UUID
+    std::string systemBuid;     ///< uppercase UUID
 };
 
-/// 生成配对材料。devicePublicKey = lockdown GetValue("DevicePublicKey") 拿到的原始字节。
+/// Generate pairing material. devicePublicKey = raw bytes from lockdown GetValue("DevicePublicKey").
 ///
-/// **别假设它是 DER**：文档与参照实现都说这里是 PKCS#1 RSAPublicKey DER，但真机上
-/// 拿到的是 431 字节的 **PEM 文本**。本函数自己认格式（PEM / PKCS#1 / SPKI 都吃），
-/// 所以调用方原样透传即可，不要提前转码。
+/// **Do not assume it is DER**: docs and reference implementations say PKCS#1 RSAPublicKey DER, but on the real device
+/// we get 431 bytes of **PEM text**. This function detects the format itself (accepts PEM / PKCS#1 / SPKI),
+/// so callers can pass it through unchanged; do not transcode it beforehand.
 ///
-/// hostId / systemBuid 由调用方给：**SetValue(UntrustedHostBUID) 必须和后面 Pair 里
-/// 写的 SystemBUID 是同一个**，所以这对 UUID 得在配对流程开始前就定下来。传空串则现生成。
+/// hostId / systemBuid are supplied by the caller: **SetValue(UntrustedHostBUID) must match
+/// the SystemBUID written in the later Pair**, so this pair of UUIDs must be fixed before the pairing flow starts. Empty strings are generated on the spot.
 bool makeWiredPairIdentity(const std::vector<uint8_t>& devicePublicKey, const std::string& hostId,
                            const std::string& systemBuid, WiredPairIdentity* out,
                            std::string* err);
 
-/// 大写 UUID（HostID / SystemBUID 都用它；手机要的是大写）
+/// Uppercase UUID (used for both HostID / SystemBUID; the phone wants uppercase)
 std::string makeUuidUpper();
 
 // ----------------------------------------------------------------------------
-// 落盘 / 复读：**免掉每次都要在手机上点"信任"**
+// Persistence / reload: **avoid tapping "Trust" on the phone every time**
 // ----------------------------------------------------------------------------
-// iOS 认"这台电脑"认的是 **HostID + 这一套证书**（它自己那边也存了一份 pair record）。
-// 每跑一次就现造一套新的，手机每次都当陌生人 → 每次弹一次"要信任此电脑吗？"。
-// 存下来复用，弹窗就该只出现第一次。
+// iOS identifies "this computer" by **HostID + this certificate set** (it keeps its own copy of the pair record).
+// Generating a new set on every run makes the phone treat us as a stranger each time → it shows "Trust this computer?" every time.
+// Store and reuse it, and the prompt should appear only the first time.
 //
-// key 用**手机序列号**（USB 描述符里就有），不用 DevicePublicKey —— 顺序上做不到：
-// Pair 之前必须先报 SetValue(UntrustedHostBUID)，而那个 BUID 就在这份记录里，
-// 那会儿还没读到 DevicePublicKey。
+// key is the **phone serial number** (available in the USB descriptor), not DevicePublicKey — that is impossible order-wise:
+// before Pair we must first send SetValue(UntrustedHostBUID), and that BUID lives in this record,
+// but at that point DevicePublicKey has not been read yet.
 //
-// 目录：<stateDir>/wired-pair/<key>/（stateDir 空 = defaultStateDir()）。
+// Directory: <stateDir>/wired-pair/<key>/ (empty stateDir = defaultStateDir()).
 
-/// 只读回 HostID / SystemBUID（报 UntrustedHostBUID 要用）。没有记录返回 false，不算错。
+/// Read back only HostID / SystemBUID (needed for reporting UntrustedHostBUID). Returns false when there is no record; not an error.
 bool loadWiredPairIds(const std::string& stateDir, const std::string& key, std::string* hostId,
                       std::string* systemBuid);
 
-/// 读回整套材料。**devicePublicKey 对不上就当没有**（换了手机、手机重装、记录过期）：
-/// 那种情况下 *found 回 false，调用方重新造一套并覆盖。
+/// Read back the whole set. **If devicePublicKey does not match, treat it as absent** (phone swapped, phone reinstalled, record stale):
+/// in that case *found returns false and the caller generates a new set and overwrites.
 bool loadWiredPairIdentity(const std::string& stateDir, const std::string& key,
                            const std::vector<uint8_t>& devicePublicKey, WiredPairIdentity* out,
                            bool* found, std::string* err);
 
-/// 落盘（私钥 0600）。失败返回 false —— 但**调用方不该因此判整个配对流失败**：
-/// 存不下最多是下次再弹一次信任框。
+/// Persist to disk (private keys 0600). Returns false on failure — but **the caller should not fail the whole pairing flow because of it**:
+/// at worst it means one more trust prompt next time.
 bool saveWiredPairIdentity(const std::string& stateDir, const std::string& key,
                            const std::vector<uint8_t>& devicePublicKey, const WiredPairIdentity& id,
                            std::string* err);
 
-/// 只读证书那几张（**不校验手机公钥**）。给"不再发 Pair"的快路径用：
-/// 那条路上 device 证书根本用不上（它只出现在 PairRecord 里），而校验指纹需要
-/// 先跟手机要 DevicePublicKey —— 快路径的意义就是不去要。
+/// Read only the certificates (**no phone public key verification**). Used by the "skip Pair" fast path:
+/// on that path the device certificate is not needed at all (it only appears in PairRecord), and verifying the fingerprint would require
+/// first requesting DevicePublicKey from the phone — the whole point of the fast path is not to.
 bool loadWiredPairCerts(const std::string& stateDir, const std::string& key, WiredPairIdentity* out,
                         bool* found, std::string* err);
 
-// ---- "这对材料配对成功过"的印记 ------------------------------------------
-// 为什么要单独记一笔：**配对成功 ≠ 有记录可复用**。上次卡在弹窗上时，材料也已经
-// 落盘了（那时候就存了，不然 HostID 定不下来），但手机那边并没有认过它 ——
-// 拿这种记录去跳过 Pair，等于端着一套手机没见过的证书去开加密会话，必然失败。
-// 所以只有**真配成功过**才盖这个戳，下一轮才敢跳过 Pair。
+// ---- Mark that "this material pair has paired successfully" ------------------
+// Why record this separately: **pairing success ≠ a reusable record**. Last time we got stuck at the prompt, the material was already
+// persisted (saved at that point, otherwise HostID could not be fixed), but the phone never accepted it —
+// using such a record to skip Pair means opening an encrypted session with certificates the phone has never seen, which is bound to fail.
+// So only **a genuinely successful pairing** gets this stamp, and only then may the next round skip Pair.
 bool markWiredPairTrusted(const std::string& stateDir, const std::string& key, std::string* err);
 bool isWiredPairTrusted(const std::string& stateDir, const std::string& key);
 

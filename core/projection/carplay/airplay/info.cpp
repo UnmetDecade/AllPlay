@@ -22,8 +22,8 @@ using bplist::u;
 namespace {
 
 // ---------------------------------------------------------------------------
-// HID 设备（touch/knob/media/telephony）。参照 AirPlay 协议的 HID 描述符与
-// hidDeviceEntry 字段。缺少 HID 设备声明时 iPhone 会在 SETUP 后立刻 TEARDOWN。
+// HID devices (touch/knob/media/telephony). Per the AirPlay protocol's HID descriptor and
+// hidDeviceEntry fields. Without HID device declarations, the iPhone tears down immediately after SETUP.
 // ---------------------------------------------------------------------------
 
 std::vector<uint8_t> multitouchDescriptor(int xMax, int yMax)
@@ -42,8 +42,8 @@ std::vector<uint8_t> multitouchDescriptor(int xMax, int yMax)
         b.insert(b.end(), f, f + sizeof f);
     };
     std::vector<uint8_t> b = {0x05, 0x0d, 0x09, 0x04, 0xa1, 0x01};
-    finger(b);   // 触点 0
-    finger(b);   // 触点 1
+    finger(b);   // touch 0
+    finger(b);   // touch 1
     b.push_back(0xc0);
     return b;
 }
@@ -104,7 +104,7 @@ Ptr hidDevice(uint64_t uid, const std::string& name,
     });
 }
 
-/// CarPlay 资源模式（协议 /info 的 modes 字段）
+/// CarPlay resource modes (the /info modes field)
 Ptr resourceMode(uint64_t id)
 {
     return dict({
@@ -123,7 +123,7 @@ std::vector<uint8_t> buildInfoPlist(const DeviceInfo& info)
 {
     const int width = info.width, height = info.height;
 
-    // displays[]：主屏（110）。uuid 用协议的小写键名；type 必须给 110。
+    // displays[]: main screen (110). uuid uses the protocol's lowercase key name; type must be 110.
     const Ptr area = dict({
         {"widthPixels",  u((uint64_t)width)},
         {"heightPixels", u((uint64_t)height)},
@@ -146,7 +146,7 @@ std::vector<uint8_t> buildInfoPlist(const DeviceInfo& info)
             {"heightPixels",     u((uint64_t)height)},
             {"widthPhysical",    u(0)},
             {"heightPhysical",   u(0)},
-            {"features",         u(0x0A)},          // 0x08 高保真触摸 | 0x02 旋钮
+            {"features",         u(0x0A)},          // 0x08 high-fidelity touch | 0x02 knob
             {"primaryInputDevice", boolean(true)},
             {"viewAreas",        array({area})},
             {"initialViewArea",  u(0)},
@@ -169,18 +169,18 @@ std::vector<uint8_t> buildInfoPlist(const DeviceInfo& info)
         })},
     });
 
-    // 音频格式/延迟（参照协议的 audioFormats/audioLatencies；48kHz）
-    const uint64_t pcm48     = 0x3fcULL | 0xc000ULL;      // 48k 立体声 PCM
-    const uint64_t pcmMono48 = 0x154ULL | 0x4000ULL;      // 48k 单声道 PCM
+    // Audio formats/latencies (per the protocol's audioFormats/audioLatencies; 48kHz)
+    const uint64_t pcm48     = 0x3fcULL | 0xc000ULL;      // 48k stereo PCM
+    const uint64_t pcmMono48 = 0x154ULL | 0x4000ULL;      // 48k mono PCM
     const uint64_t opus      = 0x70000000ULL;
-    const uint64_t aac48     = 0x800000ULL;               // 48k 立体声 AAC-LC
+    const uint64_t aac48     = 0x800000ULL;               // 48k stereo AAC-LC
     auto audioFormat = [](int type, const char* audioType, uint64_t outFmt, uint64_t inFmt = 0) {
         std::vector<std::pair<std::string, Ptr>> d = {
             {"type", u((uint64_t)type)},
             {"audioType", str(audioType)},
             {"audioOutputFormats", u(outFmt)},
         };
-        if (inFmt) d.push_back({"audioInputFormats", u(inFmt)});   // 麦克风（车→手机）
+        if (inFmt) d.push_back({"audioInputFormats", u(inFmt)});   // microphone (car -> phone)
         return dict(d);
     };
     std::vector<Ptr> audioFormats = {

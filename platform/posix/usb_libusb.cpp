@@ -1,28 +1,28 @@
 // ============================================================================
-// platform/posix/usb_libusb.cpp —— 有线 CarPlay 的 USB 传输层（libusb）
+// platform/posix/usb_libusb.cpp -- wired CarPlay USB transport (libusb)
 // ============================================================================
-// 整个有线链路里，只有这一段必须自己动手碰硬件。四步：
-//   ① 找到 iPhone（Apple VID，排除键盘/集线器）
-//   ② 让它换一套配置表：vendor 0xC0/0x52/index 4
-//   ③ **自己选中** CarPlay 配置：libusb_set_configuration
-//   ④ claim USBMUX 口，把它的两个 bulk 端点包成 core::IByteStream
+// Of the whole wired link, only this part has to touch hardware directly. Four steps:
+//   1. Find the iPhone (Apple VID, excluding keyboards/hubs)
+//   2. Make it expose a different configuration set: vendor 0xC0/0x52/index 4
+//   3. **Select** the CarPlay configuration ourselves: libusb_set_configuration
+//   4. Claim the USBMUX interface and wrap its two bulk endpoints as a core::IByteStream
 //
-// ② 和 ③ 分开是有血的教训的（真机实测）：vendor 0x52 只是让 iPhone 重枚举、多一套
-// 配置表可选，**激活哪一个由主机决定**。Linux 内核按"哪个配置有驱动能绑"来挑，挑中的
-// 是那个带 USB 网络共享的通用配置 —— 它照样能建出一块网卡，看起来像成功了，其实
-// 媒体面根本不存在。所以 ③ 不能省。DiPlay 也是自己在 open 之后 setConfiguration 的。
+// Keeping steps 2 and 3 separate comes from hard experience (real hardware): vendor 0x52 only
+// makes the iPhone re-enumerate with an extra configuration set; **the host decides which one is
+// activated**. The Linux kernel picks "a configuration a driver can bind", landing on the generic USB-tethering
+// one -- it still creates an interface and looks like success, but the media plane does not exist. So step 3 is mandatory; DiPlay also calls setConfiguration itself after open.
 //
-// ③ 还会撞 LIBUSB_ERROR_BUSY。来源有三个，内核**不区分是谁占的**（只要当前配置下
-// 任一接口被占就拒）：
-//   · ipheth（内核驱动，绑在 Apple 以太网口上）→ 本文件自动 detach，切完配置内核会
-//     自己重新 probe，不用还回去；
-//   · usbmuxd（udev 每次重枚举都把它拉起来）→ 我们 detach 不了，只能让用户先停掉；
-//   · gvfsd-gphoto2（GNOME 照片导入守护进程，占住 PTP 接口）→ 同上。
-// 后两个的处置写在 kBusyHint 里，原样打给用户。
+// Step 3 can also hit LIBUSB_ERROR_BUSY. There are three sources, and the kernel **does not distinguish
+// who holds it** (it rejects if any interface is held under the current configuration):
+//   - ipheth (kernel driver bound to the Apple Ethernet interface) -> this file detaches it automatically; after the configuration switch the kernel
+//     re-probes it itself, so there is no need to rebind;
+//   - usbmuxd (udev starts it on every re-enumeration) -> we cannot detach it, so the user has to stop it first;
+//   - gvfsd-gphoto2 (GNOME photo-import daemon holding the PTP interface) -> same as above.
+// What to do about the latter two is in kBusyHint, printed to the user verbatim.
 //
-// 媒体面不在这里：切进 CarPlay 配置后，内核的 cdc_ncm 会自己绑上标准 CDC-NCM、把网卡
-// 建出来，AirPlay 直接 bind 那块网卡的 IPv6 链路本地地址（见 usb.h 文件头）。
-// 本文件只 claim USBMUX 一个接口，别的接口一概不碰。
+// The media plane is not here: after switching into the CarPlay configuration, the kernel's cdc_ncm binds standard CDC-NCM itself and
+// creates the network interface, and AirPlay binds its IPv6 link-local address directly (see the header of usb.h).
+// This file claims only the USBMUX interface and touches nothing else.
 #include "posix/usb.h"
 
 #include "common/log.h"
@@ -47,40 +47,40 @@ namespace {
 constexpr const char* kTag = "usb";
 
 constexpr uint16_t kAppleVendorId = 0x05ac;
-// 同一台机器上会撞见的非 iPhone 苹果设备：列进来只会干扰判断
+// Non-iPhone Apple devices likely to be present on the same machine: listing them only confuses the detection
 constexpr uint16_t kAppleKeyboardProduct = 0x024f;
 constexpr uint16_t kAppleHubProduct      = 0x1006;
 
-// 切配置表的 vendor 请求（与 DiPlay / LIVI 一致）
+// Vendor request to switch the configuration set (same as DiPlay / LIVI)
 constexpr uint8_t  kCarPlayConfigRequest = 0x52;
 constexpr uint16_t kCarPlayConfigIndex   = 0x0004;
 constexpr uint8_t  kVendorDeviceIn       = 0xc0;
-// 找不到 CarPlay 配置时，vendor 请求最多重发几次。给的是"人去解锁手机"的时间，
-// 不是"等硬件慢慢反应"—— 真锁着屏的话再等也不会变，所以几次之后就报错并打印配置表。
+// How many times to resend the vendor request when no CarPlay configuration appears. The budget is for "a human unlocking the phone",
+// not "waiting for hardware to catch up" -- if the screen really is locked, waiting longer changes nothing, so after a few tries it errors out and prints the configuration table.
 constexpr int      kCarPlayConfigTries   = 3;
 
-// 接口指纹
+// Interface fingerprints
 constexpr uint8_t kUsbMuxClass = 0xff, kUsbMuxSubclass = 0xfe, kUsbMuxProtocol = 0x02;
 constexpr uint8_t kNcmControlClass = 0x02, kNcmControlSubclass = 0x0d;
 constexpr uint8_t kNcmDataClass = 0x0a;
 constexpr uint8_t kAppleEthClass = 0xff, kAppleEthSubclass = 0xfd, kAppleEthProtocol = 0x01;
 
-// 读线程一次最多收多少。USBMUX 上不会有巨包，16K 够用又不浪费。
+// Max bytes the reader thread takes at once. USBMUX never carries huge packets, so 16K is enough without waste.
 constexpr int kBulkInSize = 16 * 1024;
-// 读线程的轮询间隔：既是空闲时的唤醒周期，也是 close() 之后的最坏退出延迟。
-// 读线程不玩 async + cancel_transfer —— 那点收益不值这个复杂度。
+// Reader thread poll interval: both the idle wake-up period and the worst-case exit latency after close().
+// The reader does not use async + cancel_transfer -- the small gain is not worth the complexity.
 constexpr int kBulkPollMs = 100;
-// 写超时给得比读长得多：写不出去基本就是设备真没了。
+// The write timeout is much longer than the read timeout: if a write cannot go out, the device is basically gone.
 constexpr int kBulkWriteTimeoutMs = 2000;
 
 const char* kBusyHint =
-    "当前配置下只要有任一接口被占着，内核就拒 —— 常驻的两个占用者要先让开：\n"
-    "    sudo systemctl stop usbmuxd && sudo systemctl mask usbmuxd   # udev 每次重枚举都会把它拉起来\n"
-    "    pkill -f gvfsd-gphoto2                                       # GNOME 照片导入，占住 iPhone 的 PTP 接口\n"
-    "  到底是谁占的，内核日志里写着：journalctl -k -n 5";
+    "if any interface is held under the current configuration, the kernel refuses -- the two usual holders must move out of the way first:\n"
+    "    sudo systemctl stop usbmuxd && sudo systemctl mask usbmuxd   # udev pulls it back up on every re-enumeration\n"
+    "    pkill -f gvfsd-gphoto2                                       # GNOME photo import, holds the iPhone's PTP interface\n"
+    "  If you want to know who holds it, the kernel log says: journalctl -k -n 5";
 
 // ---------------------------------------------------------------------------
-// 描述符判断
+// Descriptor checks
 // ---------------------------------------------------------------------------
 bool isUsbMux(const libusb_interface_descriptor& d)
 {
@@ -104,13 +104,13 @@ bool isAppleEthernet(const libusb_interface_descriptor& d)
            d.bInterfaceProtocol == kAppleEthProtocol;
 }
 
-/// CarPlay 配置 = USBMUX（ff/fe/02）+ **标准 CDC-NCM**（02/0d 控制口 + 0a 数据口）
-/// + Apple 私有以太网（ff/fd/01）三件套齐活。
-/// 别拿"配置号"认它：号随型号变（真 iPhone 是 6），只能按描述符找。
-/// 三件套里只有 NCM 那两件是"网卡"的来源 —— 建网卡是内核 cdc_ncm 的活，本文件不插手。
+/// A CarPlay configuration = all three of USBMUX (ff/fe/02), **standard CDC-NCM** (02/0d control
+/// + 0a data interface), and Apple-private Ethernet (ff/fd/01).
+/// Do not identify it by "configuration number": the number varies by model (a real iPhone uses 6); find it by descriptors only.
+/// Of the three, only the two NCM interfaces are the source of the "network interface" -- creating it is the job of kernel cdc_ncm, which this file does not touch.
 struct CarPlayConfig {
-    int index = -1;   ///< 描述符数组下标（libusb_get_config_descriptor 用）
-    int value = -1;   ///< bConfigurationValue（set_configuration 用）
+    int index = -1;   ///< descriptor array index (for libusb_get_config_descriptor)
+    int value = -1;   ///< bConfigurationValue (for set_configuration)
 };
 
 CarPlayConfig findCarPlayConfig(libusb_device* dev)
@@ -143,24 +143,24 @@ CarPlayConfig findCarPlayConfig(libusb_device* dev)
     return found;
 }
 
-/// 把当前的配置表原样打出来。**只在"找不到 CarPlay 配置"时才调用**
-/// —— 这一条日志是"手机锁屏了"和"线/PTP 占位"的分水岭：
-/// iPhone 锁屏时 iOS 只报 1 个配置（PTP），解锁并信任之后才把六个都报出来。
-/// 没有它，两种完全不同的处境会共用同一句"换根数据线试试"，白折腾。
+/// Dump the current configuration table verbatim. **Only called when "no CarPlay configuration" is found**
+/// -- this log entry is the dividing line between "phone is locked" and "cable/PTP is in the way":
+/// when an iPhone is locked, iOS reports only 1 configuration (PTP); after unlocking and trusting, all six appear.
+/// Without it, two completely different situations would share the same "try another cable", wasting effort.
 std::string describeConfigs(libusb_device* dev)
 {
     libusb_device_descriptor dd{};
-    if (libusb_get_device_descriptor(dev, &dd) != 0) return "（连设备描述符都读不到）";
+    if (libusb_get_device_descriptor(dev, &dd) != 0) return "(cannot even read the device descriptor)";
 
-    std::string out = "它现在报了 " + std::to_string(int(dd.bNumConfigurations)) + " 个配置：";
+    std::string out = "it currently reports " + std::to_string(int(dd.bNumConfigurations)) + " configurations:";
     for (int i = 0; i < dd.bNumConfigurations; ++i) {
         libusb_config_descriptor* cfg = nullptr;
         if (libusb_get_config_descriptor(dev, static_cast<uint8_t>(i), &cfg) != 0) continue;
         out += "\n    [" + std::to_string(i) + "] value=" +
-               std::to_string(int(cfg->bConfigurationValue)) + "，接口 " +
-               std::to_string(int(cfg->bNumInterfaces)) + " 个：";
+               std::to_string(int(cfg->bConfigurationValue)) + ", interfaces " +
+               std::to_string(int(cfg->bNumInterfaces)) + ": ";
         for (int k = 0; k < cfg->bNumInterfaces; ++k) {
-            // 只看主 altsetting：alt 0 已经能说明"这个接口是干什么的"，全打会刷屏
+            // Only look at the main altsetting: alt 0 already shows what the interface does; dumping all would flood the log
             const libusb_interface_descriptor& d = cfg->interface[k].altsetting[0];
             char b[32] = "";
             std::snprintf(b, sizeof b, " %02x/%02x/%02x", d.bInterfaceClass, d.bInterfaceSubClass,
@@ -173,17 +173,17 @@ std::string describeConfigs(libusb_device* dev)
 }
 
 // ---------------------------------------------------------------------------
-// 设备枚举
+// Device enumeration
 // ---------------------------------------------------------------------------
 
-/// 进程级共享的 libusb 上下文，**故意不 libusb_exit**：
-/// 交出去的流（IByteStream）活到进程结束，退出上下文会把它的句柄一起作废。
+/// Process-wide shared libusb context, **deliberately never libusb_exit'd**:
+/// handed-out streams (IByteStream) live until the process exits, and exiting the context invalidates their handles too.
 libusb_context* usbContext()
 {
     static libusb_context* c = []() -> libusb_context* {
         libusb_context* ctx = nullptr;
         if (libusb_init(&ctx) != 0) {
-            LOG_ERROR("[%s] libusb_init 失败：装没装 libusb-1.0？", kTag);
+            LOG_ERROR("[%s] libusb_init failed: is libusb-1.0 installed?", kTag);
             return nullptr;
         }
         libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
@@ -192,7 +192,7 @@ libusb_context* usbContext()
     return c;
 }
 
-/// 设备列表的持有者：pick() 返回的裸指针只在这对象活着时有效。
+/// Owner of the device list: the raw pointer returned by pick() is valid only while this object lives.
 struct DevList {
     libusb_device** list = nullptr;
     ssize_t n = 0;
@@ -210,8 +210,8 @@ struct DevList {
         n = got;
     }
 
-    /// 挑一台 iPhone。**不能**用"有没有 CarPlay 配置"来挑 —— 没切过配置的手机
-    /// 描述符里还没有那张表，得先按 VID/PID 认人。
+    /// Pick an iPhone. **Do not** pick by "has a CarPlay configuration" -- a phone that has never switched
+    /// configuration does not have that table in its descriptors yet, so identify it by VID/PID first.
     libusb_device* pick(const WiredUsbOptions& opt) const
     {
         for (ssize_t i = 0; i < n; ++i) {
@@ -232,33 +232,33 @@ struct DevList {
 std::string openErrorHint(int rc)
 {
     if (rc == LIBUSB_ERROR_ACCESS)
-        return "打不开设备：权限不足。/dev/bus/usb/* 默认 root 独占 —— 用 sudo 跑，或加一条 udev 规则。";
+        return "cannot open device: insufficient permission. /dev/bus/usb/* is root-only by default -- run with sudo, or add a udev rule.";
     if (rc == LIBUSB_ERROR_NOT_FOUND)
-        return "打不开设备：它刚刚消失了（多半正在重枚举），稍后重试。";
-    return std::string("打不开设备：") + libusb_error_name(rc);
+        return "cannot open device: it just disappeared (most likely re-enumerating), retry later.";
+    return std::string("cannot open device: ") + libusb_error_name(rc);
 }
 
-/// 内核驱动也得让开。USBDEVFS_SETCONFIGURATION 只要当前配置下任一接口被驱动绑着就
-/// 返回 BUSY（内核日志原话：`interface 2 claimed by ipheth while 'usb_probe' sets
-/// config #6`）。ipheth 会绑在 Apple 以太网口上，先 detach 掉；切完配置内核会自己
-/// 重新 probe，不必还回去。
+/// Kernel drivers have to move out of the way too. USBDEVFS_SETCONFIGURATION returns BUSY whenever
+/// any interface under the current configuration is bound by a driver (kernel log wording:
+/// `interface 2 claimed by ipheth while 'usb_probe' sets config #6`). ipheth binds to the Apple
+/// Ethernet interface, so detach it first; after the configuration switch the kernel re-probes by itself, so no rebind is needed.
 void detachKernelDrivers(libusb_device_handle* h)
 {
     for (int i = 0; i < 32; ++i) {
         if (libusb_kernel_driver_active(h, i) != 1) continue;
         const int rc = libusb_detach_kernel_driver(h, i);
-        LOG_INFO("[%s] 接口 %d 上有内核驱动 → detach：%s", kTag, i,
-                 rc == 0 ? "成功" : libusb_error_name(rc));
+        LOG_INFO("[%s] kernel driver on interface %d -> detach: %s", kTag, i,
+                 rc == 0 ? "success" : libusb_error_name(rc));
     }
 }
 
 // ---------------------------------------------------------------------------
-// USBMUX 的 bulk 管道 → core::IByteStream
+// USBMUX bulk pipe -> core::IByteStream
 // ---------------------------------------------------------------------------
-// 与 BlueZ 那条流（platform/posix/bt_bluez.cpp 的 BlueZRfcommStream）语义一致：
-// read 返回 >0 读到 / 0 超时 / <0 断开。但**所有权不同**：那条流是进程级、永不释放，
-// 这条流归调用方，会话结束就析构 —— 所以这里老实 join 读线程、再由自己关句柄，
-// 而不是 detach 了事。
+// Same semantics as the BlueZ stream (BlueZRfcommStream in platform/posix/bt_bluez.cpp):
+// read returns >0 for data / 0 for timeout / <0 for disconnect. But **ownership differs**: that stream is process-wide and never released,
+// while this one is owned by the caller and destroyed when the session ends -- so here we honestly join the reader thread and close the
+// handle ourselves instead of just detaching.
 class LibUsbBulkStream : public core::IByteStream {
 public:
     LibUsbBulkStream(libusb_device_handle* h, uint8_t epIn, uint8_t epOut)
@@ -279,8 +279,8 @@ public:
         std::unique_lock<std::mutex> lk(mu_);
         if (!cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs),
                           [&] { return !queue_.empty() || closed_; }))
-            return 0;                       // 超时
-        if (queue_.empty()) return -1;      // 已断且没有残留
+            return 0;                       // timeout
+        if (queue_.empty()) return -1;      // closed and nothing buffered
         const size_t take = std::min(n, queue_.size());
         for (size_t i = 0; i < take; ++i) { buf[i] = queue_.front(); queue_.pop_front(); }
         return int(take);
@@ -295,7 +295,7 @@ public:
                                                 const_cast<uint8_t*>(buf + off),
                                                 int(n - off), &transferred, kBulkWriteTimeoutMs);
             if (rc != 0 || transferred <= 0) {
-                LOG_WARN("[%s] bulk OUT 失败：%s", kTag, libusb_error_name(rc));
+                LOG_WARN("[%s] bulk OUT failed: %s", kTag, libusb_error_name(rc));
                 markClosed();
                 return false;
             }
@@ -327,13 +327,13 @@ private:
             int transferred = 0;
             const int rc = libusb_bulk_transfer(handle_, epIn_, buf.data(), kBulkInSize,
                                                 &transferred, kBulkPollMs);
-            if (rc == LIBUSB_ERROR_TIMEOUT) continue;   // 空闲，正常
+            if (rc == LIBUSB_ERROR_TIMEOUT) continue;   // idle, normal
             if (rc == LIBUSB_ERROR_NO_DEVICE || rc == LIBUSB_ERROR_IO ||
                 rc == LIBUSB_ERROR_PIPE || rc == LIBUSB_ERROR_OTHER) {
-                LOG_WARN("[%s] bulk IN 断了：%s", kTag, libusb_error_name(rc));
+                LOG_WARN("[%s] bulk IN disconnected: %s", kTag, libusb_error_name(rc));
                 break;
             }
-            if (rc != 0) continue;                      // 偶发错误，下一轮再试
+            if (rc != 0) continue;                      // transient error, retry next round
             if (transferred <= 0) continue;
             {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -358,7 +358,7 @@ private:
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 对外：切进 CarPlay 配置 → 交出 USBMUX 管道
+// Public: switch into the CarPlay configuration -> hand out the USBMUX pipe
 // ---------------------------------------------------------------------------
 std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
                                                     WiredUsbInfo* info,
@@ -371,13 +371,13 @@ std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
     };
 
     libusb_context* ctx = usbContext();
-    if (!ctx) return fail("libusb 上下文建不起来");
+    if (!ctx) return fail("cannot create libusb context");
 
-    // ---- ① 找 iPhone ----
+    // ---- 1. Find the iPhone ----
     DevList devs;
     devs.refresh(ctx);
     libusb_device* dev = devs.pick(opt);
-    if (!dev) return fail("没找到 iPhone。插好了吗？用的是数据线吗（只能充电的线不行）？");
+    if (!dev) return fail("no iPhone found. Is it plugged in? Is it a data cable (charge-only cables won't work)?");
 
     libusb_device_descriptor dd{};
     libusb_get_device_descriptor(dev, &dd);
@@ -394,13 +394,13 @@ std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
             serial = reinterpret_cast<char*>(sbuf);
     }
 
-    // ---- ②③ 把设备弄到"CarPlay 配置已选中、handle 还能用"这个状态 ----
+    // ---- 2/3. Get the device into the state "CarPlay configuration selected, handle still usable" ----
     //
-    // **重枚举是这台设备的常态**：vendor 请求必然触发一次；而 set_configuration 有时也会
-    // 触发。重枚举之后旧 handle 立刻作废，后续第一个 bulk 传输就报 LIBUSB_ERROR_IO
-    // （libusb 内部是 submiturb failed errno=2）—— 这个坑很隐蔽：前面每一步的返回值都是 0，
-    // 只有真正开始收发时才炸。所以每一步之后一律"重新找一遍"，不去判断到底有没有重枚举
-    // （判断不出来，也没必要）。
+    // **Re-enumeration is routine for this device**: a vendor request always triggers one, and
+    // set_configuration sometimes does too. After re-enumeration the old handle is invalid at once, and the
+    // first bulk transfer afterwards reports LIBUSB_ERROR_IO (internally "submiturb failed errno=2") -- a
+    // subtle trap: every earlier step returned 0, and only real traffic blows up. So after each step we always
+    // "find it again" rather than trying to detect whether re-enumeration happened (undetectable, and unnecessary).
     auto reacquire = [&](const char* why) -> bool {
         if (handle != nullptr) {
             libusb_close(handle);
@@ -418,81 +418,81 @@ std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
                 handle = nullptr;
             }
             if (std::chrono::steady_clock::now() >= deadline) {
-                fail(std::string(why) + "等不到 iPhone 回来（等了 " +
-                     std::to_string(opt.switchWaitMs) + " ms）：" + openErrorHint(lastOpen));
+                fail(std::string(why) + "did not see the iPhone come back (waited " +
+                     std::to_string(opt.switchWaitMs) + " ms): " + openErrorHint(lastOpen));
                 return false;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     };
 
-    // 最多绕几圈：重枚举要绕，配置表一时没上来也要绕。
-    // cp 提到循环外面 —— 后面第 ④ 步还要拿它去读描述符。
+    // Limit on loop iterations: re-enumeration needs another round, as does the configuration table not showing up yet.
+    // cp is declared outside the loop -- step 4 still needs it to read descriptors.
     CarPlayConfig cp{};
     int           vendorTries = 0;
     for (int round = 0;; ++round) {
-        if (round > 6) return fail("设备反复重新枚举，稳定不下来");
+        if (round > 6) return fail("device keeps re-enumerating and never stabilizes");
 
-        // ---- ② 配置表里没有 CarPlay 配置 → 发 vendor 请求让它换一套 ----
+        // ---- 2. No CarPlay configuration in the table -> send the vendor request to expose a different set ----
         cp = findCarPlayConfig(dev);
         if (cp.index < 0) {
             if (vendorTries++ < kCarPlayConfigTries) {
                 uint8_t resp = 0;
                 rc = libusb_control_transfer(handle, kVendorDeviceIn, kCarPlayConfigRequest, 0,
                                              kCarPlayConfigIndex, &resp, sizeof(resp), 1000);
-                LOG_INFO("[%s] 没有 CarPlay 配置，发 vendor 0x%02x / index %u：rc=%d（读到 0x%02x）"
-                         "，第 %d/%d 次",
+                LOG_INFO("[%s] no CarPlay configuration, sending vendor 0x%02x / index %u: rc=%d (read 0x%02x)"
+                         ", attempt %d/%d",
                          kTag, kCarPlayConfigRequest, kCarPlayConfigIndex, rc, resp, vendorTries,
                          kCarPlayConfigTries);
                 if (rc != static_cast<int>(sizeof(resp)))
-                    LOG_INFO("[%s]   注：这里 stall 不算失败，重枚举照样发生，以设备有没有变过为准",
+                    LOG_INFO("[%s]   note: a stall here is not a failure; re-enumeration happens anyway, so go by whether the device changed",
                              kTag);
-                if (!reacquire("切配置表之后")) return nullptr;
+                if (!reacquire("after switching the configuration table")) return nullptr;
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                continue;  // 回到顶部重新看一遍配置表
+                continue;  // back to the top to re-check the configuration table
             }
 
-            // 试够了还是没有 —— 把配置表原样打出来。**只有到这一步，"手机锁屏"和
-            // "线/口不对"才分得开**：只报 1 个 PTP 配置 = 手机锁着屏；报了好几个却凑不齐
-            // 三件套 = 才是真的该换线。这两种处境以前共用一句"换根数据线"，白折腾人。
+            // Tried enough and still nothing -- dump the configuration table verbatim. **Only at this point can "phone locked" and
+            // "wrong cable/port" be told apart**: reporting only 1 PTP configuration = the phone is locked; reporting several but
+            // not all three parts = it really is time to change the cable. These two situations used to share one "try another cable", wasting effort.
             libusb_device_descriptor dd2{};
             libusb_get_device_descriptor(dev, &dd2);
             const std::string how =
                 dd2.bNumConfigurations <= 1
-                    ? "它只报了 PTP 一个配置 —— 这正是 **iPhone 锁屏**时的样子（iOS 解锁前"
-                      "不把 CarPlay 那套配置报出来）。解锁手机、让屏幕亮着，再重跑；"
-                      "第一次还要在弹窗上点「信任此电脑」。"
-                    : "配置表里没有「USBMUX + 标准 CDC-NCM + Apple 以太网」这一套 CarPlay"
-                      "三件套 —— 换根原装数据线、或换一个 USB 口再试。";
-            return fail("这台 iPhone 现在没给 CarPlay 配置。\n  " + how + "\n  " +
+                    ? "it reports only the PTP configuration -- exactly what a **locked iPhone** looks like (before unlocking, iOS"
+                      " does not expose the CarPlay configurations). Unlock the phone, keep the screen on, and rerun;"
+                      " the first time you must also tap 'Trust This Computer' on the prompt."
+                    : "the configuration table has no 'USBMUX + standard CDC-NCM + Apple Ethernet' CarPlay"
+                      " triple -- try a different genuine data cable, or a different USB port.";
+            return fail("this iPhone is not exposing a CarPlay configuration right now.\n  " + how + "\n  " +
                         describeConfigs(dev));
         }
 
-        // ---- ③ 自己选中 CarPlay 配置（不能省，见文件头） ----
+        // ---- 3. Select the CarPlay configuration ourselves (cannot be skipped; see file header) ----
         int active = -1;
         if (libusb_get_configuration(handle, &active) != 0 || active != cp.value) {
             detachKernelDrivers(handle);
             rc = libusb_set_configuration(handle, cp.value);
             if (rc != 0) {
-                std::string msg = "set_configuration(" + std::to_string(cp.value) + ") 失败：" +
+                std::string msg = "set_configuration(" + std::to_string(cp.value) + ") failed: " +
                                   libusb_error_name(rc);
                 if (rc == LIBUSB_ERROR_BUSY) msg += "\n  " + std::string(kBusyHint);
                 libusb_close(handle);
                 return fail(msg);
             }
-            // 重新拿 handle；下一圈回来重新读一次配置，确认真的生效了（别只信返回值）
-            if (!reacquire("选中 CarPlay 配置之后")) return nullptr;
+            // Reacquire the handle; next round re-reads the configuration to confirm it really took effect (do not just trust the return value)
+            if (!reacquire("after selecting the CarPlay configuration")) return nullptr;
             continue;
         }
 
-        LOG_INFO("[%s] 已经在 CarPlay 配置 %d 上", kTag, cp.value);
+        LOG_INFO("[%s] already on CarPlay configuration %d", kTag, cp.value);
         break;
     }
 
-    // ---- ④ 认出各接口，claim USBMUX ----
+    // ---- 4. Identify each interface and claim USBMUX ----
     libusb_config_descriptor* cfg = nullptr;
     if (libusb_get_config_descriptor(dev, static_cast<uint8_t>(cp.index), &cfg) != 0)
-        return fail("读不到 CarPlay 配置的描述符");
+        return fail("cannot read the CarPlay configuration descriptor");
     struct CfgGuard {
         libusb_config_descriptor* c;
         ~CfgGuard() { libusb_free_config_descriptor(c); }
@@ -511,11 +511,11 @@ std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
     }
     if (!mux) {
         libusb_close(handle);
-        return fail("CarPlay 配置里找不到 USBMUX 接口（ff/fe/02）");
+        return fail("no USBMUX interface found in the CarPlay configuration (ff/fe/02)");
     }
 
-    // 端点不写死：从描述符里找成对的 bulk。实测这台是 out=0x04 / in=0x85，
-    // 但那是"这一台"的取值，不是协议。
+    // Endpoints are not hardcoded: find the bulk pair from descriptors. On the tested unit it is out=0x04 / in=0x85,
+    // but those are values for "this unit", not the protocol.
     uint8_t epIn = 0;
     uint8_t epOut = 0;
     for (int a = 0; a < mux->num_altsetting; ++a) {
@@ -533,16 +533,16 @@ std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
     const uint8_t muxNumber = mux->altsetting[0].bInterfaceNumber;
     if (!epIn || !epOut) {
         libusb_close(handle);
-        return fail("USBMUX 接口上没有成对的 bulk 端点");
+        return fail("no paired bulk endpoints on the USBMUX interface");
     }
 
-    // usbmuxd 之类如果还占着，这里会 BUSY —— 和 set_configuration 是同一类占用者
+    // If usbmuxd or similar still holds it, this returns BUSY -- the same class of holder as with set_configuration
     if (libusb_kernel_driver_active(handle, muxNumber) == 1)
         libusb_detach_kernel_driver(handle, muxNumber);
     rc = libusb_claim_interface(handle, muxNumber);
     if (rc != 0) {
-        std::string msg = std::string("claim USBMUX 接口失败：") + libusb_error_name(rc);
-        if (rc == LIBUSB_ERROR_BUSY) msg += "\n  多半是 usbmuxd 占着。\n  " + std::string(kBusyHint);
+        std::string msg = std::string("failed to claim USBMUX interface: ") + libusb_error_name(rc);
+        if (rc == LIBUSB_ERROR_BUSY) msg += "\n  most likely held by usbmuxd.\n  " + std::string(kBusyHint);
         libusb_close(handle);
         return fail(msg);
     }
@@ -562,10 +562,10 @@ std::unique_ptr<core::IByteStream> openWiredCarPlay(const WiredUsbOptions& opt,
         info->ncmDataInterface = static_cast<uint8_t>(std::max(ncmData, 0));
     }
 
-    // 这条日志直接点名"网卡待会儿由谁来建"（内核 cdc_ncm）—— 出问题时第一眼看的就是它：
-    // 这里说 cdc_ncm 而 `ip link` 里没网卡 = CDC 那套没绑上。
-    LOG_INFO("[%s] USBMUX 就绪：%u:%u 序列号=%s 配置=%d 接口=%u 端点 out=0x%02x in=0x%02x"
-             "（NCM 控制口 %d / 数据口 %d —— 网卡那摊交给内核 cdc_ncm）",
+    // This log line names who will create the network interface later (kernel cdc_ncm) -- it is the first thing to check when things go wrong:
+    // if it says cdc_ncm here but `ip link` shows no interface, the CDC part did not bind.
+    LOG_INFO("[%s] USBMUX ready: %u:%u serial=%s config=%d interface=%u endpoints out=0x%02x in=0x%02x"
+             " (NCM control %d / data %d -- the network interface is left to the kernel cdc_ncm)",
              kTag, libusb_get_bus_number(dev), libusb_get_device_address(dev),
              serial.empty() ? "?" : serial.c_str(), cp.value, muxNumber, epOut, epIn,
              ncmControl, ncmData);

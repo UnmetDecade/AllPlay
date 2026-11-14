@@ -34,43 +34,43 @@ BtTriggerResult runBtTrigger(core::IBluetooth* transport, const BtTriggerParams&
 
     BtTriggerResult result;
 
-    // ---- 0) 服务端模式：注册 SDP 等手机连（不选设备）----
+    // ---- 0) Server mode: register SDP and wait for the phone (no device selection) ----
     if (params.serverMode) {
-        say("服务端模式：注册 SDP 'Wireless iAPv2' 并等手机连接（最多 " +
-            std::to_string(params.serverWaitMs / 1000) + " 秒）…");
+        say("Server mode: registering SDP 'Wireless iAPv2' and waiting for the phone to connect (up to " +
+            std::to_string(params.serverWaitMs / 1000) + " seconds)...");
         std::string err0;
         core::IByteStream* stream0 =
             transport->waitForPhoneConnection(params.serverWaitMs, &err0);
         if (!stream0) {
-            result.error = err0.empty() ? "等手机连接失败" : err0;
-            say("失败：" + result.error);
+            result.error = err0.empty() ? "Failed to wait for phone connection" : err0;
+            say("Failed: " + result.error);
             return result;
         }
-        say("手机已连入（iAP2 链路开始握手）");
+        say("Phone connected (iAP2 link handshake starting)");
         iap2::WirelessTrigger trigger0(stream0, params.iap2);
         trigger0.setProgress(progress);
         result.ok = trigger0.run();
         if (!result.ok) {
             result.error = trigger0.error();
-            say("触发失败：" + result.error);
+            say("Trigger failed: " + result.error);
         } else {
-            say("iAP2 链路已结束：0x4301 发过，CarPlay 期间链路一直保持到手机断开");
+            say("iAP2 link finished: 0x4301 sent, link stays up during CarPlay until the phone disconnects");
         }
         return result;
     }
 
-    // ---- 1) 选设备 ----
+    // ---- 1) Select device ----
     std::string deviceAddr = params.deviceAddress;
-    std::string deviceName = "(按地址)";
+    std::string deviceName = "(by address)";
     if (deviceAddr.empty()) {
         std::string err;
         auto devices = transport->pairedDevices(&err);
-        say("已配对设备 " + std::to_string(devices.size()) + " 个");
+        say("Paired devices: " + std::to_string(devices.size()));
         for (const auto& d : devices) {
-            say("  - " + d.name + "  " + d.address + (d.connected ? "  [已连接]" : ""));
+            say("  - " + d.name + "  " + d.address + (d.connected ? "  [connected]" : ""));
         }
         if (devices.empty()) {
-            result.error = err.empty() ? "没有已配对设备" : err;
+            result.error = err.empty() ? "No paired devices" : err;
             return result;
         }
         const core::BtDevice* pick = nullptr;
@@ -78,7 +78,7 @@ BtTriggerResult runBtTrigger(core::IBluetooth* transport, const BtTriggerParams&
             if (nameMatches(d.name, params.deviceName)) { pick = &d; break; }
         }
         if (!pick) {
-            result.error = "没有名字匹配 \"" + params.deviceName + "\" 的已配对设备";
+            result.error = "No paired device matching \"" + params.deviceName + "\"";
             return result;
         }
         deviceAddr = pick->address;
@@ -86,28 +86,28 @@ BtTriggerResult runBtTrigger(core::IBluetooth* transport, const BtTriggerParams&
     }
     result.deviceAddress = deviceAddr;
     result.deviceName = deviceName;
-    say("目标设备：" + deviceName + "  " + deviceAddr);
+    say("Target device: " + deviceName + "  " + deviceAddr);
 
     // ---- 2) SDP + RFCOMM ----
-    say("查 SDP 并开 RFCOMM（UUID " + std::string(kIap2SppUuid) + "）…");
+    say("Querying SDP and opening RFCOMM (UUID " + std::string(kIap2SppUuid) + ")...");
     std::string err;
     core::IByteStream* stream = transport->connectRFCOMM(deviceAddr, kIap2SppUuid, &err);
     if (!stream) {
-        result.error = err.empty() ? "RFCOMM 连接失败" : err;
-        say("RFCOMM 失败：" + result.error);
+        result.error = err.empty() ? "RFCOMM connection failed" : err;
+        say("RFCOMM failed: " + result.error);
         return result;
     }
-    say("RFCOMM 已连接（iAP2 链路开始握手）");
+    say("RFCOMM connected (iAP2 link handshake starting)");
 
-    // ---- 3) iAP2 触发 ----
+    // ---- 3) iAP2 trigger ----
     iap2::WirelessTrigger trigger(stream, params.iap2);
     trigger.setProgress(progress);
     result.ok = trigger.run();
     if (!result.ok) {
         result.error = trigger.error();
-        say("触发失败：" + result.error);
+        say("Trigger failed: " + result.error);
     } else {
-        say("iAP2 链路已结束：0x4301 发过，CarPlay 期间链路一直保持到手机断开");
+        say("iAP2 link finished: 0x4301 sent, link stays up during CarPlay until the phone disconnects");
     }
     return result;
 }

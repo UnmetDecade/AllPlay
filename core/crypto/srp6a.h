@@ -1,16 +1,16 @@
 /**
  * @file   srp6a.h
- * @brief  SRP-6a 服务端（RFC 5054 3072 位，SHA-512，AirPlay 变体）
+ * @brief  SRP-6a server (RFC 5054 3072-bit, SHA-512, AirPlay variant)
  * @author blt
  */
 
 // ============================================================================
-// core/crypto/srp6a.h —— SRP-6a 服务端（RFC 5054 3072 位，SHA-512，AirPlay 变体）
+// core/crypto/srp6a.h — SRP-6a server (RFC 5054 3072-bit, SHA-512, AirPlay variant)
 // ============================================================================
-// 参照 AirPlay SRP-6a 协议（RFC 5054；公式逐字节核对）：
-//   username="Pair-Setup"、password="3939" 内定。
-//   k = SHA512(toBytes(N) ‖ pad384(g))；u = SHA512(pad384(A) ‖ pad384(B))；
-//   K = SHA512(toBytes(S))（最短字节，不补零、不做 RFC5054 交错哈希）——坑！
+// Follows the AirPlay SRP-6a protocol (RFC 5054; formulas verified byte for byte):
+//   username="Pair-Setup", password="3939" are fixed.
+//   k = SHA512(toBytes(N) ‖ pad384(g)); u = SHA512(pad384(A) ‖ pad384(B));
+//   K = SHA512(toBytes(S)) (minimal bytes, no zero padding, no RFC5054 interleaved hash) — a gotcha!
 #pragma once
 
 #include <openssl/bn.h>
@@ -23,17 +23,17 @@ namespace core::crypto {
 
 class Srp6aServer {
 public:
-    Srp6aServer();               ///< 生成盐 s 与 b，算好 B
-    /// 固定盐/指数（确定性测试/交叉验证用；真机走默认随机构造）。
+    Srp6aServer();               ///< Generates salt s and b, computes B
+    /// Fixed salt/exponent (for deterministic tests/cross-validation; real devices use the default random construction).
     Srp6aServer(const uint8_t salt[16], const uint8_t b[32]);
     ~Srp6aServer();
     Srp6aServer(const Srp6aServer&) = delete;
     Srp6aServer& operator=(const Srp6aServer&) = delete;
 
-    const std::vector<uint8_t>& salt() const;      ///< 16 字节
-    const std::vector<uint8_t>& publicKey() const; ///< pad(B)，384 字节
+    const std::vector<uint8_t>& salt() const;      ///< 16 bytes
+    const std::vector<uint8_t>& publicKey() const; ///< pad(B), 384 bytes
 
-    /// 收到 A(384) 与客户端 proof M1(64)。成功写 K(64)/M2(64) 并返回 true。
+    /// Receives A(384) and client proof M1(64). On success writes K(64)/M2(64) and returns true.
     bool verify(const uint8_t* A, size_t aLen,
                 const uint8_t* m1, size_t m1Len,
                 std::vector<uint8_t>* K, std::vector<uint8_t>* m2);
@@ -41,15 +41,15 @@ public:
 private:
     void init(const uint8_t* salt, const uint8_t* b);
 
-    BIGNUM* n_ = nullptr;   // 素数
-    BIGNUM* g_ = nullptr;   // 生成元 5
+    BIGNUM* n_ = nullptr;   // prime
+    BIGNUM* g_ = nullptr;   // generator 5
     BIGNUM* k_ = nullptr;   // multiplier
     BIGNUM* v_ = nullptr;   // verifier
-    BIGNUM* b_ = nullptr;   // 私钥指数
-    BIGNUM* B_ = nullptr;   // 公钥 B
+    BIGNUM* b_ = nullptr;   // private exponent
+    BIGNUM* B_ = nullptr;   // public key B
 
-    std::vector<uint8_t> salt_;   // 16 字节
-    std::vector<uint8_t> pubB_;   // pad(B) 384 字节
+    std::vector<uint8_t> salt_;   // 16 bytes
+    std::vector<uint8_t> pubB_;   // pad(B), 384 bytes
 };
 
 }  // namespace core::crypto

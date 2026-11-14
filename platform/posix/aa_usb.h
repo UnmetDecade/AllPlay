@@ -1,17 +1,17 @@
 /**
  * @file   aa_usb.h
- * @brief  Android Auto 的 USB 传输层（libusb 实现）
+ * @brief  Android Auto USB transport (libusb implementation)
  * @author blt
  */
 
 // ============================================================================
-// platform/posix/aa_usb.h —— Android Auto USB 传输层
+// platform/posix/aa_usb.h -- Android Auto USB transport
 // ============================================================================
-// core 里的 AA 会话只认 core::projection::androidauto::AaUsbPorts（发现 + 打开 +
-// 控制传输 + bulk）。这里用 libusb 把它实现出来，Linux 与 macOS 共用一份：
-//   · Linux 需要 detach 内核驱动（手机常被 MTP/USB 存储驱动占着）；
-//   · macOS 没有内核驱动可 detach，直接 open 即可。
-// AOAP 的协议顺序（51/52/53）在 core 的会话里，本文件不参与。
+// The AA session in core only knows core::projection::androidauto::AaUsbPorts (discovery + open +
+// control transfer + bulk). This implements it with libusb, shared between Linux and macOS:
+//   - Linux needs to detach the kernel driver (the phone is often held by the MTP/USB storage driver);
+//   - macOS has no kernel driver to detach, so it can be opened directly.
+// The AOAP protocol sequence (51/52/53) lives in core's session; this file is not involved.
 #pragma once
 
 #include "projection/androidauto/usb_transport.h"

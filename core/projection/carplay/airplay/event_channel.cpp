@@ -14,9 +14,9 @@
 namespace core::airplay {
 
 namespace {
-constexpr int kTimeoutMs = 100;   // 读超时短一点，避免长时间占锁拖慢 sendTouch
+constexpr int kTimeoutMs = 100;   // short read timeout so we do not hold the lock long and stall sendTouch
 
-/// HID report：2 触点 × 6 字节（slot | down | x u16le | y u16le），参照 AirPlay HID 的 touchReport 格式。
+/// HID report: 2 contacts x 6 bytes (slot | down | x u16le | y u16le), per the AirPlay HID touchReport format.
 std::vector<uint8_t> touchReport(const std::vector<TouchPoint>& contacts, int width, int height)
 {
     std::vector<uint8_t> r(12, 0);
@@ -36,8 +36,8 @@ std::vector<uint8_t> touchReport(const std::vector<TouchPoint>& contacts, int wi
     return r;
 }
 
-/// 从明文缓冲切出完整 RTSP 请求；完整的进 out 并删掉，不完整的 buf 原样保留（等更多字节）。
-/// 对照 RTSP 消息解析：找 \r\n\r\n 头结束，再按 Content-Length 取体。
+/// Extract complete RTSP requests from the plaintext buffer; complete ones go to out and are removed, an incomplete tail stays in buf (wait for more bytes).
+/// RTSP message parsing: find the \r\n\r\n header terminator, then take the body per Content-Length.
 void parseMessages(std::vector<uint8_t>& buf, std::vector<RtspRequest>* out)
 {
     const std::vector<uint8_t> delim = {'\r', '\n', '\r', '\n'};
@@ -78,7 +78,7 @@ void parseMessages(std::vector<uint8_t>& buf, std::vector<RtspRequest>* out)
         if (!cl.empty()) len = std::strtol(cl.c_str(), nullptr, 10);
         if (len < 0) len = 0;
         const size_t total = bodyStart + size_t(len);
-        if (total > buf.size()) break;   // 体不完整，等更多字节
+        if (total > buf.size()) break;   // incomplete body, wait for more bytes
         req.body.assign(buf.begin() + bodyStart, buf.begin() + total);
         out->push_back(std::move(req));
         buf.erase(buf.begin(), buf.begin() + total);
@@ -86,7 +86,7 @@ void parseMessages(std::vector<uint8_t>& buf, std::vector<RtspRequest>* out)
     }
 }
 
-/// 组一条最小 200 响应（echo CSeq），对照 RTSP 200 响应构造。
+/// Build a minimal 200 response (echoing CSeq), per RTSP 200 response construction.
 std::vector<uint8_t> ackFor(const RtspRequest& req)
 {
     std::string head = "RTSP/1.0 200 OK\r\n";
@@ -109,7 +109,7 @@ EventChannel::EventChannel(std::unique_ptr<core::ITcpListener> listener,
     stop_.store(false);
     thread_ = std::thread([this] { run(); });
     writer_ = std::thread([this] { writeLoop(); });
-    LOG_INFO("事件通道就绪 :%u", port_);
+    LOG_INFO("Event channel ready :%u", port_);
 }
 
 EventChannel::~EventChannel() { stop(); }
@@ -121,9 +121,9 @@ void EventChannel::rekey(const std::vector<uint8_t>& sharedSecret)
     readKey_  = crypto::hkdfSha512(sharedSecret, "Events-Salt", "Events-Read-Encryption-Key", 32);
     cipher_.reset();
     plain_.clear();
-    if (stream_) stream_->close();   // 上一场的连接已作废，读线程会自己退出内层循环
+    if (stream_) stream_->close();   // the previous session's connection is invalid; its read thread will exit the inner loop on its own
     stream_.reset();
-    // 上一场攒下的包用新密钥发出去只会让手机困惑，直接丢
+    // packets queued from the previous session would only confuse the phone if sent with the new key; drop them
     {
         std::lock_guard<std::mutex> ok(outMu_);
         out_.clear();
@@ -150,8 +150,8 @@ bool EventChannel::submit(std::vector<uint8_t> plain, bool droppable)
     std::lock_guard<std::mutex> lk(outMu_);
 
     if (droppable) {
-        // 触摸是"位置快照"，新的直接覆盖还没发出去的旧的 —— 快速滑动时
-        // 每秒几十上百个包，攒着发只会越积越延迟，而且鼠标也跟不上。
+        // Touch is a "position snapshot", so a new one directly replaces old ones not yet sent — during fast swipes
+        // there are dozens to hundreds of packets per second, and queuing them only accumulates latency while the cursor cannot keep up.
         for (auto it = out_.begin(); it != out_.end();) {
             if (it->droppable) {
                 outBytes_ -= it->plain.size();
@@ -162,7 +162,7 @@ bool EventChannel::submit(std::vector<uint8_t> plain, bool droppable)
         }
     }
     if (outBytes_ + plain.size() > kMaxQueuedBytes) {
-        // 队列被 ACK 塞满 = 对端根本不读，这条连接已经废了；丢最老的换活路
+        // A queue full of ACKs means the peer is not reading at all and the connection is dead; drop the oldest to free space
         if (!out_.empty()) {
             outBytes_ -= out_.front().plain.size();
             out_.pop_front();
@@ -181,14 +181,14 @@ void EventChannel::writeLoop()
         {
             std::unique_lock<std::mutex> lk(outMu_);
             outCv_.wait(lk, [&] { return stop_.load() || !out_.empty(); });
-            if (out_.empty()) return;   // stop 且没东西可发了
+            if (out_.empty()) return;   // stopped and nothing left to send
             msg = std::move(out_.front());
             out_.pop_front();
             outBytes_ -= msg.plain.size();
         }
 
-        // 取连接的两个 shared_ptr 后就松锁：下面的 send 可能因为手机不读而阻塞很久，
-        // 绝不能在 mu_ 里阻塞（读线程还要拿它回 ACK，UI 线程也还在等这里返回）。
+        // Copy the two connection shared_ptrs and release the lock: the send below may block for a long time if the phone is not reading,
+        // and must never block while holding mu_ (the read thread needs it to send ACKs, and the UI thread is waiting for this call to return).
         std::shared_ptr<core::ITcpStream> stream;
         std::shared_ptr<ControlCipher> cipher;
         {
@@ -202,8 +202,8 @@ void EventChannel::writeLoop()
         if (!stream->writeAll(framed.data(), framed.size())) {
             const int n = writeFails_.fetch_add(1) + 1;
             if (n <= 5 || n % 50 == 0)
-                LOG_WARN("事件通道写失败第 %d 次（%zu 字节，%s）", n, framed.size(),
-                         msg.droppable ? "触摸" : "命令/ACK");
+                LOG_WARN("Event channel write failed (attempt %d, %zu bytes, %s)", n, framed.size(),
+                         msg.droppable ? "touch" : "command/ACK");
         }
     }
 }
@@ -213,7 +213,7 @@ void EventChannel::run()
     while (!stop_.load()) {
         auto s = listener_->accept(200);
         if (!s) continue;
-        LOG_INFO("事件通道：手机连入");
+        LOG_INFO("Event channel: phone connected");
 
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -231,12 +231,12 @@ void EventChannel::run()
             }
             if (!local) break;
 
-            // 读原始密文（不持锁，否则 sendTouch/forceKeyFrame 会被 100ms 读超时拖累）
+            // read raw ciphertext (no lock, otherwise sendTouch/forceKeyFrame would be slowed by the 100ms read timeout)
             const int n = local->read(buf, sizeof buf, kTimeoutMs);
-            if (n < 0) break;          // 断开
-            if (n == 0) continue;      // 超时
+            if (n < 0) break;          // disconnected
+            if (n == 0) continue;      // timeout
 
-            // 解密 + 解析 + 回 ACK（cipher 有状态，整段持锁；写也都是小包，不会长阻塞读）
+            // decrypt + parse + send ACK (cipher is stateful, so lock for the whole block; writes are small packets and will not block reads for long)
             std::lock_guard<std::mutex> lk(mu_);
             if (!stream_ || !cipher_) break;
             cipher_->feed(buf, size_t(n));
@@ -250,20 +250,20 @@ void EventChannel::run()
             std::vector<RtspRequest> msgs;
             parseMessages(plain_, &msgs);
             for (const auto& m : msgs) {
-                // 跳过响应（"RTSP/1.0 200" / "HTTP/1.1 ..."）：iPhone 对我们命令的应答不用再 ACK，
-                // 否则会形成无限互 ACK 死循环（对照 RTSP 请求/响应判定（method 以 "RTSP/" 开头））
+                // Skip responses ("RTSP/1.0 200" / "HTTP/1.1 ..."): the iPhone's replies to our commands must not be ACKed,
+                // otherwise it becomes an infinite mutual-ACK loop (RTSP request/response detection: method starts with "RTSP/")
                 if (m.method.rfind("RTSP/", 0) == 0 || m.method.rfind("HTTP/", 0) == 0) continue;
 
                 if (m.method == "POST" && (m.uri.find("/command") != std::string::npos)) {
                     auto root = bplist::parse(m.body.data(), m.body.size());
                     const std::string type = root ? bplist::strOf(bplist::dictGet(root, "type")) : "";
-                    LOG_INFO("事件通道收到命令 type=%s", type.c_str());
+                    LOG_INFO("Event channel received command type=%s", type.c_str());
                 } else {
-                    LOG_INFO("事件通道收到 %s %s body=%zu", m.method.c_str(), m.uri.c_str(),
+                    LOG_INFO("Event channel received %s %s body=%zu", m.method.c_str(), m.uri.c_str(),
                              m.body.size());
                 }
-                // ACK 也只入队：读线程绝不能因为对端不读而卡在这里，
-                // 否则整条通道（包括触摸）一起停摆。
+                // Even ACKs are only enqueued: the read thread must never stall here because the peer is not reading,
+                // otherwise the entire channel (including touch) stops.
                 submit(ackFor(m), false);
             }
         }
@@ -290,19 +290,19 @@ bool EventChannel::sendTouch(const std::vector<TouchPoint>& contacts)
         {"uuid",      bplist::str("2a2a2a2a")},
         {"hidReport", bplist::data(report)},
     });
-    // 触摸走"可丢"通道：它由 UI 线程调用，绝不能在 socket 上等，
-    // 也允许后来居上（位置快照，中间那些点没人要）。
+    // Touch uses the "droppable" path: it is called from the UI thread and must never wait on the socket,
+    // and newer touches may supersede older ones (position snapshots; nobody wants the intermediate points).
     return sendCommandImpl(cmd, true);
 }
 
 bool EventChannel::sendCommandImpl(const std::shared_ptr<core::bplist::Value>& cmd, bool droppable)
 {
-    // 只做"拼出明文 + 入队"，真正的加密和发送在写线程里，
-    // 这样 UI 线程永远不会卡在 send() 上（这是"一直滑动就卡死"的根因）。
+    // Only "build plaintext + enqueue" here; the actual encryption and send happen in the write thread,
+    // so the UI thread never blocks in send() (this was the root cause of "freezes while swiping").
     std::vector<uint8_t> wire;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        if (!stream_ || !cipher_) return false;   // 手机还没连事件通道
+        if (!stream_ || !cipher_) return false;   // the phone has not connected to the event channel yet
 
         const std::vector<uint8_t> body = bplist::serialize(cmd);
         char head[256];

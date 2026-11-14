@@ -1,14 +1,14 @@
 /**
  * @file   backend_carlife.h
- * @brief  CarLife 后端（占位：接口已就位，协议未实现）
+ * @brief  CarLife backend (placeholder: interface in place, protocol not implemented)
  * @author blt
  */
 
 // ============================================================================
-// core/projection/carlife/backend_carlife.h —— CarLife 占位后端
+// core/projection/carlife/backend_carlife.h - CarLife placeholder backend
 // ============================================================================
-// 与 HiCar 同理：先占住 IProjectionBackend，probe() 返回空、connect() 报未实现。
-// 真实现需要百度 CarLife 的 USB/Wi-Fi 发现、认证与音视频封装，等资料齐了再做。
+// Same as HiCar: occupy the IProjectionBackend slot first; probe() returns empty and connect() reports unimplemented.
+// A real implementation needs Baidu CarLife's USB/Wi-Fi discovery, authentication and A/V encapsulation; do it once the docs are available.
 #pragma once
 
 #include "projection/backend.h"

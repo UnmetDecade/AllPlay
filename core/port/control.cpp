@@ -5,24 +5,24 @@ namespace core {
 const char* mediaKeyName(MediaKey key)
 {
     switch (key) {
-    case MediaKey::Play:          return "播放";
-    case MediaKey::Pause:         return "暂停";
-    case MediaKey::PlayPause:     return "播放/暂停";
-    case MediaKey::Stop:          return "停止";
-    case MediaKey::NextTrack:     return "下一首";
-    case MediaKey::PreviousTrack: return "上一首";
-    case MediaKey::FastForward:   return "快进";
-    case MediaKey::Rewind:        return "快退";
-    case MediaKey::VolumeUp:      return "音量+";
-    case MediaKey::VolumeDown:    return "音量-";
-    case MediaKey::Mute:          return "静音";
+    case MediaKey::Play:          return "Play";
+    case MediaKey::Pause:         return "Pause";
+    case MediaKey::PlayPause:     return "Play/Pause";
+    case MediaKey::Stop:          return "Stop";
+    case MediaKey::NextTrack:     return "Next track";
+    case MediaKey::PreviousTrack: return "Previous track";
+    case MediaKey::FastForward:   return "Fast-forward";
+    case MediaKey::Rewind:        return "Rewind";
+    case MediaKey::VolumeUp:      return "Volume up";
+    case MediaKey::VolumeDown:    return "Volume down";
+    case MediaKey::Mute:          return "Mute";
     case MediaKey::Siri:          return "Siri";
-    case MediaKey::Voice:         return "语音";
-    case MediaKey::PhoneAccept:   return "接听";
-    case MediaKey::PhoneEnd:      return "挂断";
-    case MediaKey::Home:          return "主屏";
+    case MediaKey::Voice:         return "Voice";
+    case MediaKey::PhoneAccept:   return "Answer";
+    case MediaKey::PhoneEnd:      return "Hang up";
+    case MediaKey::Home:          return "Home";
     }
-    return "未知键";
+    return "Unknown key";
 }
 
 void MediaKeyQueue::push(MediaKey key, bool down)
@@ -36,7 +36,7 @@ void MediaKeyQueue::push(MediaKey key, bool down)
 void MediaKeyQueue::push(const MediaKeyEvent& ev)
 {
     std::lock_guard<std::mutex> lk(mu_);
-    if (q_.size() >= kCapacity) q_.pop_front();   // 堆久了没意义，丢最老的
+    if (q_.size() >= kCapacity) q_.pop_front();   // Stale entries are useless; drop the oldest
     q_.push_back(ev);
 }
 

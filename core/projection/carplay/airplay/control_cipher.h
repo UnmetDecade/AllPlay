@@ -1,15 +1,15 @@
 /**
  * @file   control_cipher.h
- * @brief  控制通道加密（pair-verify 之后启用）
+ * @brief  Control channel encryption (enabled after pair-verify)
  * @author blt
  */
 
 // ============================================================================
-// core/airplay/control_cipher.h —— 控制通道加密（pair-verify 之后启用）
+// core/airplay/control_cipher.h - Control channel encryption (enabled after pair-verify)
 // ============================================================================
-// 帧 = [2 字节 LE 密文长][密文][16 字节 tag]；AAD = 那 2 字节长度头。
-// nonce = 4 零字节 + 8 字节 LE 计数器（读写各自独立、各自密钥）。
-// 单帧负载上限 0x4000（超了分帧）。
+// Frame = [2-byte LE ciphertext length][ciphertext][16-byte tag]; AAD = those 2 length bytes.
+// nonce = 4 zero bytes + 8-byte LE counter (read and write independent, each with its own key).
+// Single-frame payload limit 0x4000 (split into multiple frames beyond that).
 #pragma once
 
 #include <array>
@@ -20,8 +20,8 @@
 namespace core::airplay {
 
 struct ControlKeys {
-    std::array<uint8_t, 32> readKey;    ///< 解密入站（= 手机 write key）
-    std::array<uint8_t, 32> writeKey;   ///< 加密出站（= 手机 read key）
+    std::array<uint8_t, 32> readKey;    ///< decrypt inbound (= phone write key)
+    std::array<uint8_t, 32> writeKey;   ///< encrypt outbound (= phone read key)
 };
 
 class ControlCipher {
@@ -29,16 +29,16 @@ public:
     ControlCipher(const ControlKeys& keys);
     ControlCipher(const uint8_t readKey[32], const uint8_t writeKey[32]);
 
-    /// 加密一段明文 → 完整帧（可能多帧）。
+    /// Encrypt a plaintext chunk -> complete frame(s) (may be multiple frames).
     std::vector<uint8_t> encrypt(const uint8_t* data, size_t len);
 
-    /// 喂入密文字节（内部缓冲）。
+    /// Feed ciphertext bytes (buffered internally).
     void feed(const uint8_t* data, size_t len);
 
-    /// 取下一个解出的明文块；缓冲不足一整帧返回 false（out 不动）。
+    /// Take the next decrypted plaintext block; returns false if less than a full frame is buffered (out untouched).
     bool next(std::vector<uint8_t>* out);
 
-    /// 是否发生过鉴权失败（此后连接应关闭）。
+    /// Whether an authentication failure has occurred (the connection should be closed afterwards).
     bool failed() const { return failed_; }
 
 private:

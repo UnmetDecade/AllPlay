@@ -1,21 +1,21 @@
 /**
  * @file   lockdown.h
- * @brief  lockdown 通道：4 字节大端长度 + XML plist
+ * @brief  lockdown channel: 4-byte big-endian length + XML plist
  * @author blt
  */
 
 // ============================================================================
-// core/usb/lockdown.h —— lockdown 的请求/响应通道
+// core/usb/lockdown.h — lockdown request/response channel
 // ============================================================================
-// lockdown 就是手机上的那个 62078 服务。一条请求一条响应，两边都是 plist dict，
-// 成帧是 **4 字节大端长度 + XML plist 文本**（长度不含它自己那 4 字节）。
+// lockdown is the 62078 service on the phone. One request, one response; both sides are plist dicts,
+// framed as **4-byte big-endian length + XML plist text** (length excludes its own 4 bytes).
 //
-// 它只认 IByteStream，**不关心底下加没加密** —— 因为这条通道会"原地升级"：
+// It only knows IByteStream and **does not care whether the layer below is encrypted** — because this channel upgrades "in place":
 //
-//   mux 迷你 TCP → lockdown（明文）→ StartSession(EnableSessionSSL)
-//                → 同一条连接变成 TLS → 再建一个 LockdownClient 接着用
+//   mux mini TCP → lockdown (plaintext) → StartSession(EnableSessionSSL)
+//                → the same connection becomes TLS → build another LockdownClient and continue
 //
-// 所以本类既能套在明文的迷你 TCP 上，也能套在 usb/tls_stream 上。
+// So this class can wrap either a plaintext mini TCP or usb/tls_stream.
 #pragma once
 
 #include "port/stream.h"
@@ -30,21 +30,21 @@ class LockdownClient {
 public:
     explicit LockdownClient(IByteStream& ch) : ch_(ch) {}
 
-    /// 发一条请求、收一条响应。req 通常至少带 Label 与 Request 两个键。
-    /// 手机报错时（响应里有 Error 键）返回 false，err 里是手机的原话。
+    /// Send one request, receive one response. req usually carries at least Label and Request.
+    /// Returns false when the phone reports an error (the response has an Error key); err holds the phone's own words.
     bool request(const Plist& req, Plist* resp, int timeoutMs, std::string* err);
 
-    /// 握手前探一下服务类型，顺便确认通道真的通了
+    /// Probe the service type before handshake, confirming the channel actually works
     bool queryType(std::string* type, std::string* err);
 
-    /// GetValue：found 报告手机认不认这个 key（不认时它回 Error，这里不算失败）
+    /// GetValue: found reports whether the phone recognizes this key (if not it returns Error; not treated as failure here)
     bool getValue(const std::string& key, Plist* value, bool* found, std::string* err);
 
     /// SetValue / RemoveValue
     bool setValue(const std::string& key, const Plist& value, std::string* err);
     bool removeValue(const std::string& key, std::string* err);
 
-    /// StartService：拿服务端口。enableSsl 报告**第二条连接**要不要再做 TLS。
+    /// StartService: get the service port. enableSsl reports whether the **second connection** also needs TLS.
     bool startService(const std::string& service, uint16_t* port, bool* enableSsl, std::string* err);
 
 private:

@@ -1,17 +1,17 @@
 /**
  * @file   audio_stream.h
- * @brief  CarPlay 音频流（RTP/RTCP over UDP）
+ * @brief  CarPlay audio stream (RTP/RTCP over UDP)
  * @author blt
  */
 
 // ============================================================================
-// core/airplay/audio_stream.h —— CarPlay 音频流（RTP/RTCP over UDP）
+// core/airplay/audio_stream.h - CarPlay audio stream (RTP/RTCP over UDP)
 // ============================================================================
-// wire 布局（参照 AirPlay 协议）：一个 RTP 包 = [12B RTP 头][密文][16B tag][8B nonce]。
-//   AAD   = RTP 头第 4..12 字节（timestamp + SSRC，8 字节）
-//   nonce = 4 个零字节 + 尾部 8 字节小端
-//   密钥  = HKDF-SHA512(shared, "DataStream-Salt"+streamConnectionID,
-//                        "DataStream-Output-Encryption-Key", 32)（与屏幕流同款派生）
+// Wire layout (per the AirPlay protocol): one RTP packet = [12B RTP header][ciphertext][16B tag][8B nonce].
+//   AAD   = RTP header bytes 4..12 (timestamp + SSRC, 8 bytes)
+//   nonce = 4 zero bytes + last 8 bytes little-endian
+//   key   = HKDF-SHA512(shared, "DataStream-Salt"+streamConnectionID,
+//                       "DataStream-Output-Encryption-Key", 32) (same derivation as the screen stream)
 #pragma once
 
 #include "port/media.h"
@@ -47,7 +47,7 @@ public:
 private:
     void run();
 
-    /// RTP 乱序重排：按序号缓冲少量包再按序吐出（AAC/Opus 解码对乱序敏感）。
+    /// RTP reordering: buffer a few packets by sequence number and emit them in order (AAC/Opus decoding is sensitive to reordering).
     void deliver(const uint8_t* payload, size_t len, uint32_t sample, uint16_t seq);
 
     std::unique_ptr<core::IUdpSocket> dataSock_, controlSock_;
@@ -59,11 +59,11 @@ private:
     std::atomic<bool> stop_{false};
     std::thread thread_;
 
-    // 重排状态（仅 run 线程访问）
+    // Reorder state (accessed only by the run thread)
     struct Pkt { std::vector<uint8_t> payload; uint32_t sample = 0; };
-    std::map<uint64_t, Pkt> pending_;   // 扩展序号 → 包
-    uint64_t nextSeq_ = 0;              // 下一个要吐出的扩展序号
-    uint16_t lastRaw_ = 0;              // 上一个原始序号（算回绕/乱序增量用）
+    std::map<uint64_t, Pkt> pending_;   // extended sequence number -> packet
+    uint64_t nextSeq_ = 0;              // next extended sequence number to emit
+    uint16_t lastRaw_ = 0;              // previous raw sequence number (for wraparound/reorder delta)
     uint64_t lastExt_ = 0;
     bool     haveSeq_ = false;
 };

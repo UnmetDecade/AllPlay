@@ -21,7 +21,7 @@ namespace core::airplay {
 
 namespace {
 
-// TLV type（对照 AirPlay pair-setup/pair-verify 协议）
+// TLV types (per the AirPlay pair-setup/pair-verify protocol)
 enum : uint8_t {
     T_METHOD = 0x00, T_IDENTIFIER = 0x01, T_SALT = 0x02, T_PUBLIC_KEY = 0x03,
     T_PROOF = 0x04, T_ENCRYPTED_DATA = 0x05, T_STATE = 0x06, T_ERROR = 0x07,
@@ -48,7 +48,7 @@ std::vector<uint8_t> bytesOf(const std::string& s)
     return std::vector<uint8_t>(s.begin(), s.end());
 }
 
-// 音频格式位 → codec/采样率/声道（对照协议的音频格式位定义）
+// Audio format bits -> codec/sample rate/channels (per the protocol's audio format bit definitions)
 struct AudioFmt { AudioCodec codec = AudioCodec::LPCM; int rate = 44100; int channels = 2; };
 
 AudioFmt parseAudioFormat(uint64_t bits)
@@ -61,7 +61,7 @@ AudioFmt parseAudioFormat(uint64_t bits)
     if (bits & kAac48) return {AudioCodec::AAC_LC, 48000, 2};
     if (bits & kAac44) return {AudioCodec::AAC_LC, 44100, 2};
 
-    // LPCM：低 16 位映射（8k/16k/24k/32k/44.1k/48k × 单/双声道）
+    // LPCM: mapping in the low 16 bits (8k/16k/24k/32k/44.1k/48k x mono/stereo)
     const struct { uint64_t bit; int rate; int ch; } pcm[] = {
         {0x8000, 48000, 2}, {0x4000, 48000, 1}, {0x800, 44100, 2}, {0x400, 44100, 1},
         {0x200, 32000, 2},  {0x100, 32000, 1},  {0x80, 24000, 2},  {0x40, 24000, 1},
@@ -79,14 +79,14 @@ Session::Session(const SessionConfig& cfg)
       services_(cfg.services), video_(cfg.video), audio_(cfg.audio),
       width_(cfg.width), height_(cfg.height)
 {
-    // 身份来源：外部注入（鸿蒙 HAP rawfile）> mfiDir（identity/ 目录）> 无。
+    // Identity sources: external injection (HarmonyOS HAP rawfile) > mfiDir (identity/ directory) > none.
     if (cfg.mfiIdentity != nullptr) {
         mfi_ = cfg.mfiIdentity;
-        LOG_INFO("MFi 身份来自外部注入（%zu 字节证书）", mfi_->certificate().size());
+        LOG_INFO("MFi identity comes from external injection (%zu-byte certificate)", mfi_->certificate().size());
     } else if (!cfg.mfiDir.empty()) {
         std::string err;
         ownedMfi_ = mfi::CertificateMfiIdentity::load(cfg.mfiDir, &err);
-        if (!ownedMfi_) LOG_WARN("MFi 身份加载失败：%s（/auth-setup 会回 400）", err.c_str());
+        if (!ownedMfi_) LOG_WARN("Failed to load MFi identity: %s (/auth-setup will return 400)", err.c_str());
         mfi_ = ownedMfi_.get();
     }
     pairings_.load(stateDir_);
@@ -110,7 +110,7 @@ RtspResponse Session::handle(const RtspRequest& req)
 {
     const std::string path = req.uri;
     LOG_INFO("RTSP %s %s", req.method.c_str(), path.c_str());
-    connecting_ = true;   // 收到任何 RTSP 请求 = iPhone 正在连接
+    connecting_ = true;   // any RTSP request received = the iPhone is connecting
 
     if (req.method == "OPTIONS") {
         RtspResponse r = RtspResponse::ok();
@@ -129,7 +129,7 @@ RtspResponse Session::handle(const RtspRequest& req)
     if (req.method == "POST" && pathIs(path, "/command")) return handleCommand(req);
     if (req.method == "POST" && pathIs(path, "/feedback")) return handleFeedback(req);
 
-    return RtspResponse::ok();   // ANNOUNCE 等未识别路径
+    return RtspResponse::ok();   // unrecognized routes such as ANNOUNCE
 }
 
 RtspResponse Session::handleInfo()
@@ -138,17 +138,17 @@ RtspResponse Session::handleInfo()
     r.setHeader("Content-Type", "application/x-apple-binary-plist");
     r.body = buildInfoPlist(*info_);
     const std::string s(r.body.begin(), r.body.end());
-    LOG_INFO("/info %zu 字节 features=0x%llx audioFormats=%s audioLatencies=%s bluetoothIDs=%s",
+    LOG_INFO("/info %zu bytes features=0x%llx audioFormats=%s audioLatencies=%s bluetoothIDs=%s",
              r.body.size(), (unsigned long long)info_->features,
-             s.find("audioFormats") != std::string::npos ? "有" : "无",
-             s.find("audioLatencies") != std::string::npos ? "有" : "无",
-             s.find("bluetoothIDs") != std::string::npos ? "有" : "无");
+             s.find("audioFormats") != std::string::npos ? "yes" : "no",
+             s.find("audioLatencies") != std::string::npos ? "yes" : "no",
+             s.find("bluetoothIDs") != std::string::npos ? "yes" : "no");
     return r;
 }
 
 RtspResponse Session::handleAuthSetup(const RtspRequest& req)
 {
-    // 请求 [1B ver=1][32B 对端 X25519 公钥]
+    // Request: [1B ver=1][32B peer X25519 public key]
     if (req.body.size() != 33 || req.body[0] != 1 || !mfi_) return RtspResponse::badRequest();
     const uint8_t* phonePub = req.body.data() + 1;
 
@@ -166,7 +166,7 @@ RtspResponse Session::handleAuthSetup(const RtspRequest& req)
     const auto aesKey = mkey("AES-KEY");
     const auto aesIv  = mkey("AES-IV");
 
-    // digest = SHA256(我方临时 X25519 公钥 ‖ 手机公钥)（LocalMfi protocolMajor=3 → SHA256 分支）
+    // digest = SHA256(our ephemeral X25519 public key || phone public key) (LocalMfi protocolMajor=3 -> SHA256 branch)
     std::vector<uint8_t> di(eph.pub.begin(), eph.pub.end());
     di.insert(di.end(), phonePub, phonePub + 32);
     auto digest = crypto::sha256(di);
@@ -176,7 +176,7 @@ RtspResponse Session::handleAuthSetup(const RtspRequest& req)
     if (!ok) return RtspResponse::badRequest();
     auto encSig = crypto::aes128Ctr(aesKey.data(), aesIv.data(), sig.data(), sig.size());
 
-    // 响应 pub(32) ‖ BE32(certLen) ‖ cert ‖ BE32(sigLen) ‖ AES-CTR(sig)
+    // Response: pub(32) || BE32(certLen) || cert || BE32(sigLen) || AES-CTR(sig)
     std::vector<uint8_t> out(eph.pub.begin(), eph.pub.end());
     auto putU32 = [&](uint32_t v) {
         out.push_back(uint8_t(v >> 24)); out.push_back(uint8_t(v >> 16));
@@ -247,7 +247,7 @@ RtspResponse Session::handlePairSetup(const RtspRequest& req)
         const std::string controllerId(cid->begin(), cid->end());
         pairings_.save(stateDir_, controllerId, *ltpk);
 
-        // accessory 回签名
+        // accessory sends the signature back
         const std::string accId = identity_->pi;
         auto aSignKey = crypto::hkdfSha512(sessionKey_, "Pair-Setup-Accessory-Sign-Salt",
                                            "Pair-Setup-Accessory-Sign-Info", 32);
@@ -331,7 +331,7 @@ RtspResponse Session::handlePairVerify(const RtspRequest& req)
         if (!crypto::ed25519Verify(ltpk.data(), sigData.data(), sigData.size(), csig->data()))
             return pairErr(4);
 
-        // 控制密钥：label 方向相反（accessory read = 手机 write）
+        // Control keys: labels are reversed (accessory read = phone write)
         auto readKey  = crypto::hkdfSha512(shared_, "Control-Salt", "Control-Write-Encryption-Key", 32);
         auto writeKey = crypto::hkdfSha512(shared_, "Control-Salt", "Control-Read-Encryption-Key", 32);
         std::copy(readKey.begin(),  readKey.end(),  controlKeys_.readKey.begin());
@@ -354,7 +354,7 @@ RtspResponse Session::handleSetup(const RtspRequest& req)
     RtspResponse r = RtspResponse::ok();
     r.setHeader("Content-Type", "application/x-apple-binary-plist");
 
-    // 诊断：dump SETUP 请求的 keys + features（第一批无 streams 时）
+    // Diagnostics: dump the SETUP request's keys + features (when batch 1 has no streams)
     {
         std::string keys;
         for (const auto& kv : root->dict) keys += kv.first + ",";
@@ -366,31 +366,31 @@ RtspResponse Session::handleSetup(const RtspRequest& req)
     }
 
     if (streams) {
-        // 第二批：streams[]。110/111 建屏幕流；100/101/102 建音频流（UDP RTP）；130 数据收下即丢。
+        // Batch 2: streams[]. 110/111 create screen streams; 100/101/102 create audio streams (UDP RTP); 130 data is received and dropped.
         std::vector<bplist::Ptr> outStreams;
         for (size_t i = 0; i < streams->array.size(); ++i) {
             auto s = bplist::arrGet(streams, i);
             const uint64_t type = bplist::uintOf(bplist::dictGet(s, "type"));
             const uint64_t scid = bplist::uintOf(bplist::dictGet(s, "streamConnectionID"));
-            LOG_INFO("SETUP 流 type=%llu audioFormat=0x%llx scid=%llu",
+            LOG_INFO("SETUP stream type=%llu audioFormat=0x%llx scid=%llu",
                      (unsigned long long)type,
                      (unsigned long long)bplist::uintOf(bplist::dictGet(s, "audioFormat")),
                      (unsigned long long)scid);
 
             if (type == 110 || type == 111) {
-                // 屏幕流（TCP dataPort）
-                // 这两种跳过都别静默：手机拿不到 dataPort 只会闷头等十几秒然后断开，
-                // 日志里就剩一句"SETUP 完就断线"，极难定位（真机上踩过一次）。
+                // screen stream (TCP dataPort)
+                // Do not skip silently in either case: without a dataPort the phone just waits over ten seconds and then disconnects,
+                // leaving only "disconnects right after SETUP" in the log, which is very hard to diagnose (hit once on a real device).
                 if (!video_) {
-                    LOG_WARN("SETUP 要屏幕流，但本进程没接 IVideoOutput —— 屏幕流不建，"
-                             "手机拿不到 dataPort 将会超时断开");
+                    LOG_WARN("SETUP requested a screen stream, but this process has no IVideoOutput - not creating the screen stream; "
+                             "without a dataPort the phone will time out and disconnect");
                     continue;
                 }
                 if (!services_ || !services_->makeTcpListener || shared_.empty()) continue;
                 auto listener = services_->makeTcpListener();
                 std::string lerr;
                 if (!listener || !listener->start("", 0, &lerr)) {
-                    LOG_WARN("屏幕流的监听端口起不来：%s", lerr.c_str());
+                    LOG_WARN("Failed to start screen stream listener: %s", lerr.c_str());
                     continue;
                 }
                 const uint16_t port = listener->port();
@@ -402,7 +402,7 @@ RtspResponse Session::handleSetup(const RtspRequest& req)
                     {"dataPort", bplist::u(port)},
                 }));
             } else if (type == 100 || type == 101 || type == 102) {
-                // 音频流（UDP RTP dataPort + RTCP controlPort）
+                // audio stream (UDP RTP dataPort + RTCP controlPort)
                 if (!services_ || !services_->makeUdpSocket || !audio_ || shared_.empty()) continue;
                 const AudioFmt fmt = parseAudioFormat(bplist::uintOf(bplist::dictGet(s, "audioFormat")));
                 audio_->configure(fmt.codec, fmt.rate, fmt.channels);
@@ -421,8 +421,8 @@ RtspResponse Session::handleSetup(const RtspRequest& req)
         return r;
     }
 
-    // 第一批：参数协商。eventPort/timingPort/keepAlivePort 必须是真实端口
-    openEventChannel();   // 已有通道则只换本场密钥（见函数内注释）
+    // Batch 1: parameter negotiation. eventPort/timingPort/keepAlivePort must be real ports
+    openEventChannel();   // if the channel exists, only swap in this session's keys (see the comment in the function)
     if (!ntpSock_) openNtp();
     const bool wantKeepAlive = bplist::boolOf(bplist::dictGet(root, "keepAliveLowPower"));
     if (wantKeepAlive && !keepAliveSock_) openKeepAlive();
@@ -446,15 +446,15 @@ RtspResponse Session::handleCommand(const RtspRequest& req)
     const std::string type = root ? bplist::strOf(bplist::dictGet(root, "type")) : "";
     if (type == "forceKeyFrame") {
         for (auto& s : streams_) s->requestKeyFrame();
-        LOG_INFO("/command forceKeyFrame：已请求关键帧（%zu 个屏幕流）", streams_.size());
+        LOG_INFO("/command forceKeyFrame: requested a keyframe (%zu screen streams)", streams_.size());
     }
     return RtspResponse::ok();
 }
 
 RtspResponse Session::handleFeedback(const RtspRequest& req)
 {
-    // 手机每 ~2s 发一次。正经接收端要按自己实际的缓冲深度回一份 timing plist，
-    // 手机据此调码率/帧率；回空的等于让它闭着眼睛按最高档发。
+    // The phone sends this every ~2s. A proper receiver replies with a timing plist reflecting its actual buffer depth,
+    // and the phone adjusts bitrate/frame rate accordingly; an empty reply makes it blindly send at maximum quality.
     static int n = 0;
     if (++n <= 3 || n % 30 == 0) {
         std::string hx;
@@ -463,12 +463,12 @@ RtspResponse Session::handleFeedback(const RtspRequest& req)
             std::snprintf(b, sizeof b, "%02x", req.body[i]);
             hx += b;
         }
-        LOG_INFO("/feedback #%d：ct=%s body=%zu head=%s", n, req.header("Content-Type").c_str(),
+        LOG_INFO("/feedback #%d: ct=%s body=%zu head=%s", n, req.header("Content-Type").c_str(),
                  req.body.size(), hx.c_str());
         if (!req.body.empty() && req.body[0] == '<') {
             std::string txt(req.body.begin(), req.body.end());
             if (txt.size() > 600) txt.resize(600);
-            LOG_INFO("/feedback 正文：%s", txt.c_str());
+            LOG_INFO("/feedback body: %s", txt.c_str());
         }
     }
     return RtspResponse::ok();
@@ -479,10 +479,10 @@ void Session::openEventChannel()
     if (!services_ || !services_->makeTcpListener || shared_.empty()) return;
 
     if (eventChannel_) {
-        // 通道对象跨会话复用（端口不变），但密钥是**每场会话**的：写密钥由本场
-        // pair-verify 的 shared_ HKDF 出来。不换的话，宿主周期发的 forceKeyFrame
-        // 在手机侧解不开，iOS 会把整个 CarPlay 会话掐断 —— 实测：手机重连后，
-        // 会话总在 5 秒定时器下一次触发的那一秒整点断开（16:11:01、16:13:01）。
+        // The channel object is reused across sessions (the port stays the same), but the keys are **per session**: the write key comes from this
+        // session's pair-verify shared_ via HKDF. Without swapping, the periodic forceKeyFrame the host sends
+        // cannot be decrypted by the phone, and iOS kills the entire CarPlay session — measured: after the phone reconnects,
+        // the session always drops exactly on the next tick of the 5-second timer (16:11:01, 16:13:01).
         eventChannel_->rekey(shared_);
         return;
     }
@@ -490,12 +490,12 @@ void Session::openEventChannel()
     auto l = services_->makeTcpListener();
     std::string lerr;
     if (!l || !l->start("", 0, &lerr)) {
-        LOG_WARN("事件通道监听失败：%s", lerr.c_str());
+        LOG_WARN("Event channel listen failed: %s", lerr.c_str());
         return;
     }
     eventChannel_.reset(new EventChannel(std::move(l), shared_, width_, height_));
 
-    // 周期请求关键帧：重置解码器参考链，避免花屏随 P 帧累积（对照协议 referenceChain + 请求关键帧）
+    // Periodically request keyframes: reset the decoder reference chain to prevent visual corruption accumulating across P-frames (per the protocol's referenceChain + keyframe request)
     stopKeyframe_.store(false);
     keyframeThread_ = std::thread([this] {
         while (!stopKeyframe_.load()) {
@@ -513,7 +513,7 @@ void Session::openNtp()
     auto sock = services_->makeUdpSocket();
     std::string err;
     if (!sock || !sock->bind(0, &err)) {
-        LOG_WARN("NTP UDP 绑定失败：%s", err.c_str());
+        LOG_WARN("NTP UDP bind failed: %s", err.c_str());
         return;
     }
     ntpSock_ = std::move(sock);
@@ -523,7 +523,7 @@ void Session::openNtp()
         while (!stopNtp_.load()) {
             const int n = ntpSock_->recv(buf, sizeof buf, 500);
             if (n < 48) continue;
-            // 最小 NTP 响应（48B）：originate=请求 transmit；receive/transmit=now
+            // Minimal NTP response (48B): originate = request transmit; receive/transmit = now
             std::array<uint8_t, 48> resp{};
             resp[0] = 0x1C;                                  // LI=0 VN=3 Mode=4(server)
             std::memcpy(resp.data() + 24, buf + 40, 8);      // originate
@@ -536,7 +536,7 @@ void Session::openNtp()
             ntpSock_->send(resp.data(), resp.size());
         }
     });
-    LOG_INFO("NTP 时序端口就绪 :%u", ntpSock_->port());
+    LOG_INFO("NTP timing port ready :%u", ntpSock_->port());
 }
 
 void Session::openKeepAlive()
@@ -545,7 +545,7 @@ void Session::openKeepAlive()
     auto sock = services_->makeUdpSocket();
     std::string err;
     if (!sock || !sock->bind(0, &err)) {
-        LOG_WARN("keep-alive UDP 绑定失败：%s", err.c_str());
+        LOG_WARN("keep-alive UDP bind failed: %s", err.c_str());
         return;
     }
     keepAliveSock_ = std::move(sock);
@@ -553,9 +553,9 @@ void Session::openKeepAlive()
     keepAliveThread_ = std::thread([this] {
         uint8_t buf[512];
         while (!stopKeepAlive_.load())
-            keepAliveSock_->recv(buf, sizeof buf, 1000);   // 只收不响应
+            keepAliveSock_->recv(buf, sizeof buf, 1000);   // receive only, no response
     });
-    LOG_INFO("keep-alive 端口就绪 :%u", keepAliveSock_->port());
+    LOG_INFO("keep-alive port ready :%u", keepAliveSock_->port());
 }
 
 bool Session::sendTouch(const std::vector<TouchPoint>& contacts)
@@ -566,7 +566,7 @@ bool Session::sendTouch(const std::vector<TouchPoint>& contacts)
 void Session::requestKeyFrame()
 {
     if (!eventChannel_) return;
-    // 限频：丢帧回调可能密集触发，1 秒最多发一次，避免刷爆事件通道
+    // Throttle: the dropped-frame callback can fire rapidly; send at most once per second to avoid flooding the event channel
     const auto now = std::chrono::steady_clock::now();
     if (now - lastKeyframeRequest_ < std::chrono::seconds(1)) return;
     lastKeyframeRequest_ = now;
@@ -577,7 +577,7 @@ void Session::requestKeyFrame()
 void Session::requestKeyFrameNow()
 {
     if (!eventChannel_) return;
-    lastKeyframeRequest_ = std::chrono::steady_clock::now();   // 刷新限频基准，避免紧接着的周期请求又发一次
+    lastKeyframeRequest_ = std::chrono::steady_clock::now();   // refresh the throttle baseline so the periodic request right after does not send again
     const auto cmd = bplist::dict({{"type", bplist::str("forceKeyFrame")}});
     eventChannel_->sendCommand(cmd);
 }

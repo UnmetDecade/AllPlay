@@ -11,8 +11,8 @@ import android.util.Log
 import java.nio.ByteBuffer
 
 /**
- * IAudioOutput 的 Android 实现：解码 CarPlay 音频（Opus / AAC-LC / LPCM）→ AudioTrack。
- * 由 core 的 AudioStream 线程经 JNI 下调 configure/feed/reset。
+ * Android implementation of IAudioOutput: decode CarPlay audio (Opus / AAC-LC / LPCM) → AudioTrack.
+ * The core AudioStream thread downcalls configure/feed/reset via JNI.
  */
 class AudioSink {
     private var codec: MediaCodec? = null
@@ -42,26 +42,26 @@ class AudioSink {
         try {
             codec = MediaCodec.createDecoderByType(mime)
         } catch (e: Exception) {
-            Log.w("AllPlay", "AudioSink 解码器创建失败 $mime: ${e.message}")
+            Log.w("AllPlay", "AudioSink decoder creation failed $mime: ${e.message}")
             codec = null
             return
         }
         val format = MediaFormat.createAudioFormat(mime, sampleRate, channels)
         if (mime == MediaFormat.MIMETYPE_AUDIO_AAC) {
-            // RTP 里的 AAC 是裸帧，MediaCodec 用 ADTS 头识别；csd-0 = AudioSpecificConfig（协议要求两者都设）
+            // AAC in RTP is raw frames; MediaCodec recognizes them by the ADTS header; csd-0 = AudioSpecificConfig (the protocol requires both)
             format.setInteger(MediaFormat.KEY_IS_ADTS, 1)
             format.setByteBuffer("csd-0", ByteBuffer.wrap(aacAudioSpecificConfig(sampleRate, channels)))
         }
         codec!!.configure(format, null, null, 0)
         codec!!.start()
         startTrack()
-        Log.i("AllPlay", "AudioSink 配置 $mime ${sampleRate}Hz ${channels}ch")
+        Log.i("AllPlay", "AudioSink configured $mime ${sampleRate}Hz ${channels}ch")
     }
 
     fun feed(payload: ByteArray, sample: Int) {
         if (lpcm) {
-            // AirPlay 的 LPCM 是**大端** s16（网络序），AudioTrack 按小端播 —— 逐样本换字节。
-            // 不换的话每个样本的高低字节颠倒，听感是满耳噪音（macOS 宿主上已实测确认）。
+            // AirPlay LPCM is **big-endian** s16 (network order) while AudioTrack plays little-endian — swap bytes per sample.
+            // Without the swap, each sample's high/low bytes are reversed and it sounds like pure noise (confirmed on the macOS host).
             val n = payload.size and 1.inv()
             var i = 0
             while (i < n) {
@@ -73,13 +73,13 @@ class AudioSink {
             track?.write(payload, 0, n)
             return
         }
-        // 小包（config 包）在抢 input buffer 之前就跳过，否则会 claim buffer 又不 queue 导致泄漏
+        // Skip small (config) packets before grabbing an input buffer; otherwise they claim a buffer without queueing it, leaking it
         if (mime == MediaFormat.MIMETYPE_AUDIO_AAC && payload.size <= 12) return
         val c = codec ?: return
-        val idx = c.dequeueInputBuffer(100_000)   // 100ms；拿不到就丢这一帧，别让 10s 超时卡死整条音频线程
+        val idx = c.dequeueInputBuffer(100_000)   // 100ms; drop this frame if none is available, do not let a 10s timeout stall the whole audio thread
         if (!firstFeedLogged) {
             firstFeedLogged = true
-            Log.i("AllPlay", "dequeueInputBuffer 返回=$idx")
+            Log.i("AllPlay", "dequeueInputBuffer returned=$idx")
         }
         if (idx < 0) return
         val buf = c.compatInputBuffer(idx) ?: return
@@ -88,7 +88,7 @@ class AudioSink {
             if (!firstAacLogged) {
                 firstAacLogged = true
                 val h = payload.take(8).joinToString("") { "%02x".format(it) }
-                Log.i("AllPlay", "AAC 帧 head=$h size=${payload.size}")
+                Log.i("AllPlay", "AAC frame head=$h size=${payload.size}")
             }
             adtsWrap(payload)
         } else payload
@@ -103,11 +103,11 @@ class AudioSink {
         val c = codec ?: return
         val info = MediaCodec.BufferInfo()
         while (true) {
-            // 非阻塞：10s 超时会卡死整条音频线程（解码器没吐帧时 UDP 收包停滞→丢包→卡顿）
+            // Non-blocking: a 10s timeout would stall the whole audio thread (when the decoder emits no frames, UDP receive stalls → packet loss → stutter)
             val out = c.dequeueOutputBuffer(info, 0)
             if (!firstDrainLogged) {
                 firstDrainLogged = true
-                Log.i("AllPlay", "dequeueOutputBuffer 返回=$out")
+                Log.i("AllPlay", "dequeueOutputBuffer returned=$out")
             }
             when {
                 out >= 0 -> {
@@ -118,18 +118,18 @@ class AudioSink {
                         buf.get(pcm, 0, info.size)
                         if (!firstPcmLogged) {
                             firstPcmLogged = true
-                            Log.i("AllPlay", "AAC 解码出 PCM ${pcm.size} 字节")
+                            Log.i("AllPlay", "AAC decoded PCM ${pcm.size} bytes")
                         }
                         val w = track?.write(pcm, 0, pcm.size) ?: -1
                         if (!firstWriteLogged) {
                             firstWriteLogged = true
-                            Log.i("AllPlay", "AudioTrack.write 返回=$w（期望 ${pcm.size}）")
+                            Log.i("AllPlay", "AudioTrack.write returned=$w (expected ${pcm.size})")
                         }
                     }
                     c.releaseOutputBuffer(out, false)
                 }
                 out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    Log.i("AllPlay", "音频解码输出格式: ${c.outputFormat}")
+                    Log.i("AllPlay", "Audio decode output format: ${c.outputFormat}")
                 }
                 out == MediaCodec.INFO_TRY_AGAIN_LATER -> return
                 else -> Unit
@@ -140,7 +140,7 @@ class AudioSink {
     private fun startTrack() {
         val ch = if (channels == 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val min = AudioTrack.getMinBufferSize(sampleRate, ch, AudioFormat.ENCODING_PCM_16BIT)
-        // 缓冲放大到 4×min，吸收 Wi-Fi 抖动的网络抖动，避免解码快但播放缓冲耗尽造成的卡顿
+        // Grow the buffer to 4×min to absorb Wi-Fi jitter and avoid stutter when decoding outpaces playback and drains the buffer
         track = if (Build.VERSION.SDK_INT >= 21) {
             val attrs = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -154,18 +154,18 @@ class AudioSink {
             AudioTrack(attrs, format, min * 4, AudioTrack.MODE_STREAM,
                 AudioManager.AUDIO_SESSION_ID_GENERATE)
         } else {
-            // Android 4.4：无 AudioAttributes/AudioFormat.Builder，走旧 5 参构造
+            // Android 4.4: no AudioAttributes/AudioFormat.Builder, use the old 5-arg constructor
             @Suppress("DEPRECATION")
             AudioTrack(AudioManager.STREAM_MUSIC, sampleRate, ch,
                 AudioFormat.ENCODING_PCM_16BIT, min * 4, AudioTrack.MODE_STREAM)
         }
         track?.setVolume(1.0f)
-        Log.i("AllPlay", "AudioTrack 创建 state=${track?.state} ch=$ch rate=$sampleRate")
+        Log.i("AllPlay", "AudioTrack created state=${track?.state} ch=$ch rate=$sampleRate")
         track?.play()
-        Log.i("AllPlay", "AudioTrack play 后 playState=${track?.playState}")
+        Log.i("AllPlay", "AudioTrack playState after play=${track?.playState}")
     }
 
-    /// AudioSpecificConfig（2 字节）：AAC-LC + 采样率索引 + 声道（参照协议 AAC AudioSpecificConfig）
+    /// AudioSpecificConfig (2 bytes): AAC-LC + sample rate index + channels (per the protocol's AAC AudioSpecificConfig)
     private fun aacAudioSpecificConfig(sampleRate: Int, channels: Int): ByteArray {
         val freqIndex = when (sampleRate) {
             8000 -> 11; 16000 -> 8; 32000 -> 5; 44100 -> 4; 48000 -> 3
@@ -175,7 +175,7 @@ class AudioSink {
         return byteArrayOf((value ushr 8).toByte(), value.toByte())
     }
 
-    /// 裸 AAC 帧 → 加 7 字节 ADTS 头（MediaCodec 需要）
+    /// Raw AAC frame → prepend a 7-byte ADTS header (MediaCodec requires it)
     private fun adtsWrap(aac: ByteArray): ByteArray {
         val freqIndex = when (sampleRate) {
             8000 -> 11; 16000 -> 8; 32000 -> 5; 44100 -> 4; 48000 -> 3
@@ -185,7 +185,7 @@ class AudioSink {
         val frameLen = aac.size + 7
         val h = ByteArray(7)
         h[0] = 0xFF.toByte()
-        h[1] = 0xF1.toByte()                                        // MPEG-4, 无 CRC, AAC-LC
+        h[1] = 0xF1.toByte()                                        // MPEG-4, no CRC, AAC-LC
         h[2] = (((1 shl 6) or (freqIndex shl 2) or (ch shr 2))).toByte()
         h[3] = (((ch shl 6) or (frameLen shr 11))).toByte()
         h[4] = ((frameLen shr 3) and 0xFF).toByte()

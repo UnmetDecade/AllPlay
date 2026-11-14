@@ -1,6 +1,6 @@
 /**
  * @file   registry.cpp
- * @brief  协议后端注册表（宿主按枚举挑后端，不 include 具体后端头）
+ * @brief  Protocol backend registry (host picks a backend by enum without including concrete backend headers)
  */
 
 #include "projection/backend.h"

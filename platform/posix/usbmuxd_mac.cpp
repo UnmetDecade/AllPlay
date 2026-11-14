@@ -1,23 +1,23 @@
 // ============================================================================
-// platform/posix/usbmuxd_mac.cpp —— 有线 CarPlay 的 macOS 传输层（系统 usbmuxd）
+// platform/posix/usbmuxd_mac.cpp -- wired CarPlay macOS transport (system usbmuxd)
 // ============================================================================
-// macOS 和 Linux 那条路的**根本区别**：这里一行 USB 代码都不写。
+// The **fundamental difference** from the Linux path: not a single line of USB code here.
 //
-//   · 控制面：系统本来就有 usbmuxd（/var/run/usbmuxd）在跑，它已经把 iPhone 的
-//     USBMUX 口管起来了。我们以普通客户端的身份跟它说 usbmuxd 的 plist 协议
-//     （16 字节头 + XML plist），让它给我们开一条到手机端口的隧道 —— 之后
-//     lockdown / StartSession / TLS / carkit 服务和 Linux 那条路完全一样。
-//   · 媒体面：iPhone 一进 CarPlay 配置，macOS 自带的 AppleUSBNCMData 就会把 NCM
-//     功能绑成 enX 网卡（实测一次会出现两块 en，AV 走其中一块）。我们只要在
-//     IORegistry 里按手机序列号把这块网卡找出来，取它的 IPv6 链路本地地址即可。
-//     不用 cdc_ncm、不用切配置、不用钉地址 —— 那些都是 Apple 自己做的。
+//   - Control plane: the system already runs usbmuxd (/var/run/usbmuxd), and it already manages
+//     the iPhone's USBMUX interface. We act as an ordinary client speaking usbmuxd's plist protocol
+//     (16-byte header + XML plist) and ask it to open a tunnel to a phone-side port -- from there
+//     lockdown / StartSession / TLS / the carkit service are exactly the same as on the Linux path.
+//   - Media plane: as soon as the iPhone enters the CarPlay configuration, macOS's own AppleUSBNCMData
+//     binds the NCM function as an enX interface (observed: two en interfaces appear at once, with AV on one of them). We only need to
+//     find that interface in IORegistry by phone serial number and take its IPv6 link-local address.
+//     No cdc_ncm, no configuration switching, no address pinning -- Apple does all of that itself.
 //
-// 为什么不是 DriverKit/dext：不需要。系统 daemon + 系统驱动已经把这层做完了，
-// 我们再写一个驱动只会和它们抢设备。参考实现见 f-io/LIVI 与 Roylyl/MacPlay 的
-// iap2-wired/{usbmuxd,mac_network}.rs —— 它们也是这么做的。
+// Why not DriverKit/dext: not needed. The system daemon + system drivers already do this layer,
+// and writing another driver would only fight them for the device. Reference implementations: f-io/LIVI and Roylyl/MacPlay's
+// iap2-wired/{usbmuxd,mac_network}.rs -- they do the same.
 //
-// 前提：这台 Mac 必须已经和 iPhone 配对过（Finder 里点过「信任」）。配对记录归
-// 系统 daemon 管，我们只借壳开会话；没配过的话下面会给出明确的提示。
+// Prerequisite: this Mac must have been paired with the iPhone before (clicked "Trust" in Finder). Pairing records are
+// managed by the system daemon; we just borrow a session. If not paired, the code below gives a clear hint.
 #include "posix/usb.h"
 
 #include "common/log.h"
@@ -44,9 +44,9 @@ namespace {
 constexpr const char* kTag        = "usbmuxd";
 constexpr const char* kSocketPath = "/var/run/usbmuxd";
 
-// usbmuxd 的包格式（libusbmuxd/usbmuxd-proto.h）：
+// usbmuxd packet format (libusbmuxd/usbmuxd-proto.h):
 //   struct usbmuxd_header { uint32 length; uint32 version; uint32 message; uint32 tag; }
-// 全部小端。plist 协议 version=1、message=8（MESSAGE_PLIST），payload 是 XML plist。
+// All little-endian. The plist protocol uses version=1, message=8 (MESSAGE_PLIST); the payload is an XML plist.
 constexpr uint32_t kProtoPlist = 1;
 constexpr uint32_t kMsgPlist   = 8;
 constexpr uint32_t kPlistLibVersion = 3;  // kLibUSBMuxVersion
@@ -65,8 +65,8 @@ void writeLe32(uint8_t* p, uint32_t v)
     p[3] = uint8_t(v >> 24);
 }
 
-/// 序列号的两种写法要能对上：ioreg 里是 "0000802000164D2C0102002E"，
-/// usbmuxd 里是 "00008020-00164D2C0102002E"。比较时只留字母数字。
+/// The two serial spellings must match: ioreg uses "0000802000164D2C0102002E",
+/// while usbmuxd uses "00008020-00164D2C0102002E". Keep only alphanumerics when comparing.
 std::string normalizeSerial(const std::string& s)
 {
     std::string out;
@@ -80,7 +80,7 @@ std::string normalizeSerial(const std::string& s)
 }
 
 // ---------------------------------------------------------------------------
-// 字节流：一条连到 usbmuxd 的 unix socket（Connect 成功后它就是一截隧道）
+// Byte stream: a unix socket connected to usbmuxd (after a successful Connect it is a tunnel segment)
 // ---------------------------------------------------------------------------
 class UnixFdStream : public core::IByteStream {
 public:
@@ -93,13 +93,13 @@ public:
         for (;;) {
             pollfd p{fd_, POLLIN, 0};
             const int pr = ::poll(&p, 1, timeoutMs);
-            if (pr == 0) return 0;  // 超时
+            if (pr == 0) return 0;  // timeout
             if (pr < 0) {
                 if (errno == EINTR) continue;
                 return -1;
             }
             const ssize_t r = ::recv(fd_, buf, n, 0);
-            if (r == 0) return -1;  // 对端关了
+            if (r == 0) return -1;  // peer closed
             if (r < 0) {
                 if (errno == EINTR) continue;
                 if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
@@ -137,13 +137,13 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 打开 socket / 收发 usbmuxd 包
+// Open the socket / send and receive usbmuxd packets
 // ---------------------------------------------------------------------------
 int openUsbmuxdSocket(std::string* err)
 {
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        if (err != nullptr) *err = std::string("socket(AF_UNIX) 失败：") + std::strerror(errno);
+        if (err != nullptr) *err = std::string("socket(AF_UNIX) failed: ") + std::strerror(errno);
         return -1;
     }
 #if defined(SO_NOSIGPIPE)
@@ -156,8 +156,8 @@ int openUsbmuxdSocket(std::string* err)
     std::snprintf(addr.sun_path, sizeof addr.sun_path, "%s", kSocketPath);
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
         if (err != nullptr) {
-            *err = std::string("连不上 ") + kSocketPath + "：" + std::strerror(errno) +
-                   "（系统的 usbmuxd 没在跑？）";
+            *err = std::string("cannot connect to ") + kSocketPath + ": " + std::strerror(errno) +
+                   " (is the system usbmuxd running?)";
         }
         ::close(fd);
         return -1;
@@ -179,7 +179,7 @@ bool writeFd(int fd, const uint8_t* buf, size_t n)
     return true;
 }
 
-/// 读满 n 字节。0 = 超时/对端关，-1 = 出错。
+/// Read exactly n bytes. 0 = timeout/peer closed, -1 = error.
 int readExact(int fd, uint8_t* buf, size_t n, int timeoutMs)
 {
     size_t got = 0;
@@ -219,7 +219,7 @@ bool sendPlistPacket(int fd, uint32_t tag, const core::usb::Plist& pl, std::stri
     writeLe32(&pkt[12], tag);
     std::memcpy(&pkt[16], xml.data(), xml.size());
     if (!writeFd(fd, pkt.data(), pkt.size())) {
-        if (err != nullptr) *err = "写 usbmuxd 失败";
+        if (err != nullptr) *err = "failed to write to usbmuxd";
         return false;
     }
     return true;
@@ -230,12 +230,12 @@ bool recvPacket(int fd, int timeoutMs, Packet* out, std::string* err)
     uint8_t hdr[16];
     const int r = readExact(fd, hdr, sizeof hdr, timeoutMs);
     if (r <= 0) {
-        if (err != nullptr) *err = r == 0 ? "usbmuxd 没回包（超时）" : "读 usbmuxd 失败";
+        if (err != nullptr) *err = r == 0 ? "usbmuxd did not respond (timeout)" : "failed to read from usbmuxd";
         return false;
     }
     const uint32_t len = readLe32(hdr);
     if (len < 16 || len > 1u << 20) {
-        if (err != nullptr) *err = "usbmuxd 回了个长度离谱的包：" + std::to_string(len);
+        if (err != nullptr) *err = "usbmuxd returned a packet with an absurd length: " + std::to_string(len);
         return false;
     }
     out->version = readLe32(hdr + 4);
@@ -245,7 +245,7 @@ bool recvPacket(int fd, int timeoutMs, Packet* out, std::string* err)
     if (!out->body.empty()) {
         const int rr = readExact(fd, out->body.data(), out->body.size(), timeoutMs);
         if (rr <= 0) {
-            if (err != nullptr) *err = "usbmuxd 包头到了、包体没到";
+            if (err != nullptr) *err = "usbmuxd packet header arrived but the body did not";
             return false;
         }
     }
@@ -262,8 +262,8 @@ core::usb::Plist makeRequest(const char* type)
     return p;
 }
 
-/// 发一条 plist 请求、收一条 plist 响应。usbmuxd 报错时（MessageType=Result 且
-/// Number != 0）返回 false，err 里带上错误码。
+/// Send one plist request and receive one plist response. When usbmuxd reports an error (MessageType=Result and
+/// Number != 0) returns false, with the error code in err.
 bool plistRequest(int fd, const core::usb::Plist& req, core::usb::Plist* resp, int timeoutMs,
                   std::string* err)
 {
@@ -272,20 +272,20 @@ bool plistRequest(int fd, const core::usb::Plist& req, core::usb::Plist* resp, i
     Packet pkt;
     if (!recvPacket(fd, timeoutMs, &pkt, err)) return false;
     if (pkt.message != kMsgPlist) {
-        if (err != nullptr) *err = "usbmuxd 回了非 plist 包（message=" + std::to_string(pkt.message) + "）";
+        if (err != nullptr) *err = "usbmuxd returned a non-plist packet (message=" + std::to_string(pkt.message) + ")";
         return false;
     }
 
     std::string perr;
     core::usb::Plist parsed;
     if (!core::usb::Plist::parse(std::string(pkt.body.begin(), pkt.body.end()), &parsed, &perr)) {
-        if (err != nullptr) *err = "usbmuxd 回的 plist 解不开：" + perr;
+        if (err != nullptr) *err = "cannot parse the plist returned by usbmuxd: " + perr;
         return false;
     }
     if (parsed.stringValue("MessageType") == "Result") {
         const int64_t num = parsed.intValue("Number", -1);
         if (num != 0) {
-            if (err != nullptr) *err = "usbmuxd 拒绝（错误码 " + std::to_string(num) + "）";
+            if (err != nullptr) *err = "usbmuxd rejected the request (error code " + std::to_string(num) + ")";
             return false;
         }
     }
@@ -295,10 +295,10 @@ bool plistRequest(int fd, const core::usb::Plist& req, core::usb::Plist* resp, i
 
 struct DeviceEntry {
     uint32_t    deviceId = 0;
-    std::string serial;  ///< usbmuxd 的写法（带横杠）
+    std::string serial;  ///< usbmuxd spelling (with hyphens)
 };
 
-/// 问系统 usbmuxd 要一张设备表，挑出 USB 上连着的那台 iPhone。
+/// Ask the system usbmuxd for a device list and pick out the iPhone connected over USB.
 bool listUsbPhones(std::vector<DeviceEntry>* out, std::string* err)
 {
     const int fd = openUsbmuxdSocket(err);
@@ -312,7 +312,7 @@ bool listUsbPhones(std::vector<DeviceEntry>* out, std::string* err)
     out->clear();
     const core::usb::Plist* list = resp.find("DeviceList");
     if (list == nullptr) {
-        if (err != nullptr) *err = "usbmuxd 的 ListDevices 回包里没有 DeviceList";
+        if (err != nullptr) *err = "the ListDevices response from usbmuxd has no DeviceList";
         return false;
     }
     for (const core::usb::Plist& d : list->elements()) {
@@ -331,7 +331,7 @@ bool listUsbPhones(std::vector<DeviceEntry>* out, std::string* err)
 }
 
 // ---------------------------------------------------------------------------
-// IORegistry：手机的 NCM 网卡（enX）与 USBMUX 接口号
+// IORegistry: the phone's NCM interface (enX) and USBMUX interface number
 // ---------------------------------------------------------------------------
 bool quotedValue(const std::string& line, const char* key, std::string* out)
 {
@@ -368,11 +368,11 @@ std::string runIoreg()
 
 struct DarwinPhoneIfaces {
     bool        found = false;
-    std::string ncm;          ///< AppleUSBNCMData 挂出来的 enX（AV 走这块）
-    int         usbMuxNumber = 1;  ///< 手机侧 USBMUX 口的 bInterfaceNumber
+    std::string ncm;          ///< enX exposed by AppleUSBNCMData (AV uses this one)
+    int         usbMuxNumber = 1;  ///< bInterfaceNumber of the phone-side USBMUX interface
 };
 
-/// 在 IORegistry 里按 USB 序列号找到这台 iPhone，再读它挂出来的网卡与接口号。
+/// Find this iPhone in IORegistry by USB serial number, then read the interface and interface number it exposes.
 DarwinPhoneIfaces scanPhoneIoreg(const std::string& phoneSerial)
 {
     DarwinPhoneIfaces out;
@@ -390,7 +390,7 @@ DarwinPhoneIfaces scanPhoneIoreg(const std::string& phoneSerial)
         const std::string block = text.substr(pos, next - pos);
         pos = next;
 
-        // 先认人：块里的 USB 序列号必须对得上
+        // Identify first: the USB serial number in the block must match
         bool serialOk = false;
         {
             const std::string key = "\"USB Serial Number\" = \"";
@@ -408,9 +408,9 @@ DarwinPhoneIfaces scanPhoneIoreg(const std::string& phoneSerial)
 
         out.found = true;
 
-        // 再认网卡：AppleUSBNCMData 下面紧跟的那个 BSD Name。
-        // （同一块网卡下面还有 IONetworkStack 等子节点，它们的 BSD Name 不是我们要的，
-        //   所以只在看到 AppleUSBNCMData 之后取**第一个** BSD Name。）
+        // Then find the interface: the BSD Name immediately following AppleUSBNCMData.
+        // (The same interface has child nodes like IONetworkStack whose BSD Name is not the one we want,
+        //  so take the **first** BSD Name only after seeing AppleUSBNCMData.)
         bool        wantNcm   = false;
         bool        gotNcm    = false;
         int         ifaceNum  = -1;
@@ -431,7 +431,7 @@ DarwinPhoneIfaces scanPhoneIoreg(const std::string& phoneSerial)
             numericValue(line, "bInterfaceSubClass", &sub);
             numericValue(line, "bInterfaceProtocol", &proto);
             if (cls == 0xff && sub == 0xfe && proto == 0x02 && ifaceNum >= 0) {
-                out.usbMuxNumber = ifaceNum;   // USBMUX：ff/fe/02
+                out.usbMuxNumber = ifaceNum;   // USBMUX: ff/fe/02
             }
 
             if (line.find("\"IOClass\" = \"AppleUSBNCMData") != std::string::npos) {
@@ -452,14 +452,14 @@ DarwinPhoneIfaces scanPhoneIoreg(const std::string& phoneSerial)
     return out;
 }
 
-/// 系统 usbmuxd 的 mux 实现：每开一条连接就新起一个 unix socket。
+/// System usbmuxd mux implementation: each new connection starts a fresh unix socket.
 class SystemUsbMuxd final : public core::usb::IMux {
 public:
     bool begin(std::string* err) override
     {
-        if (deviceId_ != 0) return true;  // 已经认过人了
+        if (deviceId_ != 0) return true;  // already identified
 
-        // 刚插上时 daemon 可能要一小会儿才看见设备；重试 ~5 秒。
+        // Right after plugging in, the daemon may take a moment to see the device; retry for ~5 seconds.
         std::string lastErr;
         for (int attempt = 0; attempt < 10; ++attempt) {
             std::vector<DeviceEntry> phones;
@@ -467,7 +467,7 @@ public:
                 if (!phones.empty()) {
                     deviceId_ = phones.front().deviceId;
                     serial_   = phones.front().serial;
-                    LOG_INFO("[%s] 系统 usbmuxd：手机 %s（DeviceID %u）", kTag, serial_.c_str(),
+                    LOG_INFO("[%s] system usbmuxd: phone %s (DeviceID %u)", kTag, serial_.c_str(),
                              unsigned(deviceId_));
                     return true;
                 }
@@ -478,8 +478,8 @@ public:
 
         if (err != nullptr) {
             *err = lastErr.empty()
-                       ? "系统 usbmuxd 里没有 USB 连接的 iPhone：插上数据线、解锁手机，"
-                         "并在 Finder 里点一次「信任」"
+                       ? "no USB-connected iPhone in the system usbmuxd: plug in the data cable, unlock the phone,"
+                         " and tap 'Trust' once in Finder"
                        : lastErr;
         }
         return false;
@@ -497,8 +497,8 @@ public:
 
         core::usb::Plist req = makeRequest("Connect");
         req.set("DeviceID", core::usb::Plist::integer(deviceId_));
-        // ⚠️ PortNumber 是**网络序**（libusbmuxd 就是 plist_new_uint(htons(port))）。
-        // 写成主机序会连到某个莫名其妙的端口上，然后一直不通。
+        // WARNING: PortNumber is in **network byte order** (libusbmuxd does plist_new_uint(htons(port))).
+        // Passing host order connects to some arbitrary port that never works.
         req.set("PortNumber", core::usb::Plist::integer(int64_t(uint16_t(htons(port)))));
 
         core::usb::Plist resp;
@@ -519,7 +519,7 @@ private:
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 对外
+// Public API
 // ---------------------------------------------------------------------------
 std::unique_ptr<core::usb::IMux> openSystemUsbMuxd(WiredUsbInfo* info, std::string* err)
 {
@@ -535,7 +535,7 @@ std::unique_ptr<core::usb::IMux> openSystemUsbMuxd(WiredUsbInfo* info, std::stri
         info->bus        = 0;
         info->address    = 0;
         info->configValue = -1;
-        // USBHostTransport 那组要的是手机侧 USBMUX 口的接口号；ioreg 读不到就按 1
+        // The USBHostTransport group needs the phone-side USBMUX interface number; fall back to 1 if ioreg cannot read it
         info->usbMuxInterface = uint8_t(p.found ? p.usbMuxNumber : 1);
     }
     return mux;
@@ -547,28 +547,28 @@ bool prepareWiredNcmDarwin(const std::string& phoneSerial, WiredNcmLink* out, st
     *out = WiredNcmLink{};
 
     DarwinPhoneIfaces p;
-    for (int attempt = 0; attempt < 10; ++attempt) {  // 网卡可能比 carkit 晚一两秒
+    for (int attempt = 0; attempt < 10; ++attempt) {  // the interface can appear a second or two after carkit
         p = scanPhoneIoreg(phoneSerial);
         if (p.found && !p.ncm.empty()) break;
         ::usleep(500 * 1000);
     }
     if (!p.found) {
         if (err != nullptr) {
-            *err = "IORegistry 里找不到序列号 " + phoneSerial +
-                   " 的 iPhone（读 ioreg 失败？手机没进 CarPlay 配置？）";
+            *err = "cannot find an iPhone with serial " + phoneSerial +
+                   " in IORegistry (failed to read ioreg? phone not in the CarPlay configuration?)";
         }
         return false;
     }
     if (p.ncm.empty()) {
         if (err != nullptr) {
-            *err = "这台 iPhone 没有 AppleUSBNCMData 网卡：USB 线不是数据线，或者手机还没进"
-                   " CarPlay 配置（先在手机上解锁一次、然后重新插拔）";
+            *err = "this iPhone has no AppleUSBNCMData network interface: the USB cable is not a data cable, or the phone has not entered"
+                   " the CarPlay configuration (unlock the phone once, then replug)";
         }
         return false;
     }
 
     out->ifname    = p.ncm;
-    out->broughtUp = true;   // macOS 自己会把网卡拉 up
+    out->broughtUp = true;   // macOS brings the interface up itself
 
     uint8_t mac[6];
     if (networkInfo().interfaceMAC(out->ifname, mac)) out->mac = core::deviceIdFromMAC(mac);
@@ -576,12 +576,12 @@ bool prepareWiredNcmDarwin(const std::string& phoneSerial, WiredNcmLink* out, st
     out->ipv6 = networkInfo().interfaceIPv6LinkLocal(out->ifname);
     if (out->ipv6.empty()) {
         if (err != nullptr) {
-            *err = out->ifname + " 上没有 IPv6 链路本地地址（刚起来？等一两秒再按 W 重试）";
+            *err = out->ifname + " has no IPv6 link-local address (just came up? wait a second or two and press W to retry)";
         }
         return false;
     }
 
-    LOG_INFO("[%s] NCM 网卡 %s：MAC %s，IPv6 %s（macOS 自己建的，不用钉）", kTag,
+    LOG_INFO("[%s] NCM interface %s: MAC %s, IPv6 %s (created by macOS itself, no need to pin)", kTag,
              out->ifname.c_str(), out->mac.c_str(), out->ipv6.front().c_str());
     return true;
 }

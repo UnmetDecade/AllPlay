@@ -42,7 +42,7 @@ std::vector<uint8_t> x25519Shared(const uint8_t priv[32], const uint8_t peerPub[
     EVP_PKEY_free(pk);
     EVP_PKEY_free(pp);
 
-    // 全零共享密钥拒绝（协议要求）
+    // Reject an all-zero shared secret (protocol requirement)
     bool allZero = !out.empty();
     for (uint8_t b : out) if (b != 0) { allZero = false; break; }
     if (allZero) out.clear();

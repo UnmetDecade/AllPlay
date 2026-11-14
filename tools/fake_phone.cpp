@@ -1,34 +1,34 @@
 // ============================================================================
-// tools/fake_phone.cpp —— 假 iPhone：真 socket 跑完 RTSP + 加密屏幕流 + 触摸回读
+// tools/fake_phone.cpp -- fake iPhone: real sockets run RTSP + encrypted screen stream + touch readback
 // ============================================================================
-// 这是"Linux 宿主真的能渲染出 CarPlay 画面"这句话的**唯一证据**。没有 iPhone 的时候，
-// 剩下能证明的方式就是自己当手机：真 TCP、真 TLV8、真 SRP、真 ChaCha20-Poly1305，
-// 一个环节都不省。宿主的解码链路由 tools/video_probe 单独负责，两者合起来覆盖全链路。
+// This is the **only evidence** that "a Linux host really can render a CarPlay picture". With no iPhone,
+// the remaining way to prove it is to act as the phone ourselves: real TCP, real TLV8, real SRP, real ChaCha20-Poly1305,
+// skipping no step. The host's decode path is covered separately by tools/video_probe; together they span the whole chain.
 //
-// 流程（与 core/airplay/session.cpp 的路由一一对应）：
-//   1. OPTIONS                 —— 探活，验证 RTSP 端口 + keep-alive
-//   2. GET  /info              —— 读 bplist，确认对面是本项目的设备（打印名字/features）
-//      跳过 /auth-setup       —— 要 MFi 身份文件（identity/），本机开发故意不装；
-//                                真实 iPhone 这一步是必须的，所以本工具**不能**替代真机验收
-//   3. POST /pair-setup  M1→M6 —— SRP-6a（PIN 3939）+ 交换 controller 长期公钥
-//   4. POST /pair-verify PV1→PV4 —— X25519 + 签名，拿到 shared secret
-//      **PV-M4 的响应仍是明文**，之后所有控制通道字节都走 ControlCipher 帧
-//   5. SETUP 两批              —— 第一批拿 eventPort，第二批拿屏幕流 dataPort
-//   6. RECORD                  —— 宿主据此把启动页切成视频面
-//   7. 连 dataPort 推流        —— 先发配置帧（opcode 1，明文），再发加密视频帧（opcode 0）
-//   8. 连 eventPort 读触摸     —— 解密宿主发来的 hidSendReport，把触点解出来打印
+// Flow (one-to-one with the routes in core/airplay/session.cpp):
+//   1. OPTIONS                 -- liveness check, verifies the RTSP port + keep-alive
+//   2. GET  /info              -- read bplist, confirm the peer is this project's device (print name/features)
+//      skip /auth-setup       -- requires MFi identity files (identity/), deliberately not installed for local dev;
+//                                a real iPhone requires this step, so this tool **cannot** replace real-device acceptance
+//   3. POST /pair-setup  M1->M6 -- SRP-6a (PIN 3939) + exchange the controller's long-term public key
+//   4. POST /pair-verify PV1->PV4 -- X25519 + signatures, obtaining the shared secret
+//      **The PV-M4 response is still plaintext**; after that all control-channel bytes use ControlCipher frames
+//   5. SETUP in two batches    -- first gets eventPort, second gets the screen stream's dataPort
+//   6. RECORD                  -- the host switches the startup screen to the video surface
+//   7. Connect to dataPort and stream -- send the config frame first (opcode 1, plaintext), then encrypted video frames (opcode 0)
+//   8. Connect to eventPort and read touches -- decrypt the host's hidSendReport and decode/print the touch points
 //
-// 第 8 步是触摸功能的端到端验收：宿主把 SDL 的鼠标/手指按 letterbox 矩形归一化后
-// 编成 HID report，经事件通道加密发来。这里能还原出坐标，才说明整条触摸链路是通的。
+// Step 8 is the end-to-end acceptance test for touch: the host normalizes SDL mouse/finger input into the letterbox rect and
+// encodes it as an HID report sent encrypted over the event channel. Recovering the coordinates here is what proves the whole touch chain works.
 //
-// 造测试流（任意带 H.264 的容器都行；--aac 用 48kHz 立体声的 ADTS）：
+// Generate a test stream (any container with H.264 works; --aac uses 48kHz stereo ADTS):
 //   ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=60 -t 10 -c:v libx264
 //     -preset veryfast -pix_fmt yuv420p -g 60 -bf 0 -bsf:v h264_mp4toannexb -f h264 out.h264
 //   ffmpeg -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=10" -ac 2
 //     -c:a aac -b:a 128k -f adts tone.aac
-// （注意注释行别以反斜杠结尾：那在 C++ 里会把下一行也吞进注释。）
+// (Note: don't end comment lines with a backslash: in C++ that swallows the next line into the comment.)
 //
-// 用法：
+// Usage:
 //   build/allplay_host &
 //   build/fake_phone --h264 out.h264 --fps 60
 #include "airplay/control_cipher.h"
@@ -71,12 +71,12 @@ using allplay::phone::T_STATE;
 
 namespace {
 
-// 假手机的"身份"：像真机一样有个稳定的 controller 标识和一对长期 Ed25519 密钥。
-// 固定住 UUID 是有意的 —— 宿主会把它存进 PairingStore，重跑时走的是"已配对"分支。
+// The fake phone's "identity": like a real device, a stable controller id and a long-term Ed25519 key pair.
+// Pinning the UUID is intentional -- the host stores it in PairingStore, so reruns take the "already paired" branch.
 constexpr const char* kControllerId = "11111111-2222-3333-4444-555555555555";
 
 // ---------------------------------------------------------------------------
-// 裸 TCP（tools/ 不依赖 core 的 port 层，这里直接用 POSIX socket）
+// Raw TCP (tools/ doesn't depend on core's port layer, so use POSIX sockets directly)
 // ---------------------------------------------------------------------------
 class Link {
 public:
@@ -89,20 +89,20 @@ public:
         closeFd();
         fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (fd_ < 0) {
-            *err = std::string("建 socket 失败：") + std::strerror(errno);
+            *err = std::string("socket creation failed: ") + std::strerror(errno);
             return false;
         }
         sockaddr_in a{};
         a.sin_family = AF_INET;
         a.sin_port   = htons(port);
         if (::inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1) {
-            *err = "host 不是合法的 IPv4 地址：" + host;
+            *err = "host is not a valid IPv4 address: " + host;
             closeFd();
             return false;
         }
         if (::connect(fd_, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) {
-            *err = std::string(what) + " 连不上 " + host + ":" + std::to_string(port) +
-                   " —— " + std::strerror(errno);
+            *err = std::string(what) + " cannot connect to " + host + ":" + std::to_string(port) +
+                   " -- " + std::strerror(errno);
             closeFd();
             return false;
         }
@@ -122,7 +122,7 @@ public:
         return true;
     }
 
-    /// 返回 >0 = 字节数；0 = 超时；<0 = 断开/出错
+    /// Returns >0 = byte count; 0 = timeout; <0 = closed/error
     int readSome(uint8_t* d, size_t n, int timeoutMs)
     {
         timeval tv{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
@@ -144,11 +144,11 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 裸 UDP 发送（音频流走 RTP over UDP，不能像屏幕流那样开 TCP）
+// Raw UDP send (audio goes over RTP/UDP and can't use TCP like the screen stream)
 // ---------------------------------------------------------------------------
 class UdpSender {
 public:
-    UdpSender() = default;   // 声明了拷贝构造就会抑制隐式默认构造，得补回来
+    UdpSender() = default;   // declaring a copy constructor suppresses the implicit default constructor, so add it back
     ~UdpSender() { if (fd_ >= 0) ::close(fd_); }
     UdpSender(const UdpSender&) = delete;
 
@@ -160,7 +160,7 @@ public:
         addrinfo* res = nullptr;
         const std::string p = std::to_string(port);
         if (::getaddrinfo(host.c_str(), p.c_str(), &hints, &res) != 0 || !res) {
-            *err = "解析不了音频目的地址 " + host;
+            *err = "cannot resolve audio destination address " + host;
             return false;
         }
         fd_ = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -169,7 +169,7 @@ public:
             addrLen_ = socklen_t(res->ai_addrlen);
         }
         ::freeaddrinfo(res);
-        if (fd_ < 0) { *err = std::string("建 UDP socket 失败：") + std::strerror(errno); return false; }
+        if (fd_ < 0) { *err = std::string("UDP socket creation failed: ") + std::strerror(errno); return false; }
         return true;
     }
 
@@ -185,18 +185,18 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// ADTS 裸流（.aac）→ 裸 AAC 帧
+// ADTS elementary stream (.aac) -> raw AAC frames
 // ---------------------------------------------------------------------------
-// CarPlay 的 AAC 载荷是**无 ADTS 头的裸帧**，而手头现成的素材基本都是 ADTS，
-// 所以在这里剥一层。顺带把采样率/声道读出来 —— 协商值必须和素材对得上，
-// 对不上就是"能出声但全是噪声"，不如早点报错。
+// CarPlay's AAC payload is **raw frames with no ADTS header**, while the material on hand is basically all ADTS,
+// so strip a layer here. Also read out the sample rate/channels -- negotiated values must match the material;
+// a mismatch means "sound comes out but it's all noise", so failing fast is better.
 struct AacFrames {
     std::vector<std::vector<uint8_t>> frames;
-    int freqIndex = -1;   ///< ADTS 采样率索引（3 = 48000，4 = 44100）
+    int freqIndex = -1;   ///< ADTS sample-rate index (3 = 48000, 4 = 44100)
     int channels  = 0;
 };
 
-bool readFile(const std::string& path, std::vector<uint8_t>* out);   // 定义在下面
+bool readFile(const std::string& path, std::vector<uint8_t>* out);   // defined below
 
 bool readAdts(const std::string& path, AacFrames* out)
 {
@@ -206,8 +206,8 @@ bool readAdts(const std::string& path, AacFrames* out)
     size_t i = 0;
     bool   sawHeader = false;
     while (i + 7 <= buf.size()) {
-        if (buf[i] != 0xFF || (buf[i + 1] & 0xF0) != 0xF0) { ++i; continue; }   // 找同步字
-        const size_t hdr = (buf[i + 1] & 0x01) ? 7 : 9;   // protection_absent=0 时多 2 字节 CRC
+        if (buf[i] != 0xFF || (buf[i + 1] & 0xF0) != 0xF0) { ++i; continue; }   // look for the sync word
+        const size_t hdr = (buf[i + 1] & 0x01) ? 7 : 9;   // 2 extra CRC bytes when protection_absent=0
         const size_t len = (size_t(buf[i + 3] & 0x03) << 11) |
                            (size_t(buf[i + 4]) << 3) |
                            (size_t(buf[i + 5]) >> 5);
@@ -225,7 +225,7 @@ bool readAdts(const std::string& path, AacFrames* out)
 }
 
 // ---------------------------------------------------------------------------
-// RTSP 客户端：请求行 + 头 + Content-Length 体；可切到 ControlCipher 加密
+// RTSP client: request line + headers + Content-Length body; can switch to ControlCipher encryption
 // ---------------------------------------------------------------------------
 struct Response {
     int status = 0;
@@ -247,9 +247,9 @@ class Rtsp {
 public:
     explicit Rtsp(Link& link) : link_(link) {}
 
-    /// pair-verify 之后调用：之后的收发都走加密帧。
-    /// 注意入参顺序 —— ControlCipher(readKey=解密入站, writeKey=加密出站)，
-    /// 而服务端的 read/write 命名与手机侧**刚好相反**，见 controlKeys() 的注释。
+    /// Call after pair-verify: all subsequent send/receive goes through encrypted frames.
+    /// Note the argument order -- ControlCipher(readKey=decrypt inbound, writeKey=encrypt outbound),
+    /// while the server's read/write naming is **exactly reversed** from the phone side; see the comment on controlKeys().
     void enableCipher(std::unique_ptr<core::airplay::ControlCipher> c)
     {
         cipher_ = std::move(c);
@@ -271,20 +271,20 @@ public:
 
         if (cipher_) wire = cipher_->encrypt(wire.data(), wire.size());
         if (!link_.writeAll(wire.data(), wire.size())) {
-            *err = method + " " + uri + " 发送失败（对端可能已断开）";
+            *err = method + " " + uri + " send failed (peer may have disconnected)";
             return false;
         }
         return readResponse(method + " " + uri, out, err);
     }
 
 private:
-    /// 把链路里的一段字节收进 plain_（加密时先解密）。false = 断开。
+    /// Buffer bytes from the link into plain_ (decrypting first when encrypted). false = disconnected.
     bool pull(std::string* err)
     {
         uint8_t buf[4096];
         const int n = link_.readSome(buf, sizeof buf, 10000);
-        if (n == 0) return true;                     // 超时：没有新字节，交给外层再判
-        if (n < 0) { *err = "读响应时对端断开"; return false; }
+        if (n == 0) return true;                     // timeout: no new bytes, let the caller decide again
+        if (n < 0) { *err = "peer disconnected while reading the response"; return false; }
 
         if (!cipher_) {
             plain_.insert(plain_.end(), buf, buf + n);
@@ -296,7 +296,7 @@ private:
             if (!pt.empty()) plain_.insert(plain_.end(), pt.begin(), pt.end());
             pt.clear();
         }
-        if (cipher_->failed()) { *err = "控制通道解密鉴权失败（密钥方向搞反了？）"; return false; }
+        if (cipher_->failed()) { *err = "control channel decryption/auth failed (keys swapped?)"; return false; }
         return true;
     }
 
@@ -304,7 +304,7 @@ private:
     {
         const auto t0 = std::chrono::steady_clock::now();
         for (;;) {
-            // 找头结束（\r\n\r\n），再按 Content-Length 取体
+            // find the end of headers (\r\n\r\n), then take the body per Content-Length
             const std::vector<uint8_t> delim = {'\r', '\n', '\r', '\n'};
             auto it = std::search(plain_.begin(), plain_.end(), delim.begin(), delim.end());
             if (it != plain_.end()) {
@@ -352,7 +352,7 @@ private:
 
             if (!pull(err)) return false;
             if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(10)) {
-                *err = what + " 等响应超时（宿主没回？）";
+                *err = what + " timed out waiting for a response (host didn't reply?)";
                 return false;
             }
         }
@@ -365,20 +365,20 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 选项
+// Options
 // ---------------------------------------------------------------------------
 struct Options {
     std::string host = "127.0.0.1";
     uint16_t    port = 7000;
     std::string h264;
-    std::string aac;               ///< --aac：ADTS 裸流，建音频流并推（不验音频就不给）
+    std::string aac;               ///< --aac: raw ADTS stream; create an audio stream and push it (omit to skip audio verification)
     int         fps    = 30;
     bool        loop   = false;
-    int         frames = 0;        // >0：推满 N 帧就收工
+    int         frames = 0;        // >0: stop after pushing N frames
     std::string pin    = "3939";
-    int         seconds = 0;       // >0：推流最多跑 N 秒
-    int         videoDelayMs = 0;  // --video-delay：RECORD 之后、推第一帧之前干等多久
-                                   //   用来复现"切到视频面但还没新画面"的空窗（查残留帧）
+    int         seconds = 0;       // >0: run streaming for at most N seconds
+    int         videoDelayMs = 0;  // --video-delay: how long to idle after RECORD, before pushing the first frame
+                                   //   used to reproduce the gap where "the video surface is active but no new picture yet" (checking for stale frames)
     bool        noTouch = false;
     bool        verbose = false;
     bool        help    = false;
@@ -387,22 +387,22 @@ struct Options {
 void printUsage(const char* argv0)
 {
     std::printf(
-        "用法: %s --h264 FILE [选项]\n"
-        "  --h264 PATH     裸 AnnexB H.264 基本流（推给宿主当屏幕流）\n"
-        "  --host IP       宿主地址（默认 127.0.0.1）\n"
-        "  --port N        宿主 RTSP 端口（默认 7000）\n"
-        "  --fps N         推流帧率（默认 30）\n"
-        "  --loop          放完从头再来\n"
-        "  --frames N      推满 N 帧就收工（默认 0 = 整个文件过一遍）\n"
-        "  --seconds N     推流最多跑 N 秒\n"
-        "  --video-delay MS  RECORD 之后先干等 MS 毫秒再推第一帧（复现切视频面后的空窗）\n"
-        "  --pin S         pair-setup 的 PIN（默认 3939）\n"
-        "  --aac PATH       48kHz 立体声 ADTS 裸流；给了就建音频流并推（验音频链路）\n"
-        "  --no-touch      不连事件通道（不验触摸）\n"
-        "  -v, --verbose   打印每条 RTSP 收发\n"
-        "  -h, --help      显示本帮助\n"
+        "Usage: %s --h264 FILE [options]\n"
+        "  --h264 PATH     raw AnnexB H.264 elementary stream (pushed to the host as the screen stream)\n"
+        "  --host IP       host address (default 127.0.0.1)\n"
+        "  --port N        host RTSP port (default 7000)\n"
+        "  --fps N         streaming frame rate (default 30)\n"
+        "  --loop          replay from the start when finished\n"
+        "  --frames N      stop after N frames (default 0 = go through the whole file once)\n"
+        "  --seconds N     stream for at most N seconds\n"
+        "  --video-delay MS  idle for MS milliseconds after RECORD before pushing the first frame (reproduces the gap after switching to the video surface)\n"
+        "  --pin S         PIN for pair-setup (default 3939)\n"
+        "  --aac PATH      48kHz stereo raw ADTS stream; if given, create an audio stream and push it (verifies the audio path)\n"
+        "  --no-touch      don't connect the event channel (skip touch verification)\n"
+        "  -v, --verbose   print every RTSP send/receive\n"
+        "  -h, --help      show this help\n"
         "\n"
-        "退出码：0 = 走完全流程并推了帧；非 0 = 某一步失败（看 stderr）。\n",
+        "Exit code: 0 = completed the full flow and pushed frames; non-zero = some step failed (see stderr).\n",
         argv0);
 }
 
@@ -412,7 +412,7 @@ bool parseArgs(int argc, char** argv, Options* o)
         const char* a = argv[i];
         auto need = [&](const char* name) -> const char* {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "参数 %s 缺少取值\n", name);
+                std::fprintf(stderr, "argument %s is missing a value\n", name);
                 std::exit(2);
             }
             return argv[++i];
@@ -431,17 +431,17 @@ bool parseArgs(int argc, char** argv, Options* o)
         else if (!std::strcmp(a, "-v") || !std::strcmp(a, "--verbose")) o->verbose = true;
         else if (!std::strcmp(a, "-h") || !std::strcmp(a, "--help"))    o->help = true;
         else {
-            std::fprintf(stderr, "未知参数：%s（-h 看帮助）\n", a);
+            std::fprintf(stderr, "unknown argument: %s (see -h for help)\n", a);
             return false;
         }
     }
     if (o->help) return true;
     if (o->h264.empty()) {
-        std::fprintf(stderr, "必须给 --h264 FILE（-h 看帮助）\n");
+        std::fprintf(stderr, "--h264 FILE is required (see -h for help)\n");
         return false;
     }
     if (o->fps <= 0 || o->fps > 240) {
-        std::fprintf(stderr, "--fps 超范围（1..240）\n");
+        std::fprintf(stderr, "--fps out of range (1..240)\n");
         return false;
     }
     return true;
@@ -451,14 +451,14 @@ bool readFile(const std::string& path, std::vector<uint8_t>* out)
 {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) {
-        std::fprintf(stderr, "打不开 %s\n", path.c_str());
+        std::fprintf(stderr, "cannot open %s\n", path.c_str());
         return false;
     }
     std::fseek(f, 0, SEEK_END);
     const long n = std::ftell(f);
     std::fseek(f, 0, SEEK_SET);
     if (n <= 0) {
-        std::fprintf(stderr, "%s 是空文件\n", path.c_str());
+        std::fprintf(stderr, "%s is an empty file\n", path.c_str());
         std::fclose(f);
         return false;
     }
@@ -469,14 +469,14 @@ bool readFile(const std::string& path, std::vector<uint8_t>* out)
 }
 
 // ---------------------------------------------------------------------------
-// 屏幕流推帧
+// Screen stream frame pushing
 // ---------------------------------------------------------------------------
 struct ScreenFrame {
-    std::vector<uint8_t> avcc;   ///< 已转 AVCC（4 字节长度前缀），可直接加密
+    std::vector<uint8_t> avcc;   ///< already converted to AVCC (4-byte length prefix), can be encrypted directly
     bool                 idr = false;
 };
 
-/// 128 字节数据流头：bodyLen(LE32) + opcode + 其余填零。
+/// 128-byte data stream header: bodyLen(LE32) + opcode + rest zero-filled.
 std::vector<uint8_t> makeHeader(uint32_t bodyLen, uint8_t opcode)
 {
     std::vector<uint8_t> h(128, 0);
@@ -489,7 +489,7 @@ std::vector<uint8_t> makeHeader(uint32_t bodyLen, uint8_t opcode)
 }
 
 // ---------------------------------------------------------------------------
-// 触摸回读：连事件通道，解密宿主发来的 POST /command，还原触点
+// Touch readback: connect to the event channel, decrypt the host's POST /command, recover touch points
 // ---------------------------------------------------------------------------
 void touchReader(std::string host, uint16_t port, std::vector<uint8_t> shared,
                  int width, int height, std::atomic<bool>* stop,
@@ -497,17 +497,17 @@ void touchReader(std::string host, uint16_t port, std::vector<uint8_t> shared,
 {
     Link lk;
     std::string err;
-    if (!lk.connectTo(host, port, "事件通道", &err)) {
-        std::fprintf(stderr, "[phone] 事件通道：%s\n", err.c_str());
+    if (!lk.connectTo(host, port, "event channel", &err)) {
+        std::fprintf(stderr, "[phone] event channel: %s\n", err.c_str());
         return;
     }
 
-    // 服务端 event_channel.cpp:112-114 把 writeKey_ 用在**出站**、readKey_ 用在**入站**；
-    // 手机侧对调。这一对和屏幕流/控制通道都不是同一组 label，不能类推。
+    // Server's event_channel.cpp:112-114 uses writeKey_ for **outbound** and readKey_ for **inbound**;
+    // the phone side swaps them. This pair also doesn't share labels with the screen/control channels, so don't extrapolate.
     auto evWrite = core::crypto::hkdfSha512(shared, "Events-Salt", "Events-Write-Encryption-Key", 32);
     auto evRead  = core::crypto::hkdfSha512(shared, "Events-Salt", "Events-Read-Encryption-Key", 32);
-    core::airplay::ControlCipher cipher(evWrite.data(),   // 解密入站（宿主发出的命令）
-                                        evRead.data());   // 加密出站（我方 ACK）
+    core::airplay::ControlCipher cipher(evWrite.data(),   // decrypt inbound (commands the host sends)
+                                        evRead.data());   // encrypt outbound (our ACK)
 
     std::vector<uint8_t> plain;
     uint8_t buf[4096];
@@ -522,7 +522,7 @@ void touchReader(std::string host, uint16_t port, std::vector<uint8_t> shared,
             pt.clear();
         }
 
-        // 从明文里切出完整请求（\r\n\r\n + Content-Length）
+        // cut a complete request out of the plaintext (\r\n\r\n + Content-Length)
         for (;;) {
             const std::vector<uint8_t> delim = {'\r', '\n', '\r', '\n'};
             auto it = std::search(plain.begin(), plain.end(), delim.begin(), delim.end());
@@ -551,21 +551,21 @@ void touchReader(std::string host, uint16_t port, std::vector<uint8_t> shared,
                                       plain.begin() + bodyStart + size_t(len));
             plain.erase(plain.begin(), plain.begin() + bodyStart + size_t(len));
 
-            // 是请求才解析（响应形如 "RTSP/1.0 200"，跳过）
+            // only parse requests (responses look like "RTSP/1.0 200", skip them)
             if (head.rfind("RTSP/", 0) == 0 || head.rfind("HTTP/", 0) == 0) continue;
 
             auto root = core::bplist::parse(body.data(), body.size());
             const std::string type =
                 root ? core::bplist::strOf(core::bplist::dictGet(root, "type")) : "";
             if (type != "hidSendReport") {
-                std::printf("[phone] 事件通道收到 type=%s\n", type.c_str());
+                std::printf("[phone] event channel received type=%s\n", type.c_str());
                 continue;
             }
 
             const auto rep = core::bplist::dictGet(root, "hidReport");
             if (!rep || rep->data.size() < 12) continue;
 
-            // HID report：2 触点 × 6 字节（slot | down | x u16le | y u16le）
+            // HID report: 2 touch points × 6 bytes (slot | down | x u16le | y u16le)
             std::string desc;
             int downs = 0;
             for (int slot = 0; slot < 2; ++slot) {
@@ -576,16 +576,16 @@ void touchReader(std::string host, uint16_t port, std::vector<uint8_t> shared,
                 if (down) ++downs;
                 char one[96];
                 std::snprintf(one, sizeof one, "slot%d %s(%d,%d) ", slot,
-                              down ? "按下" : "抬起", x, y);
+                              down ? "down" : "up", x, y);
                 desc += one;
             }
-            std::printf("[phone] 触摸 ← %s（归一化 %.3f,%.3f 左右）\n",
+            std::printf("[phone] touch ← %s (normalized %.3f,%.3f approx.)\n",
                         desc.c_str(),
                         double(rep->data[2] | (rep->data[3] << 8)) / double(width),
                         double(rep->data[4] | (rep->data[5] << 8)) / double(height));
             got->fetch_add(downs > 0 ? 1 : 0);
 
-            // 回 ACK（服务端会等它；不回也不致命，但真机会回）
+            // send the ACK (the server waits for it; not sending isn't fatal, but a real phone would)
             std::string ack = "RTSP/1.0 200 OK\r\nCSeq: " + cseq + "\r\nContent-Length: 0\r\n\r\n";
             auto framed = cipher.encrypt(reinterpret_cast<const uint8_t*>(ack.data()), ack.size());
             if (!lk.writeAll(framed.data(), framed.size())) break;
@@ -618,11 +618,11 @@ int main(int argc, char** argv)
         return 1;
     }
     if (aus.empty()) {
-        std::fprintf(stderr, "在 %s 里没找到访问单元 —— 不是 AnnexB 流？\n", opt.h264.c_str());
+        std::fprintf(stderr, "no access units found in %s -- not an AnnexB stream?\n", opt.h264.c_str());
         return 1;
     }
 
-    // 整个文件先转成 AVCC（推流方向就是要 AVCC；core 收到后会自己转回 AnnexB）
+    // Convert the whole file to AVCC up front (the streaming direction needs AVCC; core converts it back to AnnexB on receipt)
     std::vector<ScreenFrame> frames;
     frames.reserve(aus.size());
     for (const auto& r : aus) {
@@ -635,21 +635,21 @@ int main(int argc, char** argv)
         frames.push_back(std::move(f));
     }
     if (frames.empty()) {
-        std::fprintf(stderr, "%s 里没有可推的帧\n", opt.h264.c_str());
+        std::fprintf(stderr, "no frames to push in %s\n", opt.h264.c_str());
         return 1;
     }
-    std::printf("[phone] %s：%zu 个访问单元，avcC %zu 字节，首帧%s\n",
+    std::printf("[phone] %s: %zu access units, avcC %zu bytes, first frame %s\n",
                 opt.h264.c_str(), frames.size(), codecData.size(),
-                frames[0].idr ? "是关键帧" : "**不是关键帧**（宿主会一直等到下一个 IDR）");
+                frames[0].idr ? "is a keyframe" : "**is not a keyframe** (the host will wait for the next IDR)");
     if (!frames[0].idr)
-        std::printf("[phone] ⚠️ 首帧不是 IDR：宿主的闸门会丢弃它之后的非关键帧，"
-                    "请用 -g 较小的参数重编（如 -g 30）\n");
+        std::printf("[phone] ⚠️ first frame is not an IDR: the host's gate drops non-keyframes after it, "
+                    "re-encode with a smaller -g (e.g. -g 30)\n");
 
     const std::string baseUri = "rtsp://" + opt.host + ":" + std::to_string(opt.port);
 
     // ---- 1) OPTIONS ----
     Link ctrl;
-    if (!ctrl.connectTo(opt.host, opt.port, "RTSP 控制通道", &err)) {
+    if (!ctrl.connectTo(opt.host, opt.port, "RTSP control channel", &err)) {
         std::fprintf(stderr, "[phone] %s\n", err.c_str());
         return 1;
     }
@@ -659,7 +659,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "[phone] %s\n", err.c_str());
         return 1;
     }
-    std::printf("[phone] OPTIONS → %d %s（Public: %s）\n", resp.status, resp.reason.c_str(),
+    std::printf("[phone] OPTIONS → %d %s (Public: %s)\n", resp.status, resp.reason.c_str(),
                 resp.header("Public").substr(0, 40).c_str());
     if (resp.status != 200) return 1;
 
@@ -671,18 +671,18 @@ int main(int argc, char** argv)
     {
         auto root = core::bplist::parse(resp.body.data(), resp.body.size());
         const std::string name = root ? core::bplist::strOf(core::bplist::dictGet(root, "name")) : "";
-        std::printf("[phone] GET /info → %d，设备名 \"%s\"，%zu 字节 bplist\n",
+        std::printf("[phone] GET /info → %d, device name \"%s\", %zu bytes of bplist\n",
                     resp.status, name.c_str(), resp.body.size());
     }
 
-    // ---- 3) POST /pair-setup（SRP-6a，PIN 3939）----
-    std::printf("[phone] —— pair-setup（PIN %s）——\n", opt.pin.c_str());
+    // ---- 3) POST /pair-setup (SRP-6a, PIN 3939) ----
+    std::printf("[phone] -- pair-setup (PIN %s) --\n", opt.pin.c_str());
     const std::string kTlv = "application/pairing+tlv8";
 
     uint8_t cpub[32] = {};
     EVP_PKEY* cpriv = allplay::phone::genEd25519(cpub);
     if (!cpriv) {
-        std::fprintf(stderr, "[phone] 生成 Ed25519 密钥失败\n");
+        std::fprintf(stderr, "[phone] failed to generate Ed25519 key\n");
         return 1;
     }
 
@@ -700,7 +700,7 @@ int main(int argc, char** argv)
         const auto* B    = core::crypto::tlv8Get(items, T_PUBLIC_KEY);
         const auto* salt = core::crypto::tlv8Get(items, T_SALT);
         if (resp.status != 200 || !B || !salt) {
-            std::fprintf(stderr, "[phone] M2 异常：status=%d B=%p salt=%p\n",
+            std::fprintf(stderr, "[phone] M2 error: status=%d B=%p salt=%p\n",
                          resp.status, (const void*)B, (const void*)salt);
             return 1;
         }
@@ -720,10 +720,10 @@ int main(int argc, char** argv)
         const auto* st4 = core::crypto::tlv8Get(it4, T_STATE);
         const auto* M2  = core::crypto::tlv8Get(it4, T_PROOF);
         if (!st4 || st4->front() != 4 || !M2 || !phone.checkM2(*M2)) {
-            std::fprintf(stderr, "[phone] SRP 失败：M4 校验不过（PIN 错？）\n");
+            std::fprintf(stderr, "[phone] SRP failed: M4 verification failed (wrong PIN?)\n");
             return 1;
         }
-        std::printf("[phone] SRP 通过（M4 校验 OK）\n");
+        std::printf("[phone] SRP passed (M4 verification OK)\n");
         pairSessionK = phone.K;
         pairEncKey = hkdf(pairSessionK, "Pair-Setup-Encrypt-Salt", "Pair-Setup-Encrypt-Info");
 
@@ -757,7 +757,7 @@ int main(int argc, char** argv)
                                                core::crypto::nonceLabel("PS-Msg06"),
                                                nullptr, 0, enc6->data(), enc6->size(),
                                                &accInnerBytes)) {
-            std::fprintf(stderr, "[phone] M6 解密失败（宿主没有 MFi 身份？identity/ 装了吗）\n");
+            std::fprintf(stderr, "[phone] M6 decryption failed (host has no MFi identity? is identity/ installed?)\n");
             return 1;
         }
         auto accInner = core::crypto::tlv8Decode(accInnerBytes.data(), accInnerBytes.size());
@@ -765,26 +765,26 @@ int main(int argc, char** argv)
         const auto* apk = core::crypto::tlv8Get(accInner, T_PUBLIC_KEY);
         const auto* asg = core::crypto::tlv8Get(accInner, T_SIGNATURE);
         if (!aid || !apk || !asg) {
-            std::fprintf(stderr, "[phone] M6 内层缺字段\n");
+            std::fprintf(stderr, "[phone] M6 inner payload is missing fields\n");
             return 1;
         }
-        // 验宿主的长期签名 —— 这一步是在验"对面真的是那个刚生成的身份"，不是走过场
+        // Verify the host's long-term signature -- this proves "the peer really is the identity just generated", not a formality
         auto aSignKey = hkdf(pairSessionK, "Pair-Setup-Accessory-Sign-Salt",
                              "Pair-Setup-Accessory-Sign-Info");
         std::vector<uint8_t> aData = aSignKey;
         aData.insert(aData.end(), aid->begin(), aid->end());
         aData.insert(aData.end(), apk->begin(), apk->end());
         if (!core::crypto::ed25519Verify(apk->data(), aData.data(), aData.size(), asg->data())) {
-            std::fprintf(stderr, "[phone] M6 宿主签名验不过\n");
+            std::fprintf(stderr, "[phone] M6 host signature verification failed\n");
             return 1;
         }
         accId  = std::string(aid->begin(), aid->end());
         accPub = *apk;
-        std::printf("[phone] M6 OK：宿主 \"%s\"，公钥已验签\n", accId.c_str());
+        std::printf("[phone] M6 OK: host \"%s\", public key verified\n", accId.c_str());
     }
 
     // ---- 4) POST /pair-verify ----
-    std::printf("[phone] —— pair-verify ——\n");
+    std::printf("[phone] -- pair-verify --\n");
     std::vector<uint8_t> shared;
     {
         auto eph = core::crypto::x25519Generate();
@@ -800,35 +800,35 @@ int main(int argc, char** argv)
         const auto* apub = core::crypto::tlv8Get(items, T_PUBLIC_KEY);
         const auto* enc  = core::crypto::tlv8Get(items, T_ENCRYPTED_DATA);
         if (resp.status != 200 || !apub || apub->size() != 32 || !enc) {
-            std::fprintf(stderr, "[phone] PV-M2 异常（status=%d）\n", resp.status);
+            std::fprintf(stderr, "[phone] PV-M2 error (status=%d)\n", resp.status);
             return 1;
         }
         shared = core::crypto::x25519Shared(eph.priv.data(), apub->data());
         if (shared.empty()) {
-            std::fprintf(stderr, "[phone] X25519 共享密钥算不出来\n");
+            std::fprintf(stderr, "[phone] could not compute the X25519 shared secret\n");
             return 1;
         }
         auto pvKey = hkdf(shared, "Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info");
         std::vector<uint8_t> innerBytes;
         if (!core::crypto::chachaOpen(pvKey.data(), core::crypto::nonceLabel("PV-Msg02"),
                                       nullptr, 0, enc->data(), enc->size(), &innerBytes)) {
-            std::fprintf(stderr, "[phone] PV-M2 解密失败\n");
+            std::fprintf(stderr, "[phone] PV-M2 decryption failed\n");
             return 1;
         }
         auto inner = core::crypto::tlv8Decode(innerBytes.data(), innerBytes.size());
         const auto* aid = core::crypto::tlv8Get(inner, T_IDENTIFIER);
         const auto* asg = core::crypto::tlv8Get(inner, T_SIGNATURE);
         if (!aid || !asg) {
-            std::fprintf(stderr, "[phone] PV-M2 内层缺字段\n");
+            std::fprintf(stderr, "[phone] PV-M2 inner payload is missing fields\n");
             return 1;
         }
-        // 签名覆盖：宿主临时公钥 ‖ 宿主 pi ‖ 我方临时公钥
+        // Signature covers: host ephemeral public key ‖ host pi ‖ our ephemeral public key
         std::vector<uint8_t> sigData(apub->begin(), apub->end());
         sigData.insert(sigData.end(), aid->begin(), aid->end());
         sigData.insert(sigData.end(), eph.pub.begin(), eph.pub.end());
         if (!core::crypto::ed25519Verify(accPub.data(), sigData.data(), sigData.size(),
                                          asg->data())) {
-            std::fprintf(stderr, "[phone] PV-M2 宿主临时签名验不过\n");
+            std::fprintf(stderr, "[phone] PV-M2 host ephemeral signature verification failed\n");
             return 1;
         }
 
@@ -851,61 +851,61 @@ int main(int argc, char** argv)
         auto it4 = core::crypto::tlv8Decode(resp.body.data(), resp.body.size());
         const auto* st4 = core::crypto::tlv8Get(it4, T_STATE);
         if (!st4 || st4->front() != 4) {
-            std::fprintf(stderr, "[phone] PV-M4 不是 STATE 4 —— 宿主不认这个 controller"
-                                 "（PairingStore 里没有？）\n");
+            std::fprintf(stderr, "[phone] PV-M4 is not STATE 4 -- the host does not recognize this controller "
+                                 "(not in PairingStore?)\n");
             return 1;
         }
-        std::printf("[phone] PV-M4 OK —— 共享密钥已建立，控制通道转入加密\n");
+        std::printf("[phone] PV-M4 OK -- shared secret established, control channel switching to encryption\n");
     }
 
-    // ---- 切换到加密控制通道 ----
-    // 服务端（core/airplay/session.cpp:329）：readKey = "Control-Write-…"（解密入站）、
-    // writeKey = "Control-Read-…"（加密出站）——**命名与"谁读谁写"是反的**。
-    // 所以手机侧：解入站用 "Control-Read-…"（宿主写出来的），加出站用 "Control-Write-…"。
-    // 这一对很容易搞反，且搞反的症状是"PV-M4 之后所有请求都没响应"。
+    // ---- Switch to the encrypted control channel ----
+    // Server (core/airplay/session.cpp:329): readKey = "Control-Write-…" (decrypts inbound),
+    // writeKey = "Control-Read-…" (encrypts outbound) -- **the naming is the reverse of "who reads/writes"**.
+    // So on the phone side: decrypt inbound with "Control-Read-…" (what the host writes), encrypt outbound with "Control-Write-…".
+    // This pair is easy to swap, and the symptom is "no response to any request after PV-M4".
     const auto ctrlIn  = hkdf(shared, "Control-Salt", "Control-Read-Encryption-Key");
     const auto ctrlOut = hkdf(shared, "Control-Salt", "Control-Write-Encryption-Key");
     rtsp.enableCipher(std::make_unique<core::airplay::ControlCipher>(
-        ctrlIn.data(),    // 解密入站（宿主写出来的）
-        ctrlOut.data())); // 加密出站（宿主读的）
+        ctrlIn.data(),    // decrypt inbound (what the host writes)
+        ctrlOut.data())); // encrypt outbound (what the host reads)
     {
-        // 立刻发一条加密请求验证方向对不对（错了会卡到超时）
+        // immediately send an encrypted request to verify the direction (a mistake hangs until timeout)
         Response probe;
         if (!rtsp.request("OPTIONS", baseUri + "/", "", {}, &probe, &err)) {
-            std::fprintf(stderr, "[phone] 加密通道试探失败：%s\n", err.c_str());
+            std::fprintf(stderr, "[phone] encrypted channel probe failed: %s\n", err.c_str());
             return 1;
         }
-        std::printf("[phone] 加密控制通道可用（OPTIONS → %d）\n", probe.status);
+        std::printf("[phone] encrypted control channel works (OPTIONS → %d)\n", probe.status);
     }
 
-    // ---- 5) SETUP 两批 ----
-    // 音频素材先读好：读不出来就别在 SETUP 里建音频流了（免得宿主白开一路 UDP）
+    // ---- 5) SETUP in two batches ----
+    // Read the audio material up front: if it can't be read, don't create an audio stream in SETUP (spares the host opening a useless UDP path)
     AacFrames aac;
     if (!opt.aac.empty()) {
         if (!readAdts(opt.aac, &aac)) {
-            std::fprintf(stderr, "[phone] %s 里没找到 ADTS 帧（用 ffmpeg -i x.wav -c:a aac -f adts x.aac 造）\n",
+            std::fprintf(stderr, "[phone] no ADTS frames found in %s (create one with ffmpeg -i x.wav -c:a aac -f adts x.aac)\n",
                          opt.aac.c_str());
             return 1;
         }
         if (aac.freqIndex != 3 || aac.channels != 2) {
-            std::fprintf(stderr, "[phone] %s 是 %dHz/%dch，得是 48000Hz 立体声"
-                                 "（宿主按 0x800000 协商，对不上会变噪声）\n",
+            std::fprintf(stderr, "[phone] %s is %dHz/%dch but must be 48000Hz stereo "
+                                 "(the host negotiates 0x800000; a mismatch turns into noise)\n",
                          opt.aac.c_str(),
                          aac.freqIndex == 3 ? 48000 : (aac.freqIndex == 4 ? 44100 : -1),
                          aac.channels);
             return 1;
         }
-        std::printf("[phone] 音频：%zu 个 AAC 帧（48kHz 立体声）\n", aac.frames.size());
+        std::printf("[phone] audio: %zu AAC frames (48kHz stereo)\n", aac.frames.size());
     }
     const bool wantAudio = !aac.frames.empty();
 
     uint16_t eventPort = 0, dataPort = 0, audioPort = 0;
     const uint64_t scid = 1234;
-    // 音频用**另一个** scid：密钥是从 scid 派生的，复用就等于两路流同一把钥匙
+    // Use **another** scid for audio: keys are derived from the scid, so reusing it would give both streams the same key
     const uint64_t audioScid = 5678;
     {
-        // 第一批：参数协商（无 streams）。真实 iPhone 会带 deviceID/features 等，
-        // 宿主只关心 keepAliveLowPower。
+        // First batch: parameter negotiation (no streams). A real iPhone sends deviceID/features etc.,
+        // but the host only cares about keepAliveLowPower.
         auto b1 = core::bplist::dict({
             {"deviceID", core::bplist::str("AA:BB:CC:DD:EE:FF")},
             {"sessionID", core::bplist::u(1)},
@@ -922,13 +922,13 @@ int main(int argc, char** argv)
                     (unsigned long long)core::bplist::uintOf(
                         core::bplist::dictGet(root, "timingPort")));
         if (!eventPort) {
-            std::fprintf(stderr, "[phone] 宿主没给 eventPort\n");
+            std::fprintf(stderr, "[phone] host did not provide eventPort\n");
             return 1;
         }
 
-        // 第二批：建屏幕流（type 110）+ 可选音频流（type 100）。
-        // audioFormat 0x800000 = AAC-LC 48kHz 立体声（core/airplay/session.cpp:56 的
-        // kAac48）。给了 --aac 才带，不带就不建 —— 宿主那边 audio_ 为空也不会建。
+        // Second batch: create the screen stream (type 110) + optional audio stream (type 100).
+        // audioFormat 0x800000 = AAC-LC 48kHz stereo (kAac48 in core/airplay/session.cpp:56).
+        // Only include it when --aac is given; without it, no stream is created -- and the host won't create one when audio_ is empty either.
         std::vector<core::bplist::Ptr> streamList = {
             core::bplist::dict({
                 {"type", core::bplist::u(110)},
@@ -950,8 +950,8 @@ int main(int argc, char** argv)
         }
         auto root2 = core::bplist::parse(resp.body.data(), resp.body.size());
         auto streams = core::bplist::dictGet(root2, "streams");
-        // 按 **type** 认，别按 streamConnectionID：宿主只给音频流回 streamConnectionID，
-        // 屏幕流的响应里没有这个键（见 core/airplay/session.cpp:383-402）。
+        // Identify by **type**, not streamConnectionID: the host only returns streamConnectionID for the audio stream,
+        // and the screen stream's response has no such key (see core/airplay/session.cpp:383-402).
         for (size_t i = 0;; ++i) {
             auto s = core::bplist::arrGet(streams, i);
             if (!s) break;
@@ -960,17 +960,17 @@ int main(int argc, char** argv)
             if (type == 110)                        dataPort  = dp;
             else if (type >= 100 && type <= 102)    audioPort = dp;
         }
-        std::printf("[phone] SETUP#2 → 屏幕流 dataPort=%u（scid=%llu）\n", dataPort,
+        std::printf("[phone] SETUP#2 → screen stream dataPort=%u (scid=%llu)\n", dataPort,
                     (unsigned long long)scid);
         if (!dataPort) {
-            std::fprintf(stderr, "[phone] 宿主没给屏幕流 dataPort\n");
+            std::fprintf(stderr, "[phone] host did not provide a screen-stream dataPort\n");
             return 1;
         }
         if (wantAudio) {
-            std::printf("[phone] SETUP#2 → 音频流 dataPort=%u（scid=%llu）\n", audioPort,
+            std::printf("[phone] SETUP#2 → audio stream dataPort=%u (scid=%llu)\n", audioPort,
                         (unsigned long long)audioScid);
             if (!audioPort) {
-                std::fprintf(stderr, "[phone] 宿主没给音频流 dataPort（宿主是不是 --no-audio？）\n");
+                std::fprintf(stderr, "[phone] host did not provide an audio-stream dataPort (did the host use --no-audio?)\n");
                 return 1;
             }
         }
@@ -984,30 +984,30 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "[phone] %s\n", err.c_str());
             return 1;
         }
-        std::printf("[phone] RECORD → %d（宿主此刻应切到视频面）\n", resp.status);
+        std::printf("[phone] RECORD → %d (the host should switch to the video surface now)\n", resp.status);
     }
 
-    // 故意空等：让宿主停在"已切视频面、还没有任何新画面"的窗口里。
-    // 这时如果有上一场会话的残留帧被画出来，就是 sdl_video_sink 的尾巴帧保护没生效。
+    // Deliberately idle: leave the host in the window where "the video surface is active but no new picture yet".
+    // If a stale frame from the previous session gets drawn here, sdl_video_sink's tail-frame guard isn't working.
     if (opt.videoDelayMs > 0) {
-        std::printf("[phone] 推流前空等 %d ms（查视频面空窗）\n", opt.videoDelayMs);
+        std::printf("[phone] idling %d ms before streaming (checking the video-surface gap)\n", opt.videoDelayMs);
         std::fflush(stdout);
         std::this_thread::sleep_for(std::chrono::milliseconds(opt.videoDelayMs));
     }
 
-    // ---- 7) 连 dataPort 推流 ----
+    // ---- 7) Connect to dataPort and stream ----
     std::atomic<bool> touchStop{false};
     std::atomic<int>  touchDowns{0};
     std::thread touchThread;
     if (!opt.noTouch && eventPort) {
-        // 事件通道要共享密钥 + 分辨率（宿主用它把归一化坐标换成像素）。
-        // 分辨率用宿主协商的那套（--screen），这里按 1280x720 报 —— 只是打印时的换算基准。
+        // The event channel needs the shared secret + resolution (the host uses it to turn normalized coords into pixels).
+        // Use the resolution the host negotiated (--screen); report 1280x720 here -- it's only the base for printing conversions.
         touchThread = std::thread(touchReader, opt.host, eventPort, shared, 1280, 720,
                                  &touchStop, &touchDowns);
     }
 
     Link screen;
-    if (!screen.connectTo(opt.host, dataPort, "屏幕流", &err)) {
+    if (!screen.connectTo(opt.host, dataPort, "screen stream", &err)) {
         std::fprintf(stderr, "[phone] %s\n", err.c_str());
         return 1;
     }
@@ -1015,9 +1015,9 @@ int main(int argc, char** argv)
     auto streamKey = core::crypto::hkdfSha512(shared, "DataStream-Salt" + std::to_string(scid),
                                               "DataStream-Output-Encryption-Key", 32);
 
-    // ---- 音频线程：RTP over UDP，与屏幕流**同时**跑 ----
-    // wire = [12B RTP 头][密文][16B tag][8B nonce 尾]，AAD = 头[4..12]（timestamp+SSRC）。
-    // 与 core/airplay/audio_stream.cpp 的解析严格对侧。
+    // ---- Audio thread: RTP over UDP, runs **concurrently** with the screen stream ----
+    // wire = [12B RTP header][ciphertext][16B tag][8B nonce tail], AAD = header[4..12] (timestamp+SSRC).
+    // Strictly the mirror of parsing in core/airplay/audio_stream.cpp.
     std::atomic<bool>   audioStop{false};
     std::atomic<size_t> audioSent{0};
     std::thread audioThread;
@@ -1026,7 +1026,7 @@ int main(int argc, char** argv)
             UdpSender udp;
             std::string aerr;
             if (!udp.openTo(opt.host, audioPort, &aerr)) {
-                std::fprintf(stderr, "[phone] 音频：%s\n", aerr.c_str());
+                std::fprintf(stderr, "[phone] audio: %s\n", aerr.c_str());
                 return;
             }
             const auto akey = core::crypto::hkdfSha512(
@@ -1034,10 +1034,10 @@ int main(int argc, char** argv)
                 "DataStream-Output-Encryption-Key", 32);
 
             constexpr uint32_t kRate = 48000;
-            constexpr uint32_t kFrameSamples = 1024;   // AAC-LC 一帧固定 1024 样本
+            constexpr uint32_t kFrameSamples = 1024;   // one AAC-LC frame is fixed at 1024 samples
             const auto     t0a = std::chrono::steady_clock::now();
-            uint64_t       counter = 0;    // 加密包计数器（nonce）
-            uint32_t       ts      = 0;    // RTP 时间戳（按 48kHz 采样数走）
+            uint64_t       counter = 0;    // encrypted-packet counter (nonce)
+            uint32_t       ts      = 0;    // RTP timestamp (advances by 48kHz sample count)
             uint16_t       seq     = 0;
             size_t         idx     = 0;
             size_t         n       = 0;
@@ -1064,7 +1064,7 @@ int main(int argc, char** argv)
                                                        f.data(), f.size());
                 std::vector<uint8_t> wire(rtp.begin(), rtp.end());
                 wire.insert(wire.end(), sealed.begin(), sealed.end());
-                wire.insert(wire.end(), nonce.begin() + 4, nonce.end());   // 尾部 8B nonce
+                wire.insert(wire.end(), nonce.begin() + 4, nonce.end());   // trailing 8B nonce
 
                 if (!udp.send(wire.data(), wire.size())) break;
 
@@ -1072,8 +1072,8 @@ int main(int argc, char** argv)
                 ts += kFrameSamples;
                 audioSent.store(n);
 
-                // 素材放完就从头来，一直放到主线程喊停（视频推完了）或 --seconds 到点。
-                // 短素材（几秒）配长视频时这样才不会中途没声。
+                // Loop the material when it runs out, until the main thread stops it (video done) or --seconds elapses.
+                // With short material (a few seconds) against a long video, this avoids silence midway.
                 if (idx >= aac.frames.size()) idx = 0;
                 if (audioStop.load()) break;
                 if (opt.seconds > 0 &&
@@ -1083,9 +1083,9 @@ int main(int argc, char** argv)
         });
     }
 
-    // 配置帧：明文，opcode 1，body = "avcC" + codecData。
-    // **必须在任何视频帧之前**：core 的 configured_ 在此之前为假，视频帧会被整段丢掉
-    // （症状就是"一切正常但黑屏"）。
+    // Config frame: plaintext, opcode 1, body = "avcC" + codecData.
+    // **Must come before any video frame**: core's configured_ is false until then and video frames would be dropped entirely
+    // (the symptom is "everything looks fine but the screen is black").
     {
         std::vector<uint8_t> body = {'a', 'v', 'c', 'C'};
         body.insert(body.end(), codecData.begin(), codecData.end());
@@ -1093,17 +1093,17 @@ int main(int argc, char** argv)
         std::vector<uint8_t> wire = header;
         wire.insert(wire.end(), body.begin(), body.end());
         if (!screen.writeAll(wire.data(), wire.size())) {
-            std::fprintf(stderr, "[phone] 发配置帧失败\n");
+            std::fprintf(stderr, "[phone] failed to send the config frame\n");
             return 1;
         }
-        std::printf("[phone] 已发配置帧（%zu 字节 codecData，明文）\n", codecData.size());
+        std::printf("[phone] sent config frame (%zu bytes of codecData, plaintext)\n", codecData.size());
     }
 
-    std::printf("[phone] 开始推流：%d fps%s\n", opt.fps, opt.loop ? "，循环" : "");
+    std::printf("[phone] starting stream: %d fps%s\n", opt.fps, opt.loop ? ", looping" : "");
     std::fflush(stdout);
 
     const auto t0 = std::chrono::steady_clock::now();
-    uint64_t counter = 0;      // 加密帧的 nonce 计数器：**只对加密帧递增**
+    uint64_t counter = 0;      // nonce counter for encrypted frames: **incremented only for encrypted frames**
     size_t   sent = 0;
     size_t   idx = 0;
     bool     ok = true;
@@ -1123,7 +1123,7 @@ int main(int argc, char** argv)
         std::vector<uint8_t> wire = header;
         wire.insert(wire.end(), sealed.begin(), sealed.end());
         if (!screen.writeAll(wire.data(), wire.size())) {
-            std::fprintf(stderr, "[phone] 推流中断（第 %zu 帧）：宿主断开了\n", sent);
+            std::fprintf(stderr, "[phone] streaming interrupted (frame %zu): host disconnected\n", sent);
             ok = false;
             break;
         }
@@ -1136,10 +1136,10 @@ int main(int argc, char** argv)
         if (++idx >= frames.size()) {
             if (!opt.loop) break;
             idx = 0;
-            // 循环时重新推一遍：配置帧不必重发（同名同内容，宿主会去重）
+            // On loop, stream the file again: the config frame needn't be resent (same name and content, the host dedups)
         }
         if (sent % 120 == 0) {
-            std::printf("[phone] 已推 %zu 帧（%llu 加密帧）\n", sent,
+            std::printf("[phone] pushed %zu frames (%llu encrypted)\n", sent,
                         (unsigned long long)counter);
             std::fflush(stdout);
         }
@@ -1147,29 +1147,29 @@ int main(int argc, char** argv)
 
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
-    std::printf("[phone] 推流结束：%zu 帧 / %lld ms（%.1f fps）\n", sent,
+    std::printf("[phone] streaming finished: %zu frames / %lld ms (%.1f fps)\n", sent,
                 (long long)elapsed,
                 elapsed > 0 ? double(sent) * 1000.0 / double(elapsed) : 0.0);
 
     if (audioThread.joinable()) {
         audioStop.store(true);
         audioThread.join();
-        std::printf("[phone] 音频推流结束：%zu 个 AAC 帧（约 %.1f 秒）\n",
+        std::printf("[phone] audio streaming finished: %zu AAC frames (~%.1f s)\n",
                     audioSent.load(), double(audioSent.load()) * 1024.0 / 48000.0);
     }
 
-    // ---- 触摸观察窗口：宿主此刻还在把 SDL 的输入发过来 ----
+    // ---- Touch observation window: the host is still sending SDL input right now ----
     if (touchThread.joinable()) {
-        std::printf("[phone] 触摸观察中（%.0f 秒）—— 去宿主的窗口里点几下\n", 8.0);
+        std::printf("[phone] observing touch (%.0f s) -- click a few times in the host window\n", 8.0);
         std::fflush(stdout);
         std::this_thread::sleep_for(std::chrono::milliseconds(8000));
         touchStop.store(true);
         touchThread.join();
         const int d = touchDowns.load();
         if (d > 0)
-            std::printf("[phone] ✅ 收到 %d 次按下事件 —— 宿主 → HID → 加密 → 事件通道 全通\n", d);
+            std::printf("[phone] ✅ received %d press events -- host → HID → encryption → event channel all working\n", d);
         else
-            std::printf("[phone] ⚠️ 没收到按下事件（没点，或者触摸链路断了）\n");
+            std::printf("[phone] ⚠️ no press events received (not clicked, or the touch path is broken)\n");
     }
 
     if (cpriv) EVP_PKEY_free(cpriv);

@@ -12,14 +12,14 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
- * IBluetooth 的 Android 实现：配对设备枚举 + SPP/RFCOMM。
- * 蓝牙 socket 的 I/O 留在本类（Android 没公开 socket fd），native 经 JNI 下调
- * read/write/close，返回字节数组。
+ * Android implementation of IBluetooth: paired device enumeration + SPP/RFCOMM.
+ * Bluetooth socket I/O stays in this class (Android does not expose the socket fd); native downcalls
+ * read/write/close via JNI, returning byte arrays.
  */
 class BluetoothService {
     private val adapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
 
-    // handle → 连接
+    // handle → connection
     private val sockets = ConcurrentHashMap<Int, BluetoothSocket>()
     private val inStreams = ConcurrentHashMap<Int, InputStream>()
     private val outStreams = ConcurrentHashMap<Int, OutputStream>()
@@ -32,7 +32,7 @@ class BluetoothService {
         return devs.map { "${it.name ?: ""}|${it.address}" }.toTypedArray()
     }
 
-    /// 客户端方向：连手机 SPP 服务，返回 handle（<0 失败）。
+    /// Client side: connect to the phone's SPP service and return a handle (<0 on failure).
     @SuppressLint("MissingPermission")
     fun connectSpp(address: String, uuid: String): Int {
         val dev: BluetoothDevice = adapter?.getRemoteDevice(address) ?: return -1
@@ -41,12 +41,12 @@ class BluetoothService {
             socket.connect()
             register(socket)
         } catch (e: Exception) {
-            Log.w("AllPlay", "connectSpp 失败 ${e.javaClass.simpleName}: ${e.message}")
+            Log.w("AllPlay", "connectSpp failed ${e.javaClass.simpleName}: ${e.message}")
             -1
         }
     }
 
-    /// 服务端方向：注册 SDP 并等手机连入，返回 handle（<0 失败）。
+    /// Server side: register SDP and wait for the phone to connect, returning a handle (<0 on failure).
     @SuppressLint("MissingPermission")
     fun listenSpp(uuid: String, timeoutMs: Int): Int {
         return try {
@@ -58,7 +58,7 @@ class BluetoothService {
         }
     }
 
-    /// native 读：返回 null=断开，空数组=超时，否则数据（≤ maxLen）。
+    /// Native read: null = disconnected, empty array = timeout, otherwise data (≤ maxLen).
     fun read(handle: Int, maxLen: Int, timeoutMs: Int): ByteArray? {
         val q = queues[handle] ?: return null
         val data = q.poll(timeoutMs.toLong(), java.util.concurrent.TimeUnit.MILLISECONDS) ?: return ByteArray(0)
@@ -91,7 +91,7 @@ class BluetoothService {
         outStreams[handle] = output
         queues[handle] = queue
 
-        // 专用读线程：读到的字节放进队列，供 native 侧 read 轮询
+        // Dedicated read thread: put received bytes on a queue for native read to poll
         Thread {
             val buf = ByteArray(4096)
             try {
@@ -102,7 +102,7 @@ class BluetoothService {
                 }
             } catch (_: Exception) {
             } finally {
-                queue.put(ByteArray(0))   // 哨兵：断开
+                queue.put(ByteArray(0))   // sentinel: disconnected
             }
         }.start()
         return handle

@@ -1,14 +1,14 @@
 /**
  * @file   aes_ctr.h
- * @brief  AES-128-CTR（MFi-SAP 签密用）
+ * @brief  AES-128-CTR (used for MFi-SAP signing/ciphering)
  * @author blt
  */
 
 // ============================================================================
-// core/crypto/aes_ctr.h —— AES-128-CTR（MFi-SAP 签密用）
+// core/crypto/aes_ctr.h — AES-128-CTR (used for MFi-SAP signing/ciphering)
 // ============================================================================
-// /auth-setup 里我方签名用 AES-128-CTR 加密（key/iv 由 SHA1("AES-KEY"/"AES-IV"||shared)
-// 派生）。CTR 模式加/解密是同一个操作。
+// In /auth-setup our signature is encrypted with AES-128-CTR (key/iv derived by SHA1("AES-KEY"/"AES-IV"||shared)
+// derived). In CTR mode encryption/decryption are the same operation.
 #pragma once
 
 #include <cstdint>

@@ -1,22 +1,23 @@
 /**
  * @file   launcher.h
- * @brief  启动页（"连接 Apple CarPlay"连接引导页）
+ * @brief  Launcher page (the "Connect to Apple CarPlay" pairing guide)
  * @author blt
  */
 
 // ============================================================================
-// host/launcher.h —— 连接引导页（按 AI IPlay 的设计稿实现，白底黑字）
+// host/launcher.h -- Pairing guide page (implemented from the AI IPlay design, black on white)
 // ============================================================================
-// 版式：
-//   顶栏：AI 方块字标 + AIIPlay + 右侧语言胶囊（EN / 中文）
-//   居中：大标题「连接 Apple CarPlay」+ 副标题
-//   两栏：左边设备蓝牙名称卡片 + 配对提示；右边手机 → 蓝牙 → 中控屏 示意图
-//   底部：取消按钮（深底白字，点了退出程序）
-//   页脚：状态点 + 状态文字（左）· AIIPlay · CarPlay（右）
-// 示意图全部是 SDL 图元现画，不依赖位图素材。
+// Layout:
+//   Top bar: AI square wordmark + AIIPlay + language pill on the right (EN / Chinese)
+//   Center: large title "Connect to Apple CarPlay" + subtitle
+//   Two columns: left = device Bluetooth name card + pairing hint; right = phone -> Bluetooth -> head-unit diagram
+//   Bottom: cancel button (white text on dark background; clicking it exits the program)
+//   Footer: status dot + status text (left) · AIIPlay · CarPlay (right)
+// All diagrams are drawn from SDL primitives at runtime, no bitmap assets needed.
 //
-// 全部坐标写在 1540×850 的设计稿坐标系里，渲染时按 logical size 等比缩放居中
-// —— 换窗口尺寸不用改任何一个数字。字体拿不到时不致命：只画图形不写字。
+// All coordinates are in the 1540x850 design coordinate system; at render time they are scaled
+// proportionally and centered by logical size -- changing the window size touches no numbers.
+// Missing fonts are not fatal: draw shapes only, no text.
 #pragma once
 
 #include "appstate.h"
@@ -31,64 +32,64 @@ namespace allplay {
 
 class Launcher {
 public:
-    /// 建字形。返回 false = 没字体，只画图形。
+    /// Build the glyphs. Returns false = no font, draw shapes only.
     bool init();
 
-    /// 设备蓝牙名称（手机蓝牙列表里看到的那个名字）
+    /// Device Bluetooth name (the name seen in the phone's Bluetooth list)
     void setDeviceName(const std::string& name) { deviceName_ = name; }
 
-    /// 画一帧。nowMs 驱动蓝牙波纹的呼吸和状态文字的省略号。
+    /// Draw one frame. nowMs drives the Bluetooth ripple breathing and the status text ellipsis.
     void draw(SDL_Renderer* r, int winW, int winH, LinkState st, uint64_t nowMs);
 
-    /// 渲染器像素 / 窗口逻辑点 的比值（高 DPI 下是 2）。鼠标事件按逻辑点来，
-    /// 判断点击前要先乘它。调用方每帧更新一次即可。
+    /// Renderer pixels / window logical points ratio (2 on high DPI). Mouse events arrive in logical points,
+    /// so multiply by it before hit-testing. The caller only needs to update it once per frame.
     void setPixelRatio(double s) { pixelRatio_ = s > 0.0 ? s : 1.0; }
 
-    /// 处理一次鼠标事件。返回 true = 用户点了「取消」，调用方应当退出。
-    /// 语言切换在这里自己吃掉（不发出去）。
+    /// Handle one mouse event. Returns true = the user clicked "Cancel"; the caller should exit.
+    /// Language toggles are consumed here (not forwarded).
     bool handleEvent(const SDL_Event& e, int winW, int winH);
 
-    /// 丢掉文字纹理缓存。**SDL_DestroyRenderer 之前必须调用**。
+    /// Drop the text texture cache. **Must be called before SDL_DestroyRenderer**.
     void releaseTextures();
 
 private:
     enum class Lang { Zh, En };
 
     struct Layout {
-        int    w     = 1540;  // 逻辑画布宽（等比自适应，见 logicalW）
+        int    w     = 1540;  // Logical canvas width (proportionally adaptive, see logicalW)
         int    h     = 850;
-        double scale = 1.0;   // 设计稿 → 窗口
-        double ox    = 0.0;   // 居中偏移（窗口坐标）
+        double scale = 1.0;   // Design -> window
+        double ox    = 0.0;   // Centering offset (window coordinates)
         double oy    = 0.0;
-        SDL_Rect lang{};      // 以下都是设计稿坐标
+        SDL_Rect lang{};      // Everything below is in design coordinates
         SDL_Rect cancel{};
     };
-    Layout layoutFor(int winW, int winH) const;   // 用到字号行高，所以是成员函数
+    Layout layoutFor(int winW, int winH) const;   // Uses font size and line height, hence a member function
 
-    /// 把整页画到当前渲染目标（设计稿坐标；调用方负责绑定 2× 纹理并按 kSS 放大）
+    /// Draw the whole page to the current render target (design coordinates; the caller binds the 2x texture and scales by kSS)
     void drawScene(SDL_Renderer* r, const Layout& L, LinkState st, uint64_t nowMs,
                    double rasterScale);
 
-    /// 逻辑画布宽：高度钉在 850，宽屏就往两边长（车机屏常见 2.6:1）。
-    /// 不这么做的话超宽屏会左右各留一大条白边、顶栏/页脚横线只画到 1540。
+    /// Logical canvas width: height is fixed at 850, wide screens grow sideways (head units are often 2.6:1).
+    /// Otherwise an ultrawide screen leaves a large white border on each side and the top/footer rules only reach 1540.
     static int logicalW(int winW, int winH);
 
-    TextRenderer title_;     ///< 大标题
-    TextRenderer body_;      ///< 副标题
-    TextRenderer eyebrow_;   ///< "设备蓝牙名称"
-    TextRenderer device_;    ///< 蓝牙名称
-    TextRenderer hint_;      ///< 配对提示
-    TextRenderer button_;    ///< 取消
-    TextRenderer footer_;    ///< 页脚 / 语言胶囊
+    TextRenderer title_;     ///< Large title
+    TextRenderer body_;      ///< Subtitle
+    TextRenderer eyebrow_;   ///< "Device Bluetooth name"
+    TextRenderer device_;    ///< Bluetooth name
+    TextRenderer hint_;      ///< Pairing hint
+    TextRenderer button_;    ///< Cancel
+    TextRenderer footer_;    ///< Footer / language pill
     TextRenderer brand_;     ///< AIIPlay
-    // 字标不再用文字：顶栏那颗是 drawPlayMark() 画的 C+播放 图标
+    // The wordmark is no longer text: the top-bar one is a C+play icon drawn by drawPlayMark()
 
     std::string deviceName_ = "AllPlay";
     Lang        lang_       = Lang::Zh;
-    int         winW_ = 0, winH_ = 0;   ///< 上一帧的窗口像素（鼠标坐标要按它反算）
-    double      pixelRatio_ = 1.0;      ///< 渲染器像素 / 窗口逻辑点
+    int         winW_ = 0, winH_ = 0;   ///< Window pixels of the previous frame (mouse coordinates are mapped back through it)
+    double      pixelRatio_ = 1.0;      ///< Renderer pixels / window logical points
 
-    // 2× 超采样场景缓存：只在动画/状态变化时重画，其余帧只是贴一张纹理
+    // 2x supersampled scene cache: redrawn only on animation/state changes, other frames just blit a texture
     SDL_Texture* scene_ = nullptr;
     int          sceneW_ = 0, sceneH_ = 0;
     bool         sceneWarned_ = false;

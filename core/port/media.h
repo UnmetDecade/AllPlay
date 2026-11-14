@@ -1,18 +1,18 @@
 /**
  * @file   media.h
- * @brief  视频输出抽象（解码+上屏一体）
+ * @brief  Video output abstraction (decoding + display in one)
  * @author blt
  */
 
 // ============================================================================
-// core/port/media.h —— 视频输出抽象（解码+上屏一体）
+// core/port/media.h — video output abstraction (decoding + display in one)
 // ============================================================================
-// core 只把"解好码的 AnnexB 帧"喂给这个接口，具体怎么解码/渲染由平台决定：
-//   Android = MediaCodec → SurfaceView（硬件解码，csd 用 avcC/hvcC）
-//   桌面    = ffmpeg 解码 → SDL 纹理
+// core feeds "decoded AnnexB frames" into this interface; how decoding/rendering happens is up to the platform:
+//   Android = MediaCodec → SurfaceView (hardware decode, csd uses avcC/hvcC)
+//   desktop = ffmpeg decode → SDL texture
 //
-// ⚠️ 线程：configure()/feedAnnexB() 来自 ScreenStream 线程，而 reset() 来自 RTSP 线程
-//    （/command forceKeyFrame）。实现必须自己加锁，core 不管 —— 详见 docs/architecture.md。
+// ⚠️ Threading: configure()/feedAnnexB() come from the ScreenStream thread, while reset() comes from the RTSP thread
+//    (/command forceKeyFrame). Implementations must lock themselves; core does not — see docs/architecture.md.
 #pragma once
 
 #include <cstddef>
@@ -27,24 +27,24 @@ class IVideoOutput {
 public:
     virtual ~IVideoOutput() = default;
 
-    /// 收到配置帧（avcC/hvcC）后调用；codecData = ISO BMFF avcC/hvcC 记录（不含 fourcc）。
+    /// Called after receiving the config frame (avcC/hvcC); codecData = ISO BMFF avcC/hvcC record (without the fourcc).
     virtual void configure(VideoCodec codec, int width, int height,
                            const std::vector<uint8_t>& codecData) = 0;
 
-    /// 喂一帧 AnnexB（00 00 00 01 前缀的 NALU，可能含多 NALU）。
-    /// 返回 false 表示未能入队（解码器忙/无输入缓冲，帧被丢弃），
-    /// 调用方应重新放闸并等下一个关键帧，避免 P 帧参考链断裂后的花屏累积。
+    /// Feed one AnnexB frame (NALU prefixed with 00 00 00 01, possibly containing multiple NALUs).
+    /// Returning false means it could not be queued (decoder busy/no input buffer, frame dropped);
+    /// the caller should re-gate and wait for the next keyframe, to avoid accumulating corruption after a broken P-frame reference chain.
     virtual bool feedAnnexB(const uint8_t* data, size_t len) = 0;
 
-    /// 关键帧恢复：重置解码器 / 参考链（丢关键帧后由核心调用）。
+    /// Keyframe recovery: reset decoder / reference chain (called by core after a lost keyframe).
     virtual void reset() = 0;
 
-    /// 新 IDR 前 flush 解码器（清参考链，避免场景切换首帧乱码）。
+    /// Flush the decoder before a new IDR (clear the reference chain, avoid a garbled first frame on scene changes).
     virtual void flush() = 0;
 };
 
 // ---------------------------------------------------------------------------
-// 音频输出（CarPlay 音频流 100/101/102，RTP over UDP）
+// Audio output (CarPlay audio streams 100/101/102, RTP over UDP)
 // ---------------------------------------------------------------------------
 enum class AudioCodec { AAC_LC, OPUS, LPCM };
 
@@ -52,13 +52,13 @@ class IAudioOutput {
 public:
     virtual ~IAudioOutput() = default;
 
-    /// 协商好音频格式后调用一次（每次 SETUP 音频流重建）。
+    /// Called once after the audio format is negotiated (on every audio stream SETUP/rebuild).
     virtual void configure(AudioCodec codec, int sampleRate, int channels) = 0;
 
-    /// 喂一个解密后的 RTP 载荷（一帧音频数据）。sample = RTP 时间戳（供重排/时钟）。
+    /// Feed one decrypted RTP payload (one frame of audio data). sample = RTP timestamp (for reordering/clocking).
     virtual void feed(const uint8_t* payload, size_t len, uint32_t sample) = 0;
 
-    /// 流结束/重建时重置。
+    /// Reset when the stream ends/is rebuilt.
     virtual void reset() = 0;
 };
 

@@ -1,15 +1,15 @@
 /**
  * @file   backend_hicar.h
- * @brief  HiCar 后端（占位：接口已就位，协议未实现）
+ * @brief  HiCar backend (placeholder: interface in place, protocol not implemented)
  * @author blt
  */
 
 // ============================================================================
-// core/projection/hicar/backend_hicar.h —— HiCar 占位后端
+// core/projection/hicar/backend_hicar.h - HiCar placeholder backend
 // ============================================================================
-// HiCar 的接入方式还没定（手机侧只认华为自己的发现/认证流程，不能借 CarPlay 的
-// 通道跑）。这个类先满足 IProjectionBackend，让宿主的菜单/注册表不用改；probe()
-// 返回空、connect() 报"未实现"，等协议资料齐了再填。
+// How HiCar integrates is still undecided (the phone side only accepts Huawei's own discovery/auth flow, so it cannot ride on CarPlay's
+// channel). This class satisfies IProjectionBackend for now so the host menu/registry need no changes; probe()
+// returns empty and connect() reports "not implemented" until the protocol docs are available.
 #pragma once
 
 #include "projection/backend.h"

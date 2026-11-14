@@ -1,16 +1,16 @@
 /**
  * @file   server.h
- * @brief  接收端总装（平台无关；依赖注入 PlatformServices）
+ * @brief  Receiver assembly (platform-independent; PlatformServices injected)
  * @author blt
  */
 
 // ============================================================================
-// core/airplay/server.h —— 接收端总装（平台无关；依赖注入 PlatformServices）
+// core/airplay/server.h - Receiver assembly (platform-independent; PlatformServices injected)
 // ============================================================================
-// 组装顺序（对应真机行为）：
-//   选网卡/IP → 取 MAC 当 deviceid → 载入/生成本机身份(Ed25519+pi)
-//   → 建会话(Session) → 起 RTSP 服务器（端口被占自动 +1）→ mDNS 广播 _airplay._tcp
-// M3：Session 实现 pair-setup/verify、auth-setup、SETUP；pair-verify 后给 RTSP 装控制加密。
+// Assembly order (matching real-device behavior):
+//   pick NIC/IP -> take MAC as deviceid -> load/generate local identity (Ed25519+pi)
+//   -> create Session -> start RTSP server (auto +1 if the port is taken) -> mDNS advertise _airplay._tcp
+// M3: Session implements pair-setup/verify, auth-setup, SETUP; control encryption is installed on RTSP after pair-verify.
 #pragma once
 
 #include "airplay/info.h"
@@ -30,22 +30,22 @@ namespace core::airplay {
 
 struct ReceiverConfig {
     std::string name     = "AllPlay";
-    std::string ifname;                     ///< 空 = 自动挑（第一块有 IPv4 的非 lo）
-    /// 显式绑定的本端地址。**空 = 通配**（无线那条路就是这样，靠 mDNS 广播 + 手机自己找）。
-    /// 有线必须给：手机是从 0x4301 里拿到地址直接来连的，绑到通配等于把地址说错。
-    /// 填 NCM 网卡上的链路本地（配 ifname 一起给，链路本地会自动补 %scope）。
+    std::string ifname;                     ///< empty = choose automatically (first non-lo interface with IPv4)
+    /// Explicit local bind address. **Empty = wildcard** (that is how the wireless path works: mDNS advertisement + the phone finds us).
+    /// Required for wired: the phone gets the address from 0x4301 and connects directly; binding to wildcard means advertising the wrong address.
+    /// Fill in the link-local address on the NCM NIC (pass together with ifname; link-local automatically gets %scope appended).
     std::string bindAddr;
-    uint16_t    port     = 7000;            ///< 被占自动 +1，最多试 20 次；0 = 内核选
+    uint16_t    port     = 7000;            ///< auto +1 if taken, up to 20 attempts; 0 = kernel chooses
     int         width    = 1280;
     int         height   = 720;
     int         fps      = 60;
-    std::string stateDir;                   ///< 空 = defaultStateDir()
-    std::string mfiDir   = "identity";      ///< MFi 身份目录（identity.pk8 + certificate.p7b）
-    /// 外部注入的 MFi 身份（鸿蒙 HAP rawfile）。非空时优先于 mfiDir。
+    std::string stateDir;                   ///< empty = defaultStateDir()
+    std::string mfiDir   = "identity";      ///< MFi identity directory (identity.pk8 + certificate.p7b)
+    /// Externally injected MFi identity (HarmonyOS HAP rawfile). Takes precedence over mfiDir when non-null.
     const core::mfi::IMfiIdentity* mfiIdentity = nullptr;
-    std::string btMac;                      ///< 本机蓝牙 MAC（/info bluetoothIDs 用）
-    core::IVideoOutput* video = nullptr;    ///< 视频输出（解码+上屏；空则屏幕流不建）
-    core::IAudioOutput* audio = nullptr;    ///< 音频输出（解码+播放；空则音频流不建）
+    std::string btMac;                      ///< local Bluetooth MAC (for /info bluetoothIDs)
+    core::IVideoOutput* video = nullptr;    ///< video output (decode + display; if null, the screen stream is not created)
+    core::IAudioOutput* audio = nullptr;    ///< audio output (decode + playback; if null, the audio stream is not created)
     bool        enableAvahi = true;
 };
 
@@ -66,31 +66,31 @@ public:
     const std::string&  avahiError() const { return avahiErr_; }
     bool                sessionActive() const { return session_ && session_->sessionActive(); }
 
-    /// 连接中（iPhone 正在配对/协商，尚未到 RECORD）。
+    /// Connecting (the iPhone is pairing/negotiating, RECORD not reached yet).
     bool connecting() const { return session_ && session_->connecting(); }
 
-    /// 发触摸（归一化坐标）到事件通道（M4 HID 回传）。
+    /// Send a touch (normalized coordinates) to the event channel (M4 HID feedback).
     bool sendTouch(const std::vector<TouchPoint>& contacts) {
         return session_ && session_->sendTouch(contacts);
     }
 
-    /// 双通道互斥：接不接新来的连接由组合根说了算（见 RtspServer::setConnectionGate）。
-    /// 必须在 start() 之后调 —— start() 之前还没有 RtspServer，设了也没地方挂。
+    /// Dual-channel exclusion: whether to accept a new connection is decided by the composition root (see RtspServer::setConnectionGate).
+    /// Must be called after start() — before start() there is no RtspServer to attach it to.
     void setConnectionGate(std::function<bool()> g) {
         if (rtsp_) rtsp_->setConnectionGate(std::move(g));
     }
 
-    /// 立即向 iPhone 请求关键帧（回前台 Surface 重建后调用，尽快恢复画面）。
+    /// Request a keyframe from the iPhone immediately (called after the surface is recreated on returning to foreground, to restore the picture promptly).
     void requestKeyFrameNow() {
         if (session_) session_->requestKeyFrameNow();
     }
 
 private:
     ReceiverConfig  cfg_;
-    /// ★ 自己持有一份 PlatformServices（而不是存 start() 参数的地址）。
-    /// Session 比 start() 活得久：它到 SETUP 才第一次用 services_->makeTcpListener
-    /// 去建数据/事件通道，而调用方常传临时对象（host/main.cpp:332）。
-    /// 存参数地址 = 悬垂指针，症状是 SETUP 阶段 SIGSEGV。
+    /// ★ Owns its own PlatformServices copy (rather than storing the address of the start() argument).
+    /// The Session outlives start(): it first uses services_->makeTcpListener at SETUP
+    /// to create the data/event channels, and callers often pass a temporary object (host/main.cpp:332).
+    /// Storing the argument's address = dangling pointer, with SIGSEGV during SETUP as the symptom.
     core::PlatformServices services_;
     DeviceIdentity  identity_;
     DeviceInfo      info_;

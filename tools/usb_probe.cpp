@@ -1,50 +1,50 @@
 // ============================================================================
-// tools/usb_probe.cpp —— 有线 CarPlay 的 USB 侧探针（整条路的第一道验证）
+// tools/usb_probe.cpp -- USB-side probe for wired CarPlay (the first check on the whole path)
 // ============================================================================
-// 有线链路的第一道门是"切配置"：iPhone 插上时是个普通配置，**只有把它切进
-// CarPlay 配置**，才会有 USBMUX(ff/fe/02) + CDC-NCM(02/0d) + Apple 以太网(ff/fd/01)
-// 这几个功能 —— iAP2 走 USBMUX 口，AirPlay 走 NCM 变成的那块网卡。
+// The first gate on the wired path is "switching the configuration": when an iPhone is plugged in it presents an ordinary configuration, and **only once
+// it is switched into the CarPlay configuration** do USBMUX(ff/fe/02) + CDC-NCM(02/0d) + Apple Ethernet(ff/fd/01)
+// appear -- iAP2 runs over the USBMUX port, AirPlay over the NIC that NCM turns into.
 //
-// 切换方式（参照 DiPlay / LIVI 的行为）：对设备发 vendor 请求
-//   bmRequestType=0xC0  bRequest=0x52  wValue=0  wIndex=4   读 1 字节
-// iPhone 收到后会**重新枚举**，新配置里上述接口才出现。配置号随 iPhone 型号变，
-// 所以不能写死，只能按描述符找。
+// How to switch (following DiPlay / LIVI behavior): send the device a vendor request
+//   bmRequestType=0xC0  bRequest=0x52  wValue=0  wIndex=4   read 1 byte
+// On receipt the iPhone **re-enumerates**, and the interfaces above only appear in the new configuration. The config number varies by
+// iPhone model, so it can't be hard-coded; find it by descriptor.
 //
-// **踩过的坑（真机实测）**：光发 vendor 0x52 不够。它只是让 iPhone 重枚举换一套
-// 配置表，但**重枚举之后由主机挑激活哪一个** —— Linux 内核按"哪个配置有驱动能绑"
-// 来挑，结果挑中的是那个通用配置（PTP + USBMUX + Apple 以太网，带 USB 网络共享），
-// 而不是 CarPlay 配置。表现极具迷惑性：`ip -br link` 里**确实多出一块网卡**，
-// 但那是 ipheth 给共享网络建的，媒体面根本不存在。
-// 所以必须自己 `libusb_set_configuration()` 显式选中 CarPlay 那个配置值
-// （DiPlay 也是在 open 之后自己 setConfiguration 的）。
+// **Pitfall (seen on real hardware)**: sending vendor 0x52 alone isn't enough. It only makes the iPhone re-enumerate with a new
+// configuration table, but **after re-enumeration the host picks which one to activate** -- the Linux kernel picks "whichever config has a
+// driver that can bind", so it lands on the generic configuration (PTP + USBMUX + Apple Ethernet, with USB tethering)
+// rather than the CarPlay one. The symptom is very deceptive: `ip -br link` **does show an extra NIC**,
+// but it's the one ipheth created for tethering; the media plane doesn't exist at all.
+// So we must call `libusb_set_configuration()` ourselves to explicitly select the CarPlay config value
+// (DiPlay also calls setConfiguration itself after open).
 //
-// 这个工具只做三件事：枚举、切配置 + 选配置、再看一遍描述符。它**不碰 iAP2、不碰 NCM 数据面**。
-// 价值是把"能不能"从推测变成实测，具体回答三个问题：
-//   ① 切之前 / 切之后，CarPlay 配置到底在不在？（不在 → 有线这条路走不通）
-//   ② 显式选中它之后，Linux 内核认没认出 NCM 网卡？（跑完顺手看 `ip -br link` 与
-//      `journalctl -k`；认出来了，AirPlay 那段就能白拿内核的 TCP/IP，不必自己写 NCM 数据面）
-//   ③ 这块网卡上能不能拿到 IPv6 链路本地地址（AirPlay 要 bind 到它）
+// This tool does three things only: enumerate, switch config + select config, then look at the descriptors again. It **doesn't touch iAP2 or the NCM data plane**.
+// Its value is turning "can we?" from speculation into measurement, answering three questions:
+//   ① Before/after switching, is the CarPlay config actually there? (If not -> the wired path is a dead end)
+//   ② After explicitly selecting it, did the Linux kernel recognize the NCM NIC? (After running, check `ip -br link` and
+//      `journalctl -k`; if it did, the AirPlay part gets the kernel's TCP/IP for free and we needn't write an NCM data plane)
+//   ③ Can we get an IPv6 link-local address on this NIC (AirPlay needs to bind to it)
 //
-// 用法：
-//   usb_probe --list                   只列设备（Apple 的会展开配置/接口/端点）
-//   usb_probe --carplay [--wait 10]    切配置 → 显式选中 CarPlay 配置（最常用）
-//   usb_probe --switch [--wait 10]     只切配置 → 等重枚举 → 再列一遍（不选）
-//   usb_probe --setcfg 6               只显式选某个配置，不发 vendor 请求
-//   usb_probe --dump 1:5               只 dump 指定 bus:addr
-// 选项：
-//   --vid 05ac        厂商号过滤（默认只认 Apple）
-//   --pid 12a8        产品号过滤（默认不限，键盘/集线器会被自动排除）
-//   --any-apple       连键盘/集线器一起列（默认排除，免干扰）
+// Usage:
+//   usb_probe --list                   list devices only (Apple ones expand configs/interfaces/endpoints)
+//   usb_probe --carplay [--wait 10]    switch config -> explicitly select the CarPlay config (most common)
+//   usb_probe --switch [--wait 10]     switch config only -> wait for re-enumeration -> list again (no selection)
+//   usb_probe --setcfg 6               explicitly select a config only, without sending the vendor request
+//   usb_probe --dump 1:5               dump only the given bus:addr
+// Options:
+//   --vid 05ac        vendor ID filter (default: Apple only)
+//   --pid 12a8        product ID filter (default: any; keyboards/hubs are auto-excluded)
+//   --any-apple       include keyboards/hubs (excluded by default to avoid noise)
 //
-// 权限：Linux 下 /dev/bus/usb/* 默认 root 独占（755）。非 root 打开会
-// LIBUSB_ERROR_ACCESS —— 用 sudo 跑，或自己写一条 udev 规则。本工具会直接提示。
+// Permissions: on Linux /dev/bus/usb/* is root-only by default (755). Opening as non-root returns
+// LIBUSB_ERROR_ACCESS -- run with sudo, or write a udev rule. This tool prints a hint.
 //
-// 另一个拦路的：**usbmuxd**。它会被 udev 在每次重枚举时自动拉起，一上来就占用
-// USBMUX 接口（sysfs 里显示 driver=usbfs），此时 set_configuration 会返回 BUSY。
-// 跑之前 `sudo systemctl stop usbmuxd`；要一劳永逸就 `systemctl mask usbmuxd`。
+// Another blocker: **usbmuxd**. udev starts it on every re-enumeration and it immediately grabs
+// the USBMUX interface (sysfs shows driver=usbfs); then set_configuration returns BUSY.
+// Before running, `sudo systemctl stop usbmuxd`; to make it permanent, `systemctl mask usbmuxd`.
 //
-// 一个坑：切配置会重枚举，**老的 handle 立刻失效**，设备路径也会变
-// （bus/addr 不同）。所以切换后必须重新枚举、按 VID/PID 重新找，不能复用旧 handle。
+// One more pitfall: switching config re-enumerates, **the old handle immediately goes stale**, and the device path changes too
+// (different bus/addr). So after switching you must re-enumerate and find it again by VID/PID; never reuse the old handle.
 #include <libusb-1.0/libusb.h>
 
 #include <chrono>
@@ -58,28 +58,28 @@
 namespace {
 
 // ---------------------------------------------------------------------------
-// 常量：Apple 的接口指纹（与 DiPlay 的 IphoneCarPlayConfiguration 对齐）
+// Constants: Apple's interface fingerprint (matching DiPlay's IphoneCarPlayConfiguration)
 // ---------------------------------------------------------------------------
 constexpr uint16_t kAppleVendorId = 0x05ac;
 
-// USBMUX：iAP2 的载体。注意是 ff/fe/02，不是常见的 iAP 接口。
+// USBMUX: the carrier for iAP2. Note it's ff/fe/02, not the usual iAP interface.
 constexpr uint8_t kUsbMuxClass = 0xff;
 constexpr uint8_t kUsbMuxSubclass = 0xfe;
 constexpr uint8_t kUsbMuxProtocol = 0x02;
-// CDC-NCM 控制口：内核 cdc_ncm 认的就是这个。
+// CDC-NCM control interface: what the kernel's cdc_ncm binds to.
 constexpr uint8_t kNcmControlClass = 0x02;
 constexpr uint8_t kNcmControlSubclass = 0x0d;
-// Apple 专有以太网功能：CarPlay 配置的第三块拼图。
+// Apple's proprietary Ethernet function: the third piece of the CarPlay config.
 constexpr uint8_t kAppleEthernetClass = 0xff;
 constexpr uint8_t kAppleEthernetSubclass = 0xfd;
 constexpr uint8_t kAppleEthernetProtocol = 0x01;
 
-// 切配置的 vendor 请求（DiPlay 的取值，来源 LIVI 的固定 commit）
+// Vendor request to switch config (DiPlay's value, sourced from a fixed LIVI commit)
 constexpr uint8_t kCarPlayConfigRequest = 0x52;
 constexpr uint16_t kCarPlayConfigIndex = 0x0004;
 constexpr uint8_t kVendorDeviceIn = 0xc0;
 
-// 这些 Apple 设备不是 iPhone，列出来只会干扰判断（用户这台是苹果键盘 + 键盘上的 Hub）
+// These Apple devices aren't iPhones; listing them only muddies the picture (this user's setup is an Apple keyboard + its hub)
 constexpr uint16_t kAppleKeyboardProduct = 0x024f;
 constexpr uint16_t kAppleHubProduct = 0x1006;
 
@@ -90,29 +90,29 @@ struct Options {
     int         setCfg = -1;       // --setcfg N
     bool        anyApple = false;  // --any-apple
     std::string dump;              // --dump bus:addr
-    int         waitSeconds = 10;  // --wait：等重枚举的秒数
+    int         waitSeconds = 10;  // --wait: seconds to wait for re-enumeration
     uint16_t    vid = kAppleVendorId;
-    int         pid = -1;          // -1 = 不限
+    int         pid = -1;          // -1 = any
 };
 
 void printUsage() {
     std::fprintf(stderr,
-        "用法：\n"
-        "  usb_probe --carplay [--wait 10]    切配置 → 显式选中 CarPlay 配置 → 报结果（最常用）\n"
-        "  usb_probe --switch  [--wait 10]    只发 vendor 0x52 切配置 → 等重枚举 → 再列\n"
-        "  usb_probe --setcfg 6               只显式选某个配置（不发 vendor 请求）\n"
-        "  usb_probe --list                   列出 USB 设备（Apple 的展开配置/接口/端点）\n"
-        "  usb_probe --dump 1:5               只 dump 指定 bus:addr\n"
-        "选项：\n"
-        "  --vid 05ac     厂商号过滤（默认 Apple）\n"
-        "  --pid 12a8     产品号过滤（默认不限）\n"
-        "  --any-apple    连键盘/集线器一起列\n"
-        "跑之前先 `sudo systemctl stop usbmuxd`，否则它占着 USBMUX 接口，setcfg 会 BUSY。\n");
+        "Usage:\n"
+        "  usb_probe --carplay [--wait 10]    switch config → explicitly select the CarPlay config → report results (most common)\n"
+        "  usb_probe --switch  [--wait 10]    only send vendor 0x52 to switch config → wait for re-enumeration → list again\n"
+        "  usb_probe --setcfg 6               only explicitly select a config (no vendor request)\n"
+        "  usb_probe --list                   list USB devices (expanded configs/interfaces/endpoints for Apple)\n"
+        "  usb_probe --dump 1:5               only dump the given bus:addr\n"
+        "Options:\n"
+        "  --vid 05ac     vendor ID filter (default Apple)\n"
+        "  --pid 12a8     product ID filter (default any)\n"
+        "  --any-apple    also list keyboards/hubs\n"
+        "Before running, `sudo systemctl stop usbmuxd`; otherwise it holds the USBMUX interface and setcfg returns BUSY.\n");
 }
 
 // ---------------------------------------------------------------------------
-// 描述符打印：格式对齐 DiPlay 的 describe()，方便两边对着看
-//   "接口号/备用设置:类.子类.协议x端点数"
+// Descriptor printing: format matches DiPlay's describe() so the two can be compared side by side
+//   "interface/alt-setting:class.subclass.protocol x endpoints"
 // ---------------------------------------------------------------------------
 struct ConfigSummary {
     int     id = -1;
@@ -120,8 +120,8 @@ struct ConfigSummary {
     bool    hasCdcNcm = false;
     bool    hasAppleEthernet = false;
     uint8_t usbMuxInterface = 0;
-    /// CarPlay 配置 = USBMUX + 标准 CDC-NCM + Apple 私有以太网，三件套齐活。
-    /// 判据与 platform/posix/usb_libusb.cpp 的 findCarPlayConfig 保持同一套。
+    /// CarPlay config = USBMUX + standard CDC-NCM + Apple private Ethernet, all three present.
+    /// Criterion matches findCarPlayConfig in platform/posix/usb_libusb.cpp.
     bool    carPlay() const { return hasUsbMux && hasCdcNcm && hasAppleEthernet; }
 };
 
@@ -175,11 +175,11 @@ ConfigSummary summarize(const libusb_config_descriptor& cfg) {
 
 void printConfig(const libusb_config_descriptor& cfg) {
     const ConfigSummary s = summarize(cfg);
-    std::printf("    配置 %d：%d 个接口  [usbmux=%s cdc-ncm=%s apple-eth=%s]%s\n",
+    std::printf("    config %d: %d interfaces  [usbmux=%s cdc-ncm=%s apple-eth=%s]%s\n",
                 cfg.bConfigurationValue, cfg.bNumInterfaces,
-                s.hasUsbMux ? "有" : "无", s.hasCdcNcm ? "有" : "无",
-                s.hasAppleEthernet ? "有" : "无",
-                s.carPlay() ? "   <<< CarPlay 配置（内核 cdc_ncm 建网卡）" : "");
+                s.hasUsbMux ? "yes" : "no", s.hasCdcNcm ? "yes" : "no",
+                s.hasAppleEthernet ? "yes" : "no",
+                s.carPlay() ? "   <<< CarPlay config (kernel cdc_ncm creates the NIC)" : "");
     for (int i = 0; i < cfg.bNumInterfaces; ++i) {
         for (int a = 0; a < cfg.interface[i].num_altsetting; ++a) {
             const libusb_interface_descriptor& d = cfg.interface[i].altsetting[a];
@@ -191,18 +191,18 @@ void printConfig(const libusb_config_descriptor& cfg) {
     }
 }
 
-// 打开设备读**全部**配置。iPhone 会同时声明好几个配置，只有一个是 CarPlay。
+// Open the device and read **all** configurations. An iPhone declares several at once, only one of which is CarPlay.
 bool describeDevice(libusb_device* dev, bool verbose) {
     libusb_device_descriptor dd{};
     if (libusb_get_device_descriptor(dev, &dd) != 0) return false;
 
     const uint8_t bus = libusb_get_bus_number(dev);
     const uint8_t addr = libusb_get_device_address(dev);
-    std::printf("  %u:%u  %04x:%04x  %d 个配置\n", bus, addr, dd.idVendor, dd.idProduct,
+    std::printf("  %u:%u  %04x:%04x  %d configs\n", bus, addr, dd.idVendor, dd.idProduct,
                 dd.bNumConfigurations);
     if (!verbose) return true;
 
-    // 设备描述符里能直接读到全部配置（不必 open），读描述符不需要权限。
+    // All configs are readable straight from the device descriptor (no open needed); reading descriptors needs no permission.
     bool anyCarPlay = false;
     for (int c = 0; c < dd.bNumConfigurations; ++c) {
         libusb_config_descriptor* cfg = nullptr;
@@ -212,9 +212,9 @@ bool describeDevice(libusb_device* dev, bool verbose) {
         libusb_free_config_descriptor(cfg);
     }
     if (dd.bNumConfigurations == 0) {
-        std::printf("    （读不到配置描述符）\n");
+        std::printf("    (cannot read config descriptors)\n");
     } else if (!anyCarPlay) {
-        std::printf("    → 没有 CarPlay 配置（USBMUX+NCM+Apple以太网 三件套不全）\n");
+        std::printf("    → no CarPlay config (USBMUX+NCM+Apple Ethernet triple incomplete)\n");
     }
     return true;
 }
@@ -237,7 +237,7 @@ std::vector<libusb_device*> collect(libusb_context* ctx, const Options& opt) {
         libusb_device_descriptor dd{};
         if (libusb_get_device_descriptor(list[i], &dd) != 0) continue;
         if (!isCandidate(dd, opt)) continue;
-        out.push_back(libusb_ref_device(list[i]));  // 自己持引用，list 可以释放
+        out.push_back(libusb_ref_device(list[i]));  // take our own reference so the list can be freed
     }
     libusb_free_device_list(list, 1);
     return out;
@@ -259,20 +259,20 @@ bool parseBusAddr(const std::string& s, uint8_t* bus, uint8_t* addr) {
 
 std::string accessHint(int rc) {
     if (rc == LIBUSB_ERROR_ACCESS) {
-        return "  ← 权限不足：/dev/bus/usb 默认 root 独占，换 sudo 跑，或加一条 udev 规则";
+        return "  ← permission denied: /dev/bus/usb is root-only by default; rerun with sudo or add a udev rule";
     }
     if (rc == LIBUSB_ERROR_NOT_FOUND) {
-        return "  ← 设备已消失（多半是刚刚重枚举了）";
+        return "  ← device has disappeared (probably just re-enumerated)";
     }
     return "";
 }
 
 // ---------------------------------------------------------------------------
-// 切配置：发 vendor 请求 → 等重枚举
+// Switch config: send the vendor request -> wait for re-enumeration
 // ---------------------------------------------------------------------------
 
-// 返回 CarPlay 配置的 bConfigurationValue（USBMUX+NCM+Apple以太网 三件套齐全的那个）。
-// 型号之间配置号不同，所以只能按描述符找，不能写死；没有这样的配置返回 -1。
+// Returns the CarPlay config's bConfigurationValue (the one with USBMUX+NCM+Apple Ethernet all present).
+// The config number differs across models, so find it by descriptor rather than hard-coding; return -1 if none.
 int findCarPlayConfig(libusb_device* dev) {
     libusb_device_descriptor dd{};
     if (libusb_get_device_descriptor(dev, &dd) != 0) return -1;
@@ -290,18 +290,18 @@ int findCarPlayConfig(libusb_device* dev) {
 void describeAll(libusb_context* ctx, const Options& opt, const char* title) {
     std::printf("%s\n", title);
     std::vector<libusb_device*> devs = collect(ctx, opt);
-    if (devs.empty()) std::printf("  （一个都没有 —— 设备还没回来，稍等一下再跑）\n");
+    if (devs.empty()) std::printf("  (none -- the device hasn't come back yet; wait a moment and rerun)\n");
     for (libusb_device* d : devs) describeDevice(d, true);
     releaseAll(devs);
 }
 
-// 发 vendor 0x52 让 iPhone 重枚举。返回 true = 确实观察到重枚举。
-// **它只负责让手机换一套配置表，不负责选中哪一个** —— 见 setActiveConfig 上面的注释。
+// Send vendor 0x52 to make the iPhone re-enumerate. Returns true = re-enumeration actually observed.
+// **It only makes the phone switch to a new configuration table; it doesn't select which one** -- see the comment above setActiveConfig.
 bool requestCarPlayConfig(libusb_context* ctx, const Options& opt) {
     std::vector<libusb_device*> devs = collect(ctx, opt);
     if (devs.empty()) {
-        std::printf("没找到匹配的设备（vid=%04x pid=%s）。iPhone 插好了吗？数据线是数据线吗？\n",
-                    opt.vid, opt.pid < 0 ? "任意" : "指定");
+        std::printf("no matching device found (vid=%04x pid=%s). Is the iPhone plugged in? Is the cable actually a data cable?\n",
+                    opt.vid, opt.pid < 0 ? "any" : "specified");
         return false;
     }
 
@@ -310,32 +310,32 @@ bool requestCarPlayConfig(libusb_context* ctx, const Options& opt) {
     libusb_get_device_descriptor(target, &dd);
     const uint8_t bus = libusb_get_bus_number(target);
     const uint8_t addr = libusb_get_device_address(target);
-    std::printf("目标：%u:%u  %04x:%04x\n", bus, addr, dd.idVendor, dd.idProduct);
+    std::printf("target: %u:%u  %04x:%04x\n", bus, addr, dd.idVendor, dd.idProduct);
 
     libusb_device_handle* handle = nullptr;
     int rc = libusb_open(target, &handle);
     if (rc != 0) {
-        std::printf("打不开设备：%s%s\n", libusb_error_name(rc), accessHint(rc).c_str());
+        std::printf("cannot open device: %s%s\n", libusb_error_name(rc), accessHint(rc).c_str());
         releaseAll(devs);
         return false;
     }
-    releaseAll(devs);  // handle 自己持引用，device 列表可以放了
+    releaseAll(devs);  // the handle holds its own reference; the device list can be freed
 
     uint8_t response = 0;
     rc = libusb_control_transfer(handle, kVendorDeviceIn, kCarPlayConfigRequest, 0,
                                  kCarPlayConfigIndex, &response, sizeof(response), 1000);
-    std::printf("\n发 vendor 0x%02x / index %u：rc=%d", kCarPlayConfigRequest, kCarPlayConfigIndex, rc);
+    std::printf("\nsending vendor 0x%02x / index %u: rc=%d", kCarPlayConfigRequest, kCarPlayConfigIndex, rc);
     if (rc == static_cast<int>(sizeof(response))) {
-        std::printf("（读到 0x%02x）\n", response);
+        std::printf(" (read 0x%02x)\n", response);
     } else {
         std::printf("%s\n", accessHint(rc).c_str());
-        std::printf("  注：有些固件这里会 stall（LIBUSB_ERROR_IO/PIPE），但**重枚举照样发生**，"
-                    "以设备有没有变过为准。\n");
+        std::printf("  Note: some firmware stalls here (LIBUSB_ERROR_IO/PIPE), but **re-enumeration still happens**; "
+                    "go by whether the device changed.\n");
     }
     libusb_close(handle);
 
-    // 等重枚举：老的 (bus,addr) 消失 + 出现同 VID/PID 的新设备，两者都见到才算切成功。
-    std::printf("\n等重枚举（最多 %d 秒）...\n", opt.waitSeconds);
+    // Wait for re-enumeration: old (bus,addr) gone + a new device with the same VID/PID seen; only then is the switch considered successful.
+    std::printf("\nwaiting for re-enumeration (up to %d s)...\n", opt.waitSeconds);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(opt.waitSeconds);
     bool oldGone = false;
     bool freshSeen = false;
@@ -356,104 +356,104 @@ bool requestCarPlayConfig(libusb_context* ctx, const Options& opt) {
     return oldGone && freshSeen;
 }
 
-// 显式选中一个配置值。
-// 为什么非做不可：vendor 0x52 只是让 iPhone 重枚举，**重枚举后激活哪个配置是主机说了算**。
-// Linux 内核挑的是"哪个配置的接口有驱动能绑"，于是挑中带 USB 网络共享的那个通用配置，
-// CarPlay 配置压根没被激活 —— 内核只会用 ipheth 建出一块共享网络的网卡来骗你。
-// DiPlay 同样是自己 setConfiguration 的。
+// Explicitly select a configuration value.
+// Why this is mandatory: vendor 0x52 only makes the iPhone re-enumerate; **which config is activated after re-enumeration is up to the host**.
+// The Linux kernel picks "whichever config has an interface a driver can bind", so it picks the generic config with USB tethering,
+// and the CarPlay config is never activated -- the kernel only builds a tethering NIC via ipheth to fool you.
+// DiPlay likewise calls setConfiguration itself.
 int setActiveConfig(libusb_context* ctx, const Options& opt, int value) {
     std::vector<libusb_device*> devs = collect(ctx, opt);
     if (devs.empty()) {
-        std::printf("没找到设备，没法选配置\n");
+        std::printf("no device found, cannot select a config\n");
         return 1;
     }
     libusb_device* target = devs.front();
     libusb_device_handle* handle = nullptr;
     int rc = libusb_open(target, &handle);
     if (rc != 0) {
-        std::printf("打不开设备：%s%s\n", libusb_error_name(rc), accessHint(rc).c_str());
+        std::printf("cannot open device: %s%s\n", libusb_error_name(rc), accessHint(rc).c_str());
         releaseAll(devs);
         return 1;
     }
     releaseAll(devs);
 
-    // 先让内核驱动让开。USBDEVFS_SETCONFIGURATION 只要**当前配置下任何一个接口**被占着
-    // 就返回 BUSY —— 不区分占用者是谁。实测这台机器上两个占用者：
-    //   · ipheth（内核驱动，绑在 Apple 以太网口上）→ 本函数 detach 掉；它只是 USB 网络共享，
-    //     切完配置内核会自己重新 probe，不用管。
-    //   · usbmuxd / gvfsd-gphoto2（用户态进程）→ 我们 detach 不了，只能让用户先停掉；
-    //     内核日志会写明是谁。这就是下面那段提示的由来。
+    // First make the kernel drivers step aside. USBDEVFS_SETCONFIGURATION returns BUSY as long as **any interface in the current config** is claimed,
+    // regardless of who claims it. Measured on this machine there are two claimants:
+    //   - ipheth (kernel driver, bound to the Apple Ethernet interface) -> detached by this function; it's only USB tethering,
+    //     and the kernel re-probes after switching, so no need to care.
+    //   - usbmuxd / gvfsd-gphoto2 (userspace processes) -> we can't detach them; the user must stop them first;
+    //     the kernel log names them. That's where the hint below comes from.
     int detached[32];
     int nDetached = 0;
     for (int i = 0; i < 32 && nDetached < 32; ++i) {
         if (libusb_kernel_driver_active(handle, i) != 1) continue;
         const int d = libusb_detach_kernel_driver(handle, i);
-        std::printf("  接口 %d 上有内核驱动 → detach：%s\n", i, d == 0 ? "成功" : libusb_error_name(d));
+        std::printf("  interface %d has a kernel driver → detach: %s\n", i, d == 0 ? "success" : libusb_error_name(d));
         if (d == 0) detached[nDetached++] = i;
     }
 
     rc = libusb_set_configuration(handle, value);
     if (rc != 0) {
-        std::printf("set_configuration(%d) 失败：%s\n", value, libusb_error_name(rc));
+        std::printf("set_configuration(%d) failed: %s\n", value, libusb_error_name(rc));
         if (rc == LIBUSB_ERROR_BUSY) {
-            std::printf("  ← 当前配置下有接口被占着。内核驱动本工具已经 detach 过了，"
-                        "那剩下就是用户态进程：\n"
-                        "     sudo systemctl stop usbmuxd      # 每次重枚举 udev 都会把它拉起来，"
-                        "要一劳永逸就 systemctl mask usbmuxd\n"
-                        "     pkill -f gvfsd-gphoto2           # GNOME 的照片导入守护进程，"
-                        "会占住 iPhone 的 PTP 接口\n"
-                        "  到底是谁占的，内核日志里写着：journalctl -k -n 5\n");
+            std::printf("  ← an interface in the current config is claimed. This tool already detached kernel drivers, "
+                        "so the remaining claimants are userspace processes:\n"
+                        "     sudo systemctl stop usbmuxd      # udev restarts it on every re-enumeration; "
+                        "to make it stick, systemctl mask usbmuxd\n"
+                        "     pkill -f gvfsd-gphoto2           # GNOME's photo-import daemon, "
+                        "which holds the iPhone's PTP interface\n"
+                        "  The kernel log says who is holding it: journalctl -k -n 5\n");
         }
         for (int i = 0; i < nDetached; ++i) libusb_attach_kernel_driver(handle, detached[i]);
         libusb_close(handle);
         return 1;
     }
     int active = -1;
-    libusb_get_configuration(handle, &active);  // 回读确认，别只信返回值
-    std::printf("set_configuration(%d) 成功，当前激活配置 = %d\n", value, active);
+    libusb_get_configuration(handle, &active);  // read back to confirm, don't just trust the return value
+    std::printf("set_configuration(%d) succeeded, active config = %d\n", value, active);
     libusb_close(handle);
     return 0;
 }
 
 int doSwitch(libusb_context* ctx, const Options& opt) {
-    describeAll(ctx, opt, "切之前：");
+    describeAll(ctx, opt, "before switching: ");
     const bool ok = requestCarPlayConfig(ctx, opt);
-    std::printf("  %s\n", ok ? "设备重枚举了 ✓" : "没观察到重枚举（可能没切成功）");
-    describeAll(ctx, opt, "\n切之后：");
+    std::printf("  %s\n", ok ? "device re-enumerated ✓" : "no re-enumeration observed (switch may have failed)");
+    describeAll(ctx, opt, "\nafter switching: ");
 
-    std::printf("\n注意：重枚举只说明手机换了一套配置表，**当前激活的是哪一个还得自己选**（用 --carplay）。\n"
-                "接着看内核认没认出 NCM 网卡：\n"
+    std::printf("\nNote: re-enumeration only means the phone switched to a different config table; **which one is active is still up to you to select** (use --carplay).\n"
+                "Then check whether the kernel recognized the NCM NIC:\n"
                 "  ip -br link; ip -br addr; lsusb -t\n"
                 "  journalctl -k -n 30 | grep -E 'ipheth|cdc_ncm|usb 1-'\n");
     return ok ? 0 : 1;
 }
 
-// --carplay：把"能不能进 CarPlay 配置"一次问到底
+// --carplay: answer "can we get into the CarPlay config" end to end in one go
 int doCarPlay(libusb_context* ctx, const Options& opt) {
-    describeAll(ctx, opt, "切之前：");
+    describeAll(ctx, opt, "before switching: ");
     const bool ok = requestCarPlayConfig(ctx, opt);
-    std::printf("  %s\n", ok ? "设备重枚举了 ✓" : "没观察到重枚举（可能没切成功）");
+    std::printf("  %s\n", ok ? "device re-enumerated ✓" : "no re-enumeration observed (switch may have failed)");
 
     std::vector<libusb_device*> devs = collect(ctx, opt);
     if (devs.empty()) {
-        std::printf("\n设备没回来，稍等再跑一次。\n");
+        std::printf("\nthe device hasn't come back; wait a moment and run again.\n");
         return 1;
     }
     const int cp = findCarPlayConfig(devs.front());
     releaseAll(devs);
     if (cp < 0) {
-        std::printf("\n这台 iPhone 没有 CarPlay 配置（USBMUX + CDC-NCM + Apple 以太网 三件套）\n"
-                    "→ 有线这条路走不通。\n");
-        describeAll(ctx, opt, "\n实际描述符：");
+        std::printf("\nthis iPhone has no CarPlay config (the USBMUX + CDC-NCM + Apple Ethernet triple)\n"
+                    "→ the wired path won't work.\n");
+        describeAll(ctx, opt, "\nactual descriptors: ");
         return 1;
     }
-    std::printf("\nCarPlay 配置 = %d（按描述符找的，别写死）\n", cp);
+    std::printf("\nCarPlay config = %d (found by descriptor, don't hard-code)\n", cp);
 
     if (setActiveConfig(ctx, opt, cp) != 0) return 1;
 
-    describeAll(ctx, opt, "\n选中之后：");
-    std::printf("\n现在该有两类网卡：ipheth 那块是共享网络的（还在，无害），"
-                "cdc_ncm 给 CarPlay 建的那块才是媒体面：\n"
+    describeAll(ctx, opt, "\nafter selecting: ");
+    std::printf("\nThere should now be two kinds of NICs: the ipheth one is for USB tethering (still present, harmless); "
+                "the one cdc_ncm creates for CarPlay is the media path:\n"
                 "  ip -br link; lsusb -t; journalctl -k -n 30\n");
     return 0;
 }
@@ -466,7 +466,7 @@ int main(int argc, char** argv) {
         const char* a = argv[i];
         const auto next = [&](const char* what) -> const char* {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "%s 后面要跟一个值\n", what);
+                std::fprintf(stderr, "%s must be followed by a value\n", what);
                 std::exit(2);
             }
             return argv[++i];
@@ -482,7 +482,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(a, "--pid"))        opt.pid = static_cast<int>(std::strtoul(next("--pid"), nullptr, 16));
         else if (!std::strcmp(a, "-h") || !std::strcmp(a, "--help")) { printUsage(); return 0; }
         else {
-            std::fprintf(stderr, "未知参数：%s\n", a);
+            std::fprintf(stderr, "unknown argument: %s\n", a);
             printUsage();
             return 2;
         }
@@ -495,7 +495,7 @@ int main(int argc, char** argv) {
     libusb_context* ctx = nullptr;
     const int rc = libusb_init(&ctx);
     if (rc != 0) {
-        std::fprintf(stderr, "libusb_init 失败：%s\n", libusb_error_name(rc));
+        std::fprintf(stderr, "libusb_init failed: %s\n", libusb_error_name(rc));
         return 1;
     }
     libusb_set_option(ctx, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_WARNING);
@@ -513,7 +513,7 @@ int main(int argc, char** argv) {
             uint8_t bus = 0;
             uint8_t addr = 0;
             if (!parseBusAddr(opt.dump, &bus, &addr)) {
-                std::fprintf(stderr, "--dump 要写成 bus:addr，例如 1:5\n");
+                std::fprintf(stderr, "--dump must be written as bus:addr, e.g. 1:5\n");
                 releaseAll(devs);
                 libusb_exit(ctx);
                 return 2;
@@ -525,9 +525,9 @@ int main(int argc, char** argv) {
                     found = true;
                 }
             }
-            if (!found) std::printf("没有 %u:%u 这个设备（注意切配置后地址会变）\n", bus, addr);
+            if (!found) std::printf("no device at %u:%u (note that the address changes after switching config)\n", bus, addr);
         } else {
-            std::printf("匹配到 %zu 个设备：\n", devs.size());
+            std::printf("matched %zu devices:\n", devs.size());
             for (libusb_device* d : devs) describeDevice(d, true);
         }
         releaseAll(devs);

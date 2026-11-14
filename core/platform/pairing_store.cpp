@@ -53,7 +53,7 @@ std::string readLine(const fs::path& p, bool* ok)
 
 bool writeFile0600(const fs::path& p, const std::string& data)
 {
-    // .string().c_str()：Windows 上 path::value_type 是 wchar_t，fopen 要 char*
+    // .string().c_str(): on Windows path::value_type is wchar_t, but fopen wants char*
     FILE* f = std::fopen(p.string().c_str(), "w");
     if (!f) return false;
     std::error_code ec;

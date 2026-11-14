@@ -1,24 +1,24 @@
 /**
  * @file   phone_crypto.h
- * @brief  手机侧（controller）配对密码学：SRP 客户端 + TLV 常量 + 密钥生成
+ * @brief  Phone-side (controller) pairing crypto: SRP client + TLV constants + key generation
  * @author blt
  */
 
 // ============================================================================
-// tools/phone_crypto.h —— 假手机侧的密码学（m3_test 与 fake_phone 共用）
+// tools/phone_crypto.h -- crypto for the fake-phone side (shared by m3_test and fake_phone)
 // ============================================================================
-// 这里放的是"站在 iPhone 那一侧"才需要的东西，与 core/airplay/session.cpp 的
-// 服务端实现**对称**。之所以让自测（m3_test）和端到端工具（fake_phone）共用同一份：
-//   · 分成两份，SRP 的 N/g/k 或者 PIN 一旦改动就要改两处，漏一处就是"端到端失败但
-//     自测全绿"，最难查的那种。
-//   · 两份实现还会掩盖协议理解的错误 —— 它们会一起错。
+// This holds what you need when "standing on the iPhone side", mirroring the
+// server implementation in core/airplay/session.cpp. m3_test and fake_phone share one copy because:
+//   - Split in two, any change to SRP's N/g/k or the PIN needs edits in both places; miss one and you get
+//     "end-to-end fails but self-tests all green", the hardest kind to debug.
+//   - Two implementations also hide misunderstandings of the protocol -- they go wrong together.
 //
-// 只依赖 core 的 crypto + OpenSSL，不依赖 ffmpeg/SDL。
+// Depends only on core's crypto + OpenSSL, not on ffmpeg/SDL.
 #pragma once
 
 #include "crypto/chacha20poly1305.h"
 #include "crypto/ed25519.h"
-#include "crypto/hkdf.h"   // sha512() 也在这里
+#include "crypto/hkdf.h"   // sha512() lives here too
 #include "crypto/tlv8.h"
 #include "crypto/x25519.h"
 
@@ -36,7 +36,7 @@ namespace allplay::phone {
 
 using core::crypto::Tlv;
 
-// TLV8 的 type 号（与 core/airplay/session.cpp 的匿名命名空间里那组一致）
+// TLV8 type numbers (same set as in the anonymous namespace in core/airplay/session.cpp)
 constexpr uint8_t T_STATE = 0x06, T_PUBLIC_KEY = 0x03, T_SALT = 0x02, T_PROOF = 0x04;
 constexpr uint8_t T_ENCRYPTED_DATA = 0x05, T_IDENTIFIER = 0x01, T_SIGNATURE = 0x0a;
 
@@ -61,7 +61,7 @@ inline std::vector<uint8_t> hex(const char* s)
     return out;
 }
 
-/// SRP-6a 的 3072 位模数 N（lowercase hex）。协议固定值，不是谁生成的。
+/// SRP-6a 3072-bit modulus N (lowercase hex). Fixed by the protocol, not generated.
 inline const char* srpNHex()
 {
     return "ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74"
@@ -78,7 +78,7 @@ inline const char* srpNHex()
            "08e24fa074e5ab3143db5bfce0fd108e4b82d120a93ad2caffffffffffffffff";
 }
 
-/// 生成一对 Ed25519 长期密钥；公钥写进 pub[32]。返回的 EVP_PKEY 由调用方释放。
+/// Generate an Ed25519 long-term key pair; the public key goes into pub[32]. Caller frees the returned EVP_PKEY.
 inline EVP_PKEY* genEd25519(uint8_t pub[32])
 {
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
@@ -91,8 +91,8 @@ inline EVP_PKEY* genEd25519(uint8_t pub[32])
     return k;
 }
 
-/// 手机侧 SRP 客户端：算出 A/M1/K，验 M2。
-/// 对应服务端的 core::crypto::Srp6aServer（core/crypto/srp6a.h）。
+/// Phone-side SRP client: computes A/M1/K and verifies M2.
+/// Counterpart to the server's core::crypto::Srp6aServer (core/crypto/srp6a.h).
 struct SrpPhoneSide {
     BIGNUM *n = nullptr, *g = nullptr, *k = nullptr, *a = nullptr, *A = nullptr;
     std::vector<uint8_t> Apad, M1, K;
@@ -105,7 +105,7 @@ struct SrpPhoneSide {
         g = BN_new();
         BN_set_word(g, 5);
         std::vector<uint8_t> pg(384, 0);
-        pg[383] = 5;                                   // g 补齐到 N 的长度
+        pg[383] = 5;                                   // pad g to the length of N
         std::vector<uint8_t> in = nb;
         in.insert(in.end(), pg.begin(), pg.end());
         auto kh = core::crypto::sha512(in);
@@ -128,11 +128,11 @@ struct SrpPhoneSide {
     SrpPhoneSide(const SrpPhoneSide&) = delete;
     SrpPhoneSide& operator=(const SrpPhoneSide&) = delete;
 
-    /// 用服务端 M2 里的 salt/B 算出证明 M1，同时留下 K 供后续派生会话密钥。
+    /// Compute proof M1 from salt/B in the server's M2, keeping K to derive session keys later.
     bool prove(const std::vector<uint8_t>& salt, const std::vector<uint8_t>& Bpad,
                std::vector<uint8_t>* m1out)
     {
-        // x = SHA512(salt ‖ SHA512("Pair-Setup:" + PIN))；PIN 参与，所以 PIN 错就过不了
+        // x = SHA512(salt ‖ SHA512("Pair-Setup:" + PIN)); PIN is included, so a wrong PIN can't pass
         auto inner = core::crypto::sha512(sb(("Pair-Setup:" + pin).c_str()));
         std::vector<uint8_t> xi = salt;
         xi.insert(xi.end(), inner.begin(), inner.end());
@@ -175,7 +175,7 @@ struct SrpPhoneSide {
         return true;
     }
 
-    /// M2 = SHA512(A ‖ M1 ‖ K)（服务端证明它也算出了同一个 K）
+    /// M2 = SHA512(A ‖ M1 ‖ K) (server proves it derived the same K)
     bool checkM2(const std::vector<uint8_t>& m2)
     {
         std::vector<uint8_t> m2in = Apad;

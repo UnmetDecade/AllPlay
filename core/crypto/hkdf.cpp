@@ -40,14 +40,14 @@ std::vector<uint8_t> hkdfSha512(const uint8_t* ikm, size_t ikmLen,
                                 const uint8_t* info, size_t infoLen,
                                 size_t outLen)
 {
-    // Extract：PRK = HMAC(salt, ikm)；salt 为空 → 64 字节零
+    // Extract: PRK = HMAC(salt, ikm); empty salt → 64 zero bytes
     std::vector<uint8_t> saltv;
     if (saltLen == 0) saltv.assign(64, 0);
     else saltv.assign(salt, salt + saltLen);
     auto prk = hmacSha512(saltv.data(), saltv.size(), ikm, ikmLen);
     if (prk.empty()) return {};
 
-    // Expand：T(i) = HMAC(PRK, T(i-1) || info || counter)
+    // Expand: T(i) = HMAC(PRK, T(i-1) || info || counter)
     std::vector<uint8_t> out;
     out.reserve(outLen);
     std::vector<uint8_t> t;

@@ -1,5 +1,5 @@
 // ============================================================================
-// host/bt_task.cpp —— 蓝牙触发任务（宿主层）
+// host/bt_task.cpp -- Bluetooth trigger task (host layer)
 // ============================================================================
 #include "bt_task.h"
 
@@ -27,22 +27,22 @@ void emit(const std::function<void(const std::string&)>& log, const std::string&
 bool BtTask::start(const core::airplay::Receiver& rx, const BtTaskOptions& o,
                    std::function<void(const std::string&)> log)
 {
-    if (!done_->load()) return false;   // 上一次还在跑，不排队
-    // 上一次的线程跑完了，但 std::thread 仍处于 joinable —— 直接给它赋新线程是
-    // std::terminate（实测症状：自动重连第二/三次触发时进程直接 abort，
-    // `libc++abi: terminating`）。它已经结束，join 是瞬间的。
+    if (!done_->load()) return false;   // Previous run still going, do not queue
+    // The previous thread has finished but std::thread is still joinable -- assigning a new thread to it is
+    // std::terminate (observed symptom: the process aborts on the second/third auto-reconnect trigger,
+    // `libc++abi: terminating`). It has already ended, so join is instantaneous.
     if (thread_.joinable()) thread_.join();
 
-    // —— 参数在这里（调用线程上）全部快照成值 ——
-    // 线程只碰自己 move 进去的东西，绝不回头引用 rx / Options / this。
-    // 这是 stop() 能安全 detach 的前提。
+    // -- All parameters are snapshotted to values here (on the calling thread) --
+    // The thread touches only what it moved in and never references rx / Options / this.
+    // This is the precondition for stop() being able to detach safely.
     core::bt::BtTriggerParams bp;
     bp.deviceName    = o.deviceName;
     bp.deviceAddress = o.deviceAddress;
     bp.serverMode    = o.serverMode;
     bp.serverWaitMs  = 300000;
 
-    // 照 tools/core_selftest.cpp:130-147 的装配搬过来
+    // Wiring copied from tools/core_selftest.cpp:130-147
     auto& c = bp.iap2;
     c.name             = o.name;
     c.model            = "AllPlay1,1";
@@ -62,7 +62,7 @@ bool BtTask::start(const core::airplay::Receiver& rx, const BtTaskOptions& o,
 
     {
         char buf[256];
-        std::snprintf(buf, sizeof buf, "开始触发：btMac=%s ssid=%s ip=%s port=%u",
+        std::snprintf(buf, sizeof buf, "Starting trigger: btMac=%s ssid=%s ip=%s port=%u",
                       c.btMac.c_str(), c.ssid.c_str(),
                       c.ipAddresses.empty() ? "?" : c.ipAddresses[0].c_str(),
                       unsigned(rx.port()));
@@ -71,20 +71,20 @@ bool BtTask::start(const core::airplay::Receiver& rx, const BtTaskOptions& o,
 
     auto transport = allplay::posix::makeBluetooth();
     if (!transport) {
-        emit(log, "平台没有可用的 IBluetooth 实现");
+        emit(log, "No usable IBluetooth implementation on this platform");
         return false;
     }
 
-    auto done = done_;   // shared_ptr 拷贝：线程写标志位时用不着 this
+    auto done = done_;   // shared_ptr copy: the thread does not need this to write the flag
     done->store(false);
-    // 取消旗标：stop() 置位后，runBtTrigger 的轮询循环 100ms 内收工。
+    // Cancel flag: once stop() sets it, runBtTrigger's polling loop exits within 100 ms.
     auto cancel = std::make_shared<std::atomic<bool>>(false);
     cancel_ = cancel;
-    bp.iap2.cancel = cancel.get();   // 指向上面的 shared_ptr，生命周期由闭包兜住
+    bp.iap2.cancel = cancel.get();   // Points into the shared_ptr above; the closure keeps it alive
     thread_ = std::thread(
         [transport = std::move(transport), bp, o, log = std::move(log), done, cancel]() mutable {
             for (int attempt = 1; attempt <= o.retry; ++attempt) {
-                if (cancel->load()) {   // 取消后不再重试
+                if (cancel->load()) {   // No more retries after cancellation
                     done->store(true);
                     return;
                 }
@@ -93,16 +93,16 @@ bool BtTask::start(const core::airplay::Receiver& rx, const BtTaskOptions& o,
                     done->store(true);
                     return;
                 }
-                // iPhone 的 iAP2 SPP 服务在蓝牙 ACL 连上之后才异步打开，单次 connectRFCOMM
-                // 极易太早失败 —— 安卓侧同样整链重试（jni_bridge.cpp:443-455）。
+                // The iPhone's iAP2 SPP service opens asynchronously after the Bluetooth ACL connects, so a single
+                // connectRFCOMM often fails too early -- Android retries the whole chain the same way (jni_bridge.cpp:443-455).
                 if (attempt < o.retry) {
                     char buf[256];
-                    std::snprintf(buf, sizeof buf, "第 %d/%d 次未成（%s），%dms 后重试",
+                    std::snprintf(buf, sizeof buf, "Attempt %d/%d failed (%s), retrying in %dms",
                                   attempt, o.retry, r.error.c_str(), o.retryDelayMs);
                     emit(log, buf);
                     std::this_thread::sleep_for(std::chrono::milliseconds(o.retryDelayMs));
                 } else {
-                    emit(log, "触发失败（已重试 " + std::to_string(o.retry) + " 次）：" + r.error);
+                    emit(log, "Trigger failed (retried " + std::to_string(o.retry) + " times): " + r.error);
                 }
             }
             done->store(true);
@@ -112,15 +112,15 @@ bool BtTask::start(const core::airplay::Receiver& rx, const BtTaskOptions& o,
 
 void BtTask::stop()
 {
-    // 先置取消旗标：runBtTrigger 的 100ms 轮询会看到它并返回，线程随即把 done 置 true。
-    // 这样手机离开后，主循环的重排逻辑能马上再叫一次；不置位的话，0x4301 发出后
-    // 线程会守在旧链路上读一辈子（实测症状：手机拿回来也不进 CarPlay）。
+    // Set the cancel flag first: runBtTrigger's 100 ms poll sees it and returns, then the thread sets done to true.
+    // This lets the main loop's re-scheduling logic trigger again right after the phone leaves; without it, after
+    // 0x4301 is sent the thread sits on the stale link forever (observed symptom: CarPlay does not come up even when the phone is brought back).
     if (cancel_) cancel_->store(true);
-    // 线程已经把 transport / 参数 / 日志回调全部 move 进了自己的闭包，不引用 this，
-    // detach 是安全的 —— RFCOMM 流本来就按"对象生命周期 = 进程"泄漏
-    // （platform/posix/bt_bluez.cpp:582），进程退出时一并收掉。
+    // The thread has moved the transport / parameters / log callback into its own closure and does not reference this,
+    // so detach is safe -- RFCOMM streams already leak on the "object lifetime = process" model
+    // (platform/posix/bt_bluez.cpp:582) and are cleaned up when the process exits.
     //
-    // 注意：std::thread 析构时若仍 joinable 会 std::terminate，所以 detach 不是可选项。
+    // NOTE: std::thread std::terminates if destroyed while still joinable, so detach is not optional.
     if (thread_.joinable()) thread_.detach();
 }
 

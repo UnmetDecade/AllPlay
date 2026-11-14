@@ -1,6 +1,6 @@
 /**
  * @file   plist_xml.cpp
- * @brief  极简 XML plist 的实现
+ * @brief  Implementation of the minimal XML plist
  * @author blt
  */
 
@@ -15,7 +15,7 @@ namespace core::usb {
 namespace {
 
 // ---------------------------------------------------------------------------
-// base64（plist 的 <data> 用 base64；自己写，避免为这点事去啃 EVP 的边界行为）
+// base64 (plist <data> uses base64; hand-rolled to avoid digging into EVP's edge behavior for this)
 // ---------------------------------------------------------------------------
 const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -67,7 +67,7 @@ bool base64Decode(const std::string& in, std::vector<uint8_t>* out)
 }
 
 // ---------------------------------------------------------------------------
-// XML 转义
+// XML escaping
 // ---------------------------------------------------------------------------
 std::string escapeXml(const std::string& s)
 {
@@ -108,7 +108,7 @@ std::string unescapeXml(const std::string& s)
         else if (ent == "apos") out += '\'';
         else if (!ent.empty() && ent[0] == '#') {
             const long cp = std::strtol(ent.c_str() + 1, nullptr, 10);
-            // 只处理 BMP 以内；lockdown 用不到更大的
+            // Only handle within BMP; lockdown needs nothing larger
             if (cp > 0 && cp < 0x10000) {
                 if (cp < 0x80) {
                     out += char(cp);
@@ -122,7 +122,7 @@ std::string unescapeXml(const std::string& s)
                 }
             }
         } else {
-            out += '&';  // 不认识的实体：原样保留，别把数据吃掉
+            out += '&';  // unknown entity: keep as-is, don't swallow the data
             out += ent;
             out += ';';
         }
@@ -132,7 +132,7 @@ std::string unescapeXml(const std::string& s)
 }
 
 // ---------------------------------------------------------------------------
-// 输出
+// Output
 // ---------------------------------------------------------------------------
 void indent(std::string& out, int depth)
 {
@@ -196,7 +196,7 @@ void writeValue(std::string& out, const Plist& v, int depth)
 
         case Plist::Type::Data: {
             const std::string b64 = base64Encode(v.asData());
-            // 按 68 字符折行：跟 Apple 自己输出的形状差不多，diff 起来舒服
+            // Wrap at 68 characters: close to what Apple outputs, easier to diff
             out += "<data>\n";
             for (size_t i = 0; i < b64.size(); i += 68) {
                 indent(out, depth + 1);
@@ -215,7 +215,7 @@ void writeValue(std::string& out, const Plist& v, int depth)
 }
 
 // ---------------------------------------------------------------------------
-// 解析
+// Parsing
 // ---------------------------------------------------------------------------
 struct Cursor {
     const std::string& s;
@@ -231,7 +231,7 @@ struct Cursor {
     {
         while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;
     }
-    /// 从当前位置跳到 c 之后（用于跳过 <?...?> / <!...>）
+    /// Move past c from the current position (used to skip <?...?> / <!...>)
     bool skipPast(char c)
     {
         const size_t p = s.find(c, i);
@@ -239,7 +239,7 @@ struct Cursor {
         i = p + 1;
         return true;
     }
-    /// 跳过开始标签（含属性），停在 '>' 之后；selfClosing 可为空，非空时报告是不是 <x/>
+    /// Skip the start tag (with attributes), stopping after '>'; selfClosing may be null, if non-null reports whether it was <x/>
     bool skipStartTag(bool* selfClosing)
     {
         const size_t gt = s.find('>', i);
@@ -255,7 +255,7 @@ struct Cursor {
         i = gt + 1;
         return true;
     }
-    /// 读到 closeTag 之前的所有文本，并吃掉 closeTag
+    /// Read all text up to closeTag and consume closeTag
     bool readText(const char* closeTag, std::string* out)
     {
         const size_t p = s.find(closeTag, i);
@@ -272,7 +272,7 @@ bool parseDict(Cursor& c, Plist* out, std::string* err)
 {
     bool selfClosing = false;
     if (!c.skipStartTag(&selfClosing)) {
-        *err = "dict 开始标签没闭合";
+        *err = "dict start tag is not closed";
         return false;
     }
     *out = Plist::dict();
@@ -285,13 +285,13 @@ bool parseDict(Cursor& c, Plist* out, std::string* err)
             return true;
         }
         if (!c.startsWith("<key>")) {
-            *err = "dict 里期待 <key>";
+            *err = "Expected <key> inside dict";
             return false;
         }
         c.skipStartTag(nullptr);
         std::string key;
         if (!c.readText("</key>", &key)) {
-            *err = "key 没有闭合";
+            *err = "key is not closed";
             return false;
         }
         c.skipSpace();
@@ -305,7 +305,7 @@ bool parseArray(Cursor& c, Plist* out, std::string* err)
 {
     bool selfClosing = false;
     if (!c.skipStartTag(&selfClosing)) {
-        *err = "array 开始标签没闭合";
+        *err = "array start tag is not closed";
         return false;
     }
     *out = Plist::array();
@@ -327,7 +327,7 @@ bool parseValue(Cursor& c, Plist* out, std::string* err)
 {
     c.skipSpace();
     if (c.eof()) {
-        *err = "XML 意外结束";
+        *err = "Unexpected end of XML";
         return false;
     }
 
@@ -336,13 +336,13 @@ bool parseValue(Cursor& c, Plist* out, std::string* err)
 
     if (c.startsWith("<true")) {
         bool sc = false;
-        if (!c.skipStartTag(&sc)) { *err = "<true> 没闭合"; return false; }
+        if (!c.skipStartTag(&sc)) { *err = "<true> is not closed"; return false; }
         *out = Plist::boolean(true);
         return true;
     }
     if (c.startsWith("<false")) {
         bool sc = false;
-        if (!c.skipStartTag(&sc)) { *err = "<false> 没闭合"; return false; }
+        if (!c.skipStartTag(&sc)) { *err = "<false> is not closed"; return false; }
         *out = Plist::boolean(false);
         return true;
     }
@@ -351,7 +351,7 @@ bool parseValue(Cursor& c, Plist* out, std::string* err)
         const char* open;
         const char* close;
     };
-    // 注意 /integer 要排 /int... 之前？这里没有前缀冲突，直接线性找
+    // NOTE: should /integer come before /int...? No prefix conflict here, so just scan linearly
     static const TextTag kTextTags[] = {
         {"<string", "</string>"}, {"<integer", "</integer>"}, {"<real", "</real>"},
         {"<data", "</data>"},     {"<date", "</date>"},
@@ -360,12 +360,12 @@ bool parseValue(Cursor& c, Plist* out, std::string* err)
         if (!c.startsWith(t.open)) continue;
         bool selfClosing = false;
         if (!c.skipStartTag(&selfClosing)) {
-            *err = std::string(t.open) + " 没闭合";
+            *err = std::string(t.open) + " is not closed";
             return false;
         }
         std::string text;
         if (!selfClosing && !c.readText(t.close, &text)) {
-            *err = std::string(t.close) + " 没找到";
+            *err = std::string(t.close) + " not found";
             return false;
         }
         if (std::strcmp(t.open, "<integer") == 0) {
@@ -375,25 +375,25 @@ bool parseValue(Cursor& c, Plist* out, std::string* err)
         } else if (std::strcmp(t.open, "<data") == 0) {
             std::vector<uint8_t> bin;
             if (!base64Decode(text, &bin)) {
-                *err = "data 不是合法 base64";
+                *err = "data is not valid base64";
                 return false;
             }
             *out = Plist::data(std::move(bin));
         } else {
-            // <string> 与 <date>（date 当字符串收着，我们不往回发）
+            // <string> and <date> (date kept as a string; we never send it back)
             *out = Plist::string(unescapeXml(text));
         }
         return true;
     }
 
-    *err = "不认识的 plist 标签：" + c.s.substr(c.i, 24);
+    *err = "Unknown plist tag: " + c.s.substr(c.i, 24);
     return false;
 }
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 构造
+// Construction
 // ---------------------------------------------------------------------------
 Plist Plist::boolean(bool v) { Plist p; p.type_ = Type::Bool; p.bool_ = v; return p; }
 Plist Plist::integer(int64_t v) { Plist p; p.type_ = Type::Integer; p.int_ = v; return p; }
@@ -404,7 +404,7 @@ Plist Plist::dict() { Plist p; p.type_ = Type::Dict; return p; }
 Plist Plist::array() { Plist p; p.type_ = Type::Array; return p; }
 
 // ---------------------------------------------------------------------------
-// 取值
+// Accessors
 // ---------------------------------------------------------------------------
 bool Plist::asBool(bool def) const
 {
@@ -506,22 +506,22 @@ bool Plist::parse(const std::string& xml, Plist* out, std::string* err)
     c.skipSpace();
     std::string pi;
     while (c.startsWith("<?")) {
-        // 必须找 **"?>"** 两个字符：只找 '?' 的话，从 "<" 往后第一个 '?' 就是 "<?"
-        // 自己的那个，声明永远跳不过去（手机回的 plist 就带 XML 声明，实测踩过）。
-        if (!c.readText("?>", &pi)) { *err = "XML 声明没闭合"; return false; }
+        // Must search for **"?>"** (two chars): searching only for '?' would hit the '?' of "<?"
+        // itself, so the declaration could never be skipped (the phone's plist includes an XML declaration; hit this in practice).
+        if (!c.readText("?>", &pi)) { *err = "XML declaration is not closed"; return false; }
         c.skipSpace();
     }
     while (c.startsWith("<!")) {
-        if (!c.skipPast('>')) { *err = "DOCTYPE 没闭合"; return false; }
+        if (!c.skipPast('>')) { *err = "DOCTYPE is not closed"; return false; }
         c.skipSpace();
     }
     if (!c.startsWith("<plist")) {
-        *err = "不是 plist（开头是 " + xml.substr(0, 20) + "）";
+        *err = "Not a plist (starts with " + xml.substr(0, 20) + ")";
         return false;
     }
     bool selfClosing = false;
     if (!c.skipStartTag(&selfClosing)) {
-        *err = "plist 开始标签没闭合";
+        *err = "plist start tag is not closed";
         return false;
     }
     if (!parseValue(c, out, err)) return false;

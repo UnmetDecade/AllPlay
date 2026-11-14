@@ -1,27 +1,27 @@
 /**
  * @file   usbmux.h
- * @brief  usbmux v2 + 迷你 TCP：在 USBMUX 那条 bulk 管道上开出多条"TCP 连接"
+ * @brief  usbmux v2 + mini TCP: open multiple "TCP connections" over the USBMUX bulk pipe
  * @author blt
  */
 
 // ============================================================================
-// core/usb/usbmux.h —— usbmux v2 + 迷你 TCP
+// core/usb/usbmux.h — usbmux v2 + mini TCP
 // ============================================================================
-// 有线 CarPlay 的控制面从这条管道开始：
+// The wired CarPlay control plane starts from this pipe:
 //
-//   USBMUX 口(bulk) → usbmux v2 帧 → 迷你 TCP → 手机:62078(lockdown)
-//                                            → 手机:carkit 服务端口
+//   USBMUX port (bulk) → usbmux v2 frames → mini TCP → phone:62078 (lockdown)
+//                                                → phone:carkit service port
 //
-// 它是一个**极简**的 TCP：没有重传、没有滑窗、没有乱序重组、checksum 恒为 0、
-// 窗口恒为 512 —— 因为对端是同一台机器用同一套简化的栈在说话，而且底下是 USB bulk，
-// 本来就不丢包。**别拿它当通用 TCP 用。**
+// It is a **minimal** TCP: no retransmission, no sliding window, no out-of-order reassembly, checksum always 0,
+// window always 512 — because the peer is the same machine speaking the same simplified stack, and the layer below is USB bulk,
+// which never drops packets anyway. **Do not use it as a general-purpose TCP.**
 //
-// 多路复用**只按"本端源端口"**：本端从 1 开始分配，收到帧时用 TCP 头的**目的端口**
-// 字段（对端把我们本端的源端口回填在那儿）查表投递，查不到就丢弃。没有别的连接标识。
+// Multiplexing is **by "local source port" only**: local ports are allocated from 1; on receive we look up the TCP header's **destination port**
+// field (where the peer echoes our local source port) and dispatch, dropping if not found. There is no other connection identifier.
 //
-// 分帧靠 MUX 头偏移 4 的 length（整帧长度，含 16 字节头，合法范围 16..65536）。
-// 另有一个历史怪癖：个别回复会比声明的多出 4 字节，只允许在"版本应答"和
-// "无 payload 的 SYN-ACK"之后、且下一帧确实是 TCP 帧时跳过 —— 见 takeFrame。
+// Framing uses the length at MUX header offset 4 (whole frame length, including the 16-byte header, valid range 16..65536).
+// There is also a historical quirk: some replies are 4 bytes longer than declared; skipping is allowed only after a "version reply" and
+// a "payload-less SYN-ACK", and only when the next frame really is a TCP frame — see takeFrame.
 #pragma once
 
 #include "port/stream.h"
@@ -40,7 +40,7 @@ namespace core::usb {
 
 class UsbMuxChannel;
 
-/// 一条物理 USBMUX 管道上的 v2 会话。**不拥有**管道（管道由调用方持有，且必须比它活得久）。
+/// A v2 session on one physical USBMUX pipe. **Does not own** the pipe (held by the caller, and must outlive this object).
 class UsbMux : public IMux {
 public:
     explicit UsbMux(IByteStream& pipe);
@@ -49,14 +49,14 @@ public:
     UsbMux(const UsbMux&) = delete;
     UsbMux& operator=(const UsbMux&) = delete;
 
-    /// 版本协商 + setup。任何 connectTcp 之前必须先调一次。
-    /// 失败返回 false，err 里是给人看的原因。
+    /// Version negotiation + setup. Must be called once before any connectTcp.
+    /// Returns false on failure; err is a human-readable reason.
     bool begin(std::string* err) override;
 
-    /// 开一条到手机 port 的迷你 TCP（典型：62078 = lockdown）。
-    /// 成功返回该连接的字节流（归调用方所有）；失败返回 nullptr。
+    /// Open a mini TCP to phone port (typical: 62078 = lockdown).
+    /// Returns the connection's byte stream on success (owned by the caller); nullptr on failure.
     ///
-    /// ⚠️ 返回的流**必须比本对象先析构** —— 它内部会回调本对象发 ACK。
+    /// ⚠️ The returned stream **must be destroyed before this object** — it calls back into this object to send ACKs.
     std::unique_ptr<IByteStream> connectTcp(uint16_t port, int timeoutMs,
                                             std::string* err) override;
 
@@ -65,8 +65,8 @@ private:
 
     struct Frame {
         uint32_t            protocol = 0;
-        uint32_t            length = 0;     ///< 整帧长度（含 16 字节头）
-        uint32_t            word8 = 0;      ///< 偏移 8：版本应答里是版本号，TCP 帧里是 0xfaceface
+        uint32_t            length = 0;     ///< whole frame length (including the 16-byte header)
+        uint32_t            word8 = 0;      ///< offset 8: version number in a version reply, 0xfaceface in a TCP frame
         uint16_t            sequence = 0;
         uint16_t            ack = 0;
         std::vector<uint8_t> payload;
@@ -78,13 +78,13 @@ private:
     void failAll(const char* why);
     bool isClosed();
 
-    /// 从 rx_ 里取一帧（调用方须持 rxMu_）。不足一帧返回 false。
+    /// Take one frame from rx_ (caller must hold rxMu_). Returns false if less than a frame is available.
     bool takeFrame(Frame* out);
 
-    /// 发一个 MUX 帧。word8 只有版本消息是版本号，其余都是 kMuxMagic。
+    /// Send a MUX frame. word8 is the version number only for version messages, otherwise kMuxMagic.
     bool sendFrame(uint32_t protocol, uint32_t word8, const uint8_t* payload, size_t n);
 
-    /// 发一个迷你 TCP 段（payload 可为空）
+    /// Send a mini TCP segment (payload may be empty)
     bool sendTcp(uint16_t srcPort, uint16_t dstPort, uint32_t seq, uint32_t ack,
                  uint8_t flags, const uint8_t* payload, size_t n);
 
@@ -94,11 +94,11 @@ private:
     std::thread                        reader_;
 
     std::mutex                         rxMu_;
-    std::vector<uint8_t>               rx_;             ///< 未成帧的残留字节
+    std::vector<uint8_t>               rx_;             ///< leftover bytes not yet forming a frame
     bool                               prevAllowsPadding_ = false;
 
-    std::mutex                         writeMu_;        ///< 串行化对管道的写
-    uint16_t                           nextMuxSeq_ = 0; ///< MUX 层序号（版本消息用掉 0）
+    std::mutex                         writeMu_;        ///< serializes writes to the pipe
+    uint16_t                           nextMuxSeq_ = 0; ///< MUX-layer sequence number (version message uses 0)
     uint16_t                           muxAck_ = 0;
 
     std::mutex                         chanMu_;
