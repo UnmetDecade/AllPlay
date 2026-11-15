@@ -463,7 +463,7 @@ bool loadWiredPairIdentity(const std::string& stateDir, const std::string& key,
 
     WiredPairIdentity id;
     if (!loadWiredPairCerts(stateDir, key, &id, found, err)) return false;
-    if (!*found) return true;
+    if (found != nullptr && !*found) return true;
     if (!loadWiredPairIds(stateDir, key, &id.hostId, &id.systemBuid)) {
         if (found != nullptr) *found = false;
         return true;

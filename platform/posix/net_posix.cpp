@@ -8,13 +8,15 @@
 #include "common/log.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>             // FD_CLOEXEC
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <spawn.h>             // posix_spawnp (wired NCM bring-up, no shell)
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/wait.h>          // pclose exit codes (wired NCM bring-up goes through the shell)
+#include <sys/wait.h>          // waitpid exit codes (wired NCM bring-up)
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -36,6 +38,10 @@
 #  include <dirent.h>          // /sys/class/net enumeration (wired CarPlay NCM interface)
 #  include <cstdlib>
 #endif
+
+// The environment handed to posix_spawnp(). It must be the global one: declaring it inside the
+// anonymous namespace below would give it internal linkage and never define it.
+extern char** environ;
 
 namespace allplay::posix {
 
@@ -538,26 +544,78 @@ std::unique_ptr<core::IUdpSocket> makeUdpSocket()
 
 namespace {
 
-/// Run a shell command and collect its output into out. Returns the exit code (-1 = could not start the process).
-/// Why the shell instead of netlink: the jobs here (detach NetworkManager, bring up, pin an address with
-/// nodad) are one-liners in ip/nmcli, while hand-written netlink would take hundreds of lines and be easier to get wrong. This is a
-/// **boot-time bring-up path**, not a hot path, so one process spawn does not matter.
-int runCmd(const std::string& cmd, std::string* out)
+/// Interface names come from the kernel (sysfs enumeration); the pinned address can come from the
+/// command line. Neither is trusted enough to reach a shell, so they are passed as argv *and*
+/// validated here: `ip` would treat a leading dash as an option.
+bool isIfaceName(const std::string& s)
 {
-    const std::string full = cmd + " 2>&1";
-    std::FILE*        f    = ::popen(full.c_str(), "r");
-    if (f == nullptr) return -1;
+    if (s.empty() || s.size() > 15) return false;  // IFNAMSIZ - 1
+    for (char c : s) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                        c == '_' || c == '-' || c == '.' || c == ':' || c == '@';
+        if (!ok) return false;
+    }
+    return true;
+}
 
-    std::string  acc;
-    char         buf[256];
-    size_t       n = 0;
-    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) acc.append(buf, n);
-    const int status = ::pclose(f);
+bool isHexAddress(const std::string& s)
+{
+    if (s.empty() || s.size() > 45) return false;
+    for (char c : s) {
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
+                        c == ':' || c == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// Run a program with an explicit argument vector and collect stdout+stderr into out.
+/// Returns the exit code (-1 = could not start the process).
+/// Why exec instead of netlink: the jobs here (detach NetworkManager, bring up, pin an address with
+/// nodad) are one-liners in ip/nmcli, while hand-written netlink would take hundreds of lines and be
+/// easier to get wrong. This is a **boot-time bring-up path**, not a hot path, so one process spawn
+/// does not matter. No shell is involved: a quote or `;` in an argument must stay an argument.
+int runArgv(const std::vector<std::string>& argv, std::string* out)
+{
+    if (argv.empty()) return -1;
+
+    int fds[2];
+    if (::pipe(fds) != 0) return -1;
+    (void)::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+
+    std::vector<char*> args;
+    args.reserve(argv.size() + 1);
+    for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    args.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    ::posix_spawn_file_actions_init(&actions);
+    ::posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    ::posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
+    ::posix_spawn_file_actions_addclose(&actions, fds[0]);
+    ::posix_spawn_file_actions_addclose(&actions, fds[1]);
+
+    pid_t     pid     = -1;
+    const int   spawnRc = ::posix_spawnp(&pid, args[0], &actions, nullptr, args.data(), environ);
+    ::posix_spawn_file_actions_destroy(&actions);
+    ::close(fds[1]);
+    if (spawnRc != 0) {
+        ::close(fds[0]);
+        return -1;
+    }
+
+    std::string acc;
+    char        buf[256];
+    ssize_t     n = 0;
+    while ((n = ::read(fds[0], buf, sizeof buf)) > 0) acc.append(buf, static_cast<size_t>(n));
+    ::close(fds[0]);
+
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     if (out != nullptr) *out = acc;
 
-    if (status < 0) return -1;
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    return -1;
+    if (!WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
 }
 
 std::string trimNewlines(std::string s)
@@ -583,24 +641,32 @@ bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLoca
         return false;
     }
     out->ifname = ifname;
+    if (!isIfaceName(ifname)) {
+        if (err != nullptr) *err = "refusing to operate on interface name with unexpected characters: " + ifname;
+        return false;
+    }
 
     uint8_t mac[6];
     if (networkInfo().interfaceMAC(ifname, mac)) out->mac = core::deviceIdFromMAC(mac);
 
     const std::string want = wantLinkLocal.empty() ? std::string("fe80::2") : wantLinkLocal;
+    if (!isHexAddress(want)) {
+        if (err != nullptr) *err = "invalid link-local address: " + want;
+        return false;
+    }
 
     // 1. Detach NetworkManager first. It treats this cable as a "wired connection" and asks for
     //    DHCP (there is no DHCP server on a point-to-point link), stays stuck in connecting, and
     //    may wipe our pinned address at any time. Failing to detach is not fatal (some systems do not have NM); continue.
     std::string log;
-    if (runCmd("nmcli device set '" + ifname + "' managed no", &log) != 0) {
+    if (runArgv({"nmcli", "device", "set", ifname, "managed", "no"}, &log) != 0) {
         LOG_INFO("[wired-ncm] failed to unmanage via nmcli (NM not installed? harmless): %s", trimNewlines(log).c_str());
     } else {
         out->unmanaged = true;
     }
 
     // 2. Bring it up. A freshly created interface is DOWN by default, and addresses cannot be pinned on a DOWN link.
-    if (runCmd("ip link set dev '" + ifname + "' up", &log) != 0) {
+    if (runArgv({"ip", "link", "set", "dev", ifname, "up"}, &log) != 0) {
         if (err != nullptr) *err = "ip link set up failed: " + trimNewlines(log);
         return false;
     }
@@ -614,7 +680,7 @@ bool prepareWiredNcm(int usbBus, int usbAddress, const std::string& wantLinkLoca
         if (a == want) hasWant = true;
 
     if (!hasWant) {
-        if (runCmd("ip -6 addr add " + want + "/64 dev '" + ifname + "' nodad", &log) != 0) {
+        if (runArgv({"ip", "-6", "addr", "add", want + "/64", "dev", ifname, "nodad"}, &log) != 0) {
             if (err != nullptr) {
                 *err = "failed to pin " + want + "/64: " + trimNewlines(log);
             }

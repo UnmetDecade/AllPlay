@@ -93,11 +93,16 @@ bool Receiver::start(const ReceiverConfig& cfg, const core::PlatformServices& se
         auto l = services.makeTcpListener();
         if (l && l->start(bindAddr, 0, &rerr)) listener = std::move(l);
     } else {
-        for (uint16_t p = cfg_.port; p < cfg_.port + 20; ++p) {
+        // Walk forward in a wider type: `cfg_.port + 20` promotes to int, and comparing a uint16_t
+        // loop variable against it would wrap at 65535. Stop before the port space ends.
+        const uint32_t first = cfg_.port;
+        uint32_t       last  = first + 20u;
+        if (last > 65536u) last = 65536u;
+        for (uint32_t p = first; p < last; ++p) {
             auto l = services.makeTcpListener();
-            if (l && l->start(bindAddr, p, &rerr)) {
+            if (l && l->start(bindAddr, static_cast<uint16_t>(p), &rerr)) {
                 listener = std::move(l);
-                if (p != cfg_.port) LOG_WARN("Port %u is in use, switching to %u", cfg_.port, p);
+                if (p != cfg_.port) LOG_WARN("Port %u is in use, switching to %u", static_cast<unsigned>(cfg_.port), static_cast<unsigned>(p));
                 break;
             }
         }
