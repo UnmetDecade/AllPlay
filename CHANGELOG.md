@@ -28,6 +28,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`scripts/check-coverage.py`**: enforces a global core coverage floor plus per-file
   floors for the crypto and wire-format modules.
 
+### Fixed
+
+- **CodeQL findings from the first analysis run**: wired NCM bring-up no longer passes
+  the interface name or link-local address through a shell (`cpp/command-line-injection`),
+  the RTSP port fallback no longer wraps at 65535, and an optional out-parameter in the
+  wired pairing record loader is checked before it is dereferenced.
+- **Landing-page document links** now point at the GitHub-rendered copies under
+  `docs/`; linking the raw `.md` files made Pages serve them as plain text.
+
 ### Open
 
 - **Productized MFi identity**: the `0xAA00 RequestCertificate` gate requires an accessory
